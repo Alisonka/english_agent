@@ -1,0 +1,77 @@
+"""write_lesson: TopicNotes in, validated Lesson out.
+
+One forced tool call. The model fills the pedagogical fields; the code owns
+provenance (`topic_id`, `cefr`, `sources`) so the lesson can never cite a page
+the research step did not actually read. A validation failure is fed back to the
+model once; a second failure raises.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from pydantic import ValidationError
+
+from english_agent.llm import ChatLLM
+from english_agent.models.curriculum import CurriculumTopic
+from english_agent.models.lesson import Lesson
+from english_agent.research.models import TopicNotes
+
+_PROMPT = (Path(__file__).resolve().parent / "prompts" / "write_lesson_system.md").read_text(encoding="utf-8")
+_OWNED_BY_CODE = ("topic_id", "cefr", "sources")
+
+
+class LessonWriteError(Exception):
+    pass
+
+
+def _submit_tool() -> dict[str, Any]:
+    schema = Lesson.model_json_schema()
+    for field in _OWNED_BY_CODE:
+        schema["properties"].pop(field, None)
+    schema["required"] = [name for name in schema.get("required", []) if name not in _OWNED_BY_CODE]
+    return {
+        "type": "function",
+        "function": {"name": "submit_lesson", "description": "Submit the finished lesson.", "parameters": schema},
+    }
+
+
+def write_lesson(llm: ChatLLM, topic: CurriculumTopic, notes: TopicNotes, *, attempts: int = 2) -> Lesson:
+    tool = _submit_tool()
+    tool_choice = {"type": "function", "function": {"name": "submit_lesson"}}
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": _PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Topic: {topic.title_en} / {topic.title_ru} (id: {topic.id}, level A2)\n\n"
+                f"Research notes (JSON):\n{notes.model_dump_json(indent=2, ensure_ascii=False)}"
+            ),
+        },
+    ]
+
+    last_error = "model did not call submit_lesson"
+    for _ in range(attempts):
+        turn = llm.chat(messages, [tool], tool_choice=tool_choice)
+        messages.append(turn.to_message())
+        call = next((c for c in turn.tool_calls if c.name == "submit_lesson"), None)
+        if call is None:
+            messages.append({"role": "user", "content": "Call submit_lesson with the lesson."})
+            continue
+
+        payload = {**call.arguments, "topic_id": topic.id, "cefr": "A2", "sources": [notes.source.model_dump()]}
+        try:
+            return Lesson.model_validate(payload)
+        except ValidationError as error:
+            last_error = json.dumps(error.errors(include_url=False)[:5], ensure_ascii=False, default=str)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": f"Lesson rejected, fix these problems and call submit_lesson again: {last_error}",
+                }
+            )
+
+    raise LessonWriteError(f"could not produce a valid lesson after {attempts} attempts: {last_error}")

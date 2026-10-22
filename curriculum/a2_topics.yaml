@@ -1,0 +1,366 @@
+# A2 curriculum skeleton: topic titles only. Lesson text is researched at send time.
+# Order is the send sequence. Do not rename ids once a topic has been sent.
+version: 1
+cefr: A2
+explanation_language: ru
+example_language: en
+topics:
+  - id: be_present
+    title_en: "am / is / are"
+    title_ru: "be в настоящем — am, is, are"
+    order: 1
+    tags: [be, present]
+
+  - id: have_got
+    title_en: "have got"
+    title_ru: "have got — есть / имеется"
+    order: 2
+    tags: [have, possession]
+
+  - id: present_simple_habits
+    title_en: Present Simple for habits and facts
+    title_ru: Present Simple — привычки и факты
+    order: 3
+    tags: [tenses, present, present_simple]
+
+  - id: present_simple_third_person
+    title_en: Present Simple third person -s
+    title_ru: Present Simple — окончание -s в 3-м лице
+    order: 4
+    tags: [tenses, present, present_simple]
+
+  - id: present_continuous_now
+    title_en: Present Continuous for now
+    title_ru: Present Continuous — действие сейчас
+    order: 5
+    tags: [tenses, present, present_continuous]
+
+  - id: present_simple_vs_continuous
+    title_en: Present Simple vs Present Continuous
+    title_ru: Present Simple и Present Continuous
+    order: 6
+    tags: [tenses, present, contrast]
+
+  - id: stative_verbs_a2
+    title_en: Stative verbs
+    title_ru: Глаголы состояния (stative verbs)
+    order: 7
+    tags: [tenses, present, stative]
+
+  - id: past_simple_regular
+    title_en: Past Simple regular verbs
+    title_ru: Past Simple — правильные глаголы
+    order: 8
+    tags: [tenses, past, past_simple]
+
+  - id: past_simple_irregular
+    title_en: Past Simple irregular verbs
+    title_ru: Past Simple — неправильные глаголы
+    order: 9
+    tags: [tenses, past, past_simple]
+
+  - id: past_simple_questions_negatives
+    title_en: Past Simple questions and negatives
+    title_ru: Past Simple — вопросы и отрицания
+    order: 10
+    tags: [tenses, past, past_simple, questions]
+
+  - id: past_continuous
+    title_en: Past Continuous
+    title_ru: Past Continuous — действие в конкретный момент в прошлом
+    order: 11
+    tags: [tenses, past, past_continuous]
+
+  - id: past_simple_vs_continuous
+    title_en: Past Simple vs Past Continuous
+    title_ru: Past Simple и Past Continuous
+    order: 12
+    tags: [tenses, past, contrast]
+
+  - id: there_is_are
+    title_en: there is / there are
+    title_ru: there is / there are
+    order: 13
+    tags: [there, existence]
+
+  - id: there_was_were
+    title_en: there was / there were
+    title_ru: there was / there were
+    order: 14
+    tags: [there, existence, past]
+
+  - id: articles_a_an
+    title_en: "a / an"
+    title_ru: "Артикли a и an"
+    order: 15
+    tags: [articles]
+
+  - id: articles_the_zero
+    title_en: "the vs zero article"
+    title_ru: "Артикль the и нулевой артикль"
+    order: 16
+    tags: [articles]
+
+  - id: countable_uncountable
+    title_en: Countable and uncountable nouns
+    title_ru: Исчисляемые и неисчисляемые существительные
+    order: 17
+    tags: [nouns, quantifiers]
+
+  - id: some_any
+    title_en: some and any
+    title_ru: some и any
+    order: 18
+    tags: [quantifiers]
+
+  - id: much_many_a_lot_of
+    title_en: "much / many / a lot of"
+    title_ru: "much, many, a lot of"
+    order: 19
+    tags: [quantifiers]
+
+  - id: a_few_a_little
+    title_en: "a few / a little"
+    title_ru: "a few и a little"
+    order: 20
+    tags: [quantifiers]
+
+  - id: too_enough
+    title_en: too and enough
+    title_ru: too и enough
+    order: 21
+    tags: [degree]
+
+  - id: comparatives
+    title_en: Comparatives
+    title_ru: Сравнительная степень прилагательных
+    order: 22
+    tags: [adjectives, comparison]
+
+  - id: superlatives
+    title_en: Superlatives
+    title_ru: Превосходная степень прилагательных
+    order: 23
+    tags: [adjectives, comparison]
+
+  - id: as_as
+    title_en: as ... as
+    title_ru: as ... as — сравнение равенства
+    order: 24
+    tags: [adjectives, comparison]
+
+  - id: going_to
+    title_en: going to for plans and predictions
+    title_ru: going to — планы и предсказания
+    order: 25
+    tags: [tenses, future]
+
+  - id: present_continuous_future
+    title_en: Present Continuous for future arrangements
+    title_ru: Present Continuous — договорённости о будущем
+    order: 26
+    tags: [tenses, future, present_continuous]
+
+  - id: will_future
+    title_en: will for future
+    title_ru: will — будущее, обещания, решения в момент речи
+    order: 27
+    tags: [tenses, future]
+
+  - id: will_vs_going_to
+    title_en: will vs going to
+    title_ru: will и going to
+    order: 28
+    tags: [tenses, future, contrast]
+
+  - id: can_could_ability
+    title_en: "can / could for ability and requests"
+    title_ru: "can и could — умение и просьбы"
+    order: 29
+    tags: [modals]
+
+  - id: must_have_to
+    title_en: must and have to
+    title_ru: must и have to
+    order: 30
+    tags: [modals, obligation]
+
+  - id: mustnt_dont_have_to
+    title_en: mustn't vs don't have to
+    title_ru: mustn't и don't have to
+    order: 31
+    tags: [modals, obligation, contrast]
+
+  - id: should_advice
+    title_en: should for advice
+    title_ru: should — совет
+    order: 32
+    tags: [modals]
+
+  - id: would_like
+    title_en: would like
+    title_ru: would like — вежливое желание
+    order: 33
+    tags: [modals, polite]
+
+  - id: adverbs_of_frequency
+    title_en: Adverbs of frequency
+    title_ru: Наречия частотности
+    order: 34
+    tags: [adverbs, present_simple]
+
+  - id: prepositions_time_in_on_at
+    title_en: "Prepositions of time: in, on, at"
+    title_ru: "Предлоги времени in, on, at"
+    order: 35
+    tags: [prepositions, time]
+
+  - id: prepositions_place
+    title_en: Prepositions of place
+    title_ru: Предлоги места
+    order: 36
+    tags: [prepositions, place]
+
+  - id: possessive_s
+    title_en: Possessive 's
+    title_ru: Притяжательный 's
+    order: 37
+    tags: [nouns, possession]
+
+  - id: object_pronouns
+    title_en: Object pronouns
+    title_ru: Местоимения в объектном падеже
+    order: 38
+    tags: [pronouns]
+
+  - id: question_forms_do_support
+    title_en: Questions with do / does / did
+    title_ru: Вопросы с do / does / did
+    order: 39
+    tags: [questions]
+
+  - id: how_much_how_many
+    title_en: How much / How many
+    title_ru: How much и How many
+    order: 40
+    tags: [questions, quantifiers]
+
+  - id: present_perfect_ever_never
+    title_en: Present Perfect with ever / never
+    title_ru: Present Perfect — ever и never
+    order: 41
+    tags: [tenses, present_perfect]
+
+  - id: present_perfect_just_already_yet
+    title_en: Present Perfect with just / already / yet
+    title_ru: Present Perfect — just, already, yet
+    order: 42
+    tags: [tenses, present_perfect]
+
+  - id: present_perfect_vs_past_simple
+    title_en: Present Perfect vs Past Simple
+    title_ru: Present Perfect и Past Simple
+    order: 43
+    tags: [tenses, contrast, present_perfect, past_simple]
+
+  - id: been_vs_gone
+    title_en: been vs gone
+    title_ru: been и gone
+    order: 44
+    tags: [tenses, present_perfect]
+
+  - id: for_since_ago
+    title_en: "for / since / ago"
+    title_ru: "for, since и ago"
+    order: 45
+    tags: [tenses, time, present_perfect, past_simple]
+
+  - id: first_conditional
+    title_en: First conditional
+    title_ru: First conditional — реальное будущее
+    order: 46
+    tags: [conditionals]
+
+  - id: when_clauses_present
+    title_en: when-clauses with present for future
+    title_ru: Придаточные с when — настоящее вместо будущего
+    order: 47
+    tags: [time_clauses, future]
+
+  - id: verb_ing_like_love_hate
+    title_en: "like / love / hate + -ing"
+    title_ru: "like, love, hate + -ing"
+    order: 48
+    tags: [verb_patterns]
+
+  - id: infinitive_of_purpose
+    title_en: to-infinitive of purpose
+    title_ru: Infinitive of purpose — to + глагол
+    order: 49
+    tags: [verb_patterns]
+
+  - id: verb_to_infinitive_want_need
+    title_en: "want / need / decide + to"
+    title_ru: "want, need, decide + to"
+    order: 50
+    tags: [verb_patterns]
+
+  - id: present_passive
+    title_en: Present Simple passive
+    title_ru: Passive — Present Simple
+    order: 51
+    tags: [passive]
+
+  - id: past_passive
+    title_en: Past Simple passive
+    title_ru: Passive — Past Simple
+    order: 52
+    tags: [passive, past]
+
+  - id: defining_relative_who_which_that
+    title_en: "Defining relative clauses: who / which / that"
+    title_ru: "Определительные придаточные who, which, that"
+    order: 53
+    tags: [relative_clauses]
+
+  - id: because_so_but_although
+    title_en: "because / so / but / although"
+    title_ru: "because, so, but, although"
+    order: 54
+    tags: [conjunctions]
+
+  - id: somebody_anybody_nobody
+    title_en: "somebody / anybody / nobody"
+    title_ru: "somebody, anybody, nobody"
+    order: 55
+    tags: [pronouns, quantifiers]
+
+  - id: make_vs_do
+    title_en: make vs do
+    title_ru: make и do
+    order: 56
+    tags: [vocabulary, verbs]
+
+  - id: say_vs_tell
+    title_en: say vs tell
+    title_ru: say и tell
+    order: 57
+    tags: [vocabulary, verbs]
+
+  - id: still_yet_already
+    title_en: still / yet / already
+    title_ru: still, yet и already
+    order: 58
+    tags: [adverbs, present_perfect]
+
+  - id: both_either_neither
+    title_en: both / either / neither
+    title_ru: both, either и neither
+    order: 59
+    tags: [quantifiers]
+
+  - id: look_feel_sound_adjective
+    title_en: look / feel / sound + adjective
+    title_ru: look, feel, sound + прилагательное
+    order: 60
+    tags: [verbs, adjectives]

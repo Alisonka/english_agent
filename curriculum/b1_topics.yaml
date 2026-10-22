@@ -1,0 +1,368 @@
+# B1 curriculum skeleton: topic titles only. Lesson text is researched at send time.
+# Order is the send sequence. Do not rename ids once a topic has been sent.
+# Topics follow the standard B1 (intermediate) syllabus: it builds on A2 and
+# revisits a few A2 areas at a deeper level (marked with the `review` tag).
+version: 1
+cefr: B1
+explanation_language: ru
+example_language: en
+topics:
+  - id: present_tenses_review
+    title_en: Present Simple vs Present Continuous (review)
+    title_ru: Present Simple и Present Continuous — повторение, глаголы состояния
+    order: 1
+    tags: [tenses, present, review]
+
+  - id: present_perfect_vs_past_simple_b1
+    title_en: Present Perfect vs Past Simple (deeper)
+    title_ru: Present Perfect и Past Simple — углублённо
+    order: 2
+    tags: [tenses, contrast, present_perfect, past_simple, review]
+
+  - id: present_perfect_continuous
+    title_en: Present Perfect Continuous
+    title_ru: Present Perfect Continuous — действие, длившееся до настоящего
+    order: 3
+    tags: [tenses, present_perfect, continuous]
+
+  - id: present_perfect_simple_vs_continuous
+    title_en: Present Perfect Simple vs Continuous
+    title_ru: Present Perfect Simple и Present Perfect Continuous
+    order: 4
+    tags: [tenses, present_perfect, contrast]
+
+  - id: how_long_for_since
+    title_en: "How long ...? with for / since"
+    title_ru: "How long ...? — продолжительность с for и since"
+    order: 5
+    tags: [tenses, present_perfect, time]
+
+  - id: past_perfect
+    title_en: Past Perfect
+    title_ru: Past Perfect — действие до другого действия в прошлом
+    order: 6
+    tags: [tenses, past, past_perfect]
+
+  - id: past_perfect_continuous
+    title_en: Past Perfect Continuous
+    title_ru: Past Perfect Continuous — длительное действие до момента в прошлом
+    order: 7
+    tags: [tenses, past, past_perfect, continuous]
+
+  - id: narrative_tenses
+    title_en: Narrative tenses (past simple, continuous, perfect)
+    title_ru: Времена в рассказе — past simple, continuous, perfect
+    order: 8
+    tags: [tenses, past, narrative]
+
+  - id: used_to
+    title_en: used to for past habits and states
+    title_ru: used to — прошлые привычки и состояния
+    order: 9
+    tags: [past, habits]
+
+  - id: would_past_habits
+    title_en: would for repeated actions in the past
+    title_ru: would — повторяющиеся действия в прошлом
+    order: 10
+    tags: [past, habits, modals]
+
+  - id: be_used_to_get_used_to
+    title_en: "be used to / get used to"
+    title_ru: "be used to и get used to — привыкать к чему-то"
+    order: 11
+    tags: [verb_patterns, habits]
+
+  - id: future_prediction_will_going_to
+    title_en: will vs going to for predictions (review)
+    title_ru: will и going to — предсказания, повторение
+    order: 12
+    tags: [tenses, future, contrast, review]
+
+  - id: present_tenses_for_future
+    title_en: Present tenses for the future
+    title_ru: Настоящие времена для будущего — расписание и договорённости
+    order: 13
+    tags: [tenses, future, review]
+
+  - id: future_continuous
+    title_en: Future Continuous
+    title_ru: Future Continuous — действие в процессе в будущем
+    order: 14
+    tags: [tenses, future, continuous]
+
+  - id: future_perfect
+    title_en: Future Perfect
+    title_ru: Future Perfect — действие, завершённое к моменту в будущем
+    order: 15
+    tags: [tenses, future, perfect]
+
+  - id: future_time_clauses
+    title_en: "Future time clauses (when, until, as soon as)"
+    title_ru: "Придаточные времени — when, until, as soon as + настоящее"
+    order: 16
+    tags: [time_clauses, future]
+
+  - id: ability_can_could_be_able_to
+    title_en: "can / could / be able to for ability"
+    title_ru: "can, could и be able to — умение и возможность"
+    order: 17
+    tags: [modals, ability]
+
+  - id: modals_obligation_review
+    title_en: "must / have to / should (review)"
+    title_ru: "must, have to, should — обязанность, повторение"
+    order: 18
+    tags: [modals, obligation, review]
+
+  - id: mustnt_neednt
+    title_en: "mustn't / needn't / don't have to"
+    title_ru: "mustn't, needn't и don't have to"
+    order: 19
+    tags: [modals, obligation, contrast]
+
+  - id: should_ought_to
+    title_en: "should / ought to for advice"
+    title_ru: "should и ought to — совет"
+    order: 20
+    tags: [modals, advice]
+
+  - id: should_have_past
+    title_en: should have done for past criticism and regret
+    title_ru: should have done — критика и сожаление о прошлом
+    order: 21
+    tags: [modals, past, regret]
+
+  - id: had_better
+    title_en: had better
+    title_ru: had better — настойчивый совет
+    order: 22
+    tags: [modals, advice]
+
+  - id: would_rather
+    title_en: would rather
+    title_ru: would rather — предпочтение
+    order: 23
+    tags: [modals, preference]
+
+  - id: requests_offers_permission
+    title_en: "Requests, offers and permission (can, could, may, would)"
+    title_ru: "Просьбы, предложения и разрешение — can, could, may, would"
+    order: 24
+    tags: [modals, polite, functions]
+
+  - id: modals_deduction_present
+    title_en: "Modals of deduction: must / might / could / can't"
+    title_ru: "Модальные предположения — must, might, could, can't"
+    order: 25
+    tags: [modals, deduction]
+
+  - id: modals_deduction_past
+    title_en: "Past deduction: must have / might have / can't have"
+    title_ru: "Предположения о прошлом — must have, might have, can't have"
+    order: 26
+    tags: [modals, deduction, past]
+
+  - id: zero_conditional
+    title_en: Zero conditional
+    title_ru: Zero conditional — общие истины и правила
+    order: 27
+    tags: [conditionals]
+
+  - id: first_conditional_review
+    title_en: First conditional (review)
+    title_ru: First conditional — реальное будущее, повторение
+    order: 28
+    tags: [conditionals, review]
+
+  - id: second_conditional
+    title_en: Second conditional
+    title_ru: Second conditional — нереальное или маловероятное настоящее
+    order: 29
+    tags: [conditionals]
+
+  - id: first_vs_second_conditional
+    title_en: First vs Second conditional
+    title_ru: First и Second conditional — сравнение
+    order: 30
+    tags: [conditionals, contrast]
+
+  - id: third_conditional
+    title_en: Third conditional
+    title_ru: Third conditional — нереальное прошлое
+    order: 31
+    tags: [conditionals, past]
+
+  - id: wish_present
+    title_en: "wish / if only + past (present regrets)"
+    title_ru: "wish и if only + past — сожаление о настоящем"
+    order: 32
+    tags: [wish, unreal]
+
+  - id: wish_past
+    title_en: "wish / if only + past perfect (past regrets)"
+    title_ru: "wish и if only + past perfect — сожаление о прошлом"
+    order: 33
+    tags: [wish, unreal, past]
+
+  - id: unless_in_case
+    title_en: "unless / in case"
+    title_ru: "unless и in case"
+    order: 34
+    tags: [conditionals, conjunctions]
+
+  - id: passive_all_tenses
+    title_en: Passive in different tenses
+    title_ru: Пассивный залог в разных временах
+    order: 35
+    tags: [passive]
+
+  - id: passive_present_perfect
+    title_en: Present Perfect passive
+    title_ru: Passive — Present Perfect
+    order: 36
+    tags: [passive, present_perfect]
+
+  - id: passive_with_modals
+    title_en: Passive with modal verbs
+    title_ru: Пассив с модальными глаголами
+    order: 37
+    tags: [passive, modals]
+
+  - id: causative_have_something_done
+    title_en: Causative — have something done
+    title_ru: Каузатив — have something done
+    order: 38
+    tags: [passive, causative]
+
+  - id: reported_statements
+    title_en: Reported speech — statements
+    title_ru: Косвенная речь — утверждения
+    order: 39
+    tags: [reported_speech]
+
+  - id: reported_questions
+    title_en: Reported speech — questions
+    title_ru: Косвенная речь — вопросы
+    order: 40
+    tags: [reported_speech, questions]
+
+  - id: reported_commands
+    title_en: "Reported commands and requests (tell / ask + to)"
+    title_ru: "Косвенные команды и просьбы — tell / ask + to"
+    order: 41
+    tags: [reported_speech, verb_patterns]
+
+  - id: indirect_questions
+    title_en: "Indirect questions (Do you know where ...?)"
+    title_ru: "Косвенные вопросы — Do you know where ...?"
+    order: 42
+    tags: [questions, polite]
+
+  - id: question_tags
+    title_en: Question tags
+    title_ru: Разделительные вопросы (question tags)
+    order: 43
+    tags: [questions]
+
+  - id: subject_object_questions
+    title_en: Subject and object questions
+    title_ru: Вопросы к подлежащему и дополнению
+    order: 44
+    tags: [questions]
+
+  - id: gerunds_vs_infinitives
+    title_en: Gerunds and infinitives
+    title_ru: Герундий и инфинитив после глаголов
+    order: 45
+    tags: [verb_patterns]
+
+  - id: verb_ing_or_to_meaning_change
+    title_en: "Verb + -ing or to with meaning change (remember, stop, try)"
+    title_ru: "Глагол + -ing или to со сменой смысла — remember, stop, try"
+    order: 46
+    tags: [verb_patterns, contrast]
+
+  - id: gerund_after_prepositions
+    title_en: Gerund after prepositions
+    title_ru: Герундий после предлогов
+    order: 47
+    tags: [verb_patterns, prepositions]
+
+  - id: verb_object_infinitive
+    title_en: "Verb + object + to-infinitive (want someone to do)"
+    title_ru: "Глагол + дополнение + to — want somebody to do"
+    order: 48
+    tags: [verb_patterns]
+
+  - id: defining_vs_non_defining_relative
+    title_en: Defining and non-defining relative clauses
+    title_ru: Определительные и неопределительные придаточные
+    order: 49
+    tags: [relative_clauses]
+
+  - id: relative_clauses_whose_where_when
+    title_en: "Relative clauses with whose / where / when"
+    title_ru: "Относительные придаточные с whose, where, when"
+    order: 50
+    tags: [relative_clauses]
+
+  - id: ed_ing_adjectives
+    title_en: "-ed / -ing adjectives"
+    title_ru: "Прилагательные на -ed и -ing (bored / boring)"
+    order: 51
+    tags: [adjectives]
+
+  - id: comparative_modifiers
+    title_en: "Modifying comparatives (much / a bit / far + comparative)"
+    title_ru: "Усиление сравнений — much, a bit, far + сравнительная степень"
+    order: 52
+    tags: [adjectives, comparison]
+
+  - id: double_comparatives
+    title_en: "the ... the ... comparatives"
+    title_ru: "Конструкция the ... the ... (чем ..., тем ...)"
+    order: 53
+    tags: [adjectives, comparison]
+
+  - id: so_such
+    title_en: "so / such / so much / so many"
+    title_ru: "so, such, so much, so many"
+    order: 54
+    tags: [degree, emphasis]
+
+  - id: reflexive_pronouns
+    title_en: Reflexive pronouns
+    title_ru: Возвратные местоимения (myself, yourself ...)
+    order: 55
+    tags: [pronouns]
+
+  - id: all_both_none
+    title_en: "all / both / none of"
+    title_ru: "all, both, none of — количество"
+    order: 56
+    tags: [quantifiers]
+
+  - id: other_another_others
+    title_en: "another / other / others / the other"
+    title_ru: "another, other, others, the other"
+    order: 57
+    tags: [determiners]
+
+  - id: phrasal_verbs
+    title_en: Phrasal verbs
+    title_ru: Фразовые глаголы — значение и употребление
+    order: 58
+    tags: [vocabulary, phrasal_verbs]
+
+  - id: verb_preposition
+    title_en: Verb + preposition patterns
+    title_ru: Глаголы с предлогами (depend on, listen to ...)
+    order: 59
+    tags: [vocabulary, prepositions, verb_patterns]
+
+  - id: adjective_preposition
+    title_en: Adjective + preposition patterns
+    title_ru: Прилагательные с предлогами (afraid of, good at ...)
+    order: 60
+    tags: [vocabulary, prepositions, adjectives]

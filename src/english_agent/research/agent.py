@@ -1,0 +1,259 @@
+"""Research subagent: topic in, grounded TopicNotes (or "нет на сайте") out.
+
+Reasoning loop (ReAct with tool calling):
+
+    system prompt + topic
+      -> model proposes a tool call
+      -> code VALIDATES it against the rules below, EXECUTES it, appends the result
+      -> repeat until `finish` or the step budget runs out
+
+The model decides keywords, which URL looks promising, and whether a page really
+covers the topic. The code owns everything that must not depend on model mood:
+site order, step/fetch caps, URL allowlist, grounding of the final source.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import httpx
+from pydantic import ValidationError
+
+from english_agent.llm import ChatLLM, ToolCall
+from english_agent.models.curriculum import CurriculumTopic
+from english_agent.research.models import (
+    NOT_FOUND_MESSAGE,
+    PageContent,
+    ResearchResult,
+    ToolCallRecord,
+    TopicNotes,
+)
+from english_agent.research.sites import SITE_BY_NAME, SITE_ORDER, site_for_url
+from english_agent.research.tools import ResearchTools, tool_specs
+
+_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "research_system.md"
+
+
+class ToolError(Exception):
+    """Rule violation or tool failure. Reported back to the model, never raised out of the loop."""
+
+
+@dataclass #в dataclass аннотация типа не проверяется во время выполнения 
+class _State:
+    searches: dict[str, int] = field(default_factory=dict)
+    fetches: dict[str, int] = field(default_factory=dict)
+    offered_urls: set[str] = field(default_factory=set)
+    fetched: dict[str, PageContent] = field(default_factory=dict)
+    trajectory: list[ToolCallRecord] = field(default_factory=list)
+
+    @property
+    def sites_checked(self) -> list[str]:
+        return [name for name in SITE_ORDER if name in self.searches]
+
+    def unsearched_sites(self) -> list[str]:
+        return [name for name in SITE_ORDER if name not in self.searches]
+
+
+class ResearchAgent:
+    def __init__(
+        self,
+        llm: ChatLLM,
+        tools: ResearchTools,
+        *,
+        max_steps: int = 12,
+        max_fetches_per_site: int = 2,
+        max_searches_per_site: int = 3,
+        today: date | None = None,
+    ) -> None:
+        self._llm = llm
+        self._tools = tools
+        self._max_steps = max_steps
+        self._max_fetches_per_site = max_fetches_per_site
+        self._max_searches_per_site = max_searches_per_site
+        self._today = today or date.today()
+        self._system_prompt = _PROMPT_PATH.read_text(encoding="utf-8")
+        self._tool_specs = tool_specs()
+
+    # -- public ------------------------------------------------------------------
+
+    def run(self, topic: CurriculumTopic) -> ResearchResult:
+        state = _State()
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._system_prompt},
+            {"role": "user", "content": self._topic_message(topic)},
+        ]
+
+        for step in range(1, self._max_steps + 1):
+            turn = self._llm.chat(messages, self._tool_specs)
+            messages.append(turn.to_message())
+
+            if not turn.tool_calls:
+                messages.append(
+                    {"role": "user", "content": "Use a tool: search_site, fetch_page, or finish. Do not answer in prose."}
+                )
+                continue
+
+            for call in turn.tool_calls:
+                if call.name == "finish":
+                    try:
+                        return self._finish(topic, call, state, step)
+                    except ToolError as error:
+                        self._record(state, step, call, ok=False, summary=str(error))
+                        messages.append(self._tool_message(call, {"error": str(error)}))
+                        continue
+                try:
+                    payload = self._dispatch(call, state)
+                    self._record(state, step, call, ok=True, summary=self._summarize(call, payload))
+                except ToolError as error:
+                    payload = {"error": str(error)}
+                    self._record(state, step, call, ok=False, summary=str(error))
+                messages.append(self._tool_message(call, payload))
+
+        return ResearchResult(
+            topic_id=topic.id,
+            status="failed",
+            message=f"research budget exhausted after {self._max_steps} steps",
+            sites_checked=state.sites_checked,
+            steps=self._max_steps,
+            trajectory=state.trajectory,
+        )
+
+    # -- tool dispatch -------------------------------------------------------------
+
+    def _dispatch(self, call: ToolCall, state: _State) -> Any:
+        if call.name == "search_site":
+            return self._search_site(call.arguments, state)
+        if call.name == "fetch_page":
+            return self._fetch_page(call.arguments, state)
+        raise ToolError(f"unknown tool {call.name!r}")
+
+    def _search_site(self, arguments: dict[str, Any], state: _State) -> list[dict[str, Any]]:
+        site_name = arguments.get("site")
+        keywords = arguments.get("keywords")
+        if site_name not in SITE_BY_NAME:
+            raise ToolError(f"site must be one of {list(SITE_ORDER)}")
+        if not isinstance(keywords, list) or not keywords:
+            raise ToolError("keywords must be a non-empty list of strings")
+
+        position = SITE_ORDER.index(site_name)
+        skipped = [name for name in SITE_ORDER[:position] if name not in state.searches]
+        if skipped:
+            raise ToolError(f"sites must be tried in order; search {skipped[0]} before {site_name}")
+        if state.searches.get(site_name, 0) >= self._max_searches_per_site:
+            raise ToolError(f"search limit reached for {site_name}; move to the next site or finish")
+
+        state.searches[site_name] = state.searches.get(site_name, 0) + 1
+        hits = self._tools.search_site(SITE_BY_NAME[site_name], [str(keyword) for keyword in keywords])
+        state.offered_urls.update(hit.url for hit in hits)
+        return [hit.model_dump() for hit in hits]
+
+    def _fetch_page(self, arguments: dict[str, Any], state: _State) -> dict[str, Any]:
+        url = str(arguments.get("url", "")).strip()
+        site = site_for_url(url)
+        if site is None or not site.is_article(url):
+            raise ToolError("URL is outside the allowed sites")
+        if url not in state.offered_urls:
+            raise ToolError("only fetch URLs returned by search_site")
+        if state.fetches.get(site.name, 0) >= self._max_fetches_per_site:
+            raise ToolError(f"fetch limit reached for {site.name}; decide with what you have or move on")
+
+        if url in state.fetched:
+            page = state.fetched[url]
+        else:
+            try:
+                page = self._tools.fetch_page(url)
+            except (httpx.HTTPError, ValueError) as error:
+                raise ToolError(f"fetch failed: {error}") from error
+            state.fetches[site.name] = state.fetches.get(site.name, 0) + 1
+            state.fetched[url] = page
+
+        return {
+            "url": page.url,
+            "title": page.title,
+            "truncated": page.truncated,
+            "text": f"<page_content untrusted=\"true\">\n{page.text}\n</page_content>",
+        }
+
+    def _finish(self, topic: CurriculumTopic, call: ToolCall, state: _State, step: int) -> ResearchResult:
+        found = call.arguments.get("found")
+        if not isinstance(found, bool):
+            raise ToolError("finish requires boolean 'found'")
+
+        if not found:
+            missing = state.unsearched_sites()
+            if missing:
+                raise ToolError(f"cannot declare not found: you have not searched {', '.join(missing)}")
+            self._record(state, step, call, ok=True, summary=NOT_FOUND_MESSAGE)
+            return ResearchResult(
+                topic_id=topic.id,
+                status="not_found",
+                message=NOT_FOUND_MESSAGE,
+                sites_checked=state.sites_checked,
+                steps=step,
+                trajectory=state.trajectory,
+            )
+
+        raw_notes = call.arguments.get("notes")
+        if not isinstance(raw_notes, dict):
+            raise ToolError("found=true requires 'notes'")
+        source = raw_notes.get("source") if isinstance(raw_notes.get("source"), dict) else {}
+        url = str(source.get("url", "")).strip()
+        page = state.fetched.get(url)
+        if page is None:
+            raise ToolError("notes.source.url must be a page you fetched with fetch_page")
+        site = site_for_url(url)
+        assert site is not None  # guaranteed by fetch_page allowlist
+
+        # Code owns provenance fields: the model cannot mislabel site, title or date.
+        raw_notes["site"] = site.name
+        raw_notes["page_title"] = page.title
+        raw_notes["source"] = {"url": url, "title": page.title, "accessed_at": self._today.isoformat()}
+        try:
+            notes = TopicNotes.model_validate(raw_notes)
+        except ValidationError as error:
+            raise ToolError(f"notes failed validation: {error.errors()[:3]}") from error
+
+        self._record(state, step, call, ok=True, summary=f"found on {site.name}: {url}")
+        return ResearchResult(
+            topic_id=topic.id,
+            status="found",
+            message=f"found on {site.name}",
+            notes=notes,
+            sites_checked=state.sites_checked,
+            steps=step,
+            trajectory=state.trajectory,
+        )
+
+    # -- helpers -------------------------------------------------------------------
+
+    def _topic_message(self, topic: CurriculumTopic) -> str:
+        return (
+            f"Topic id: {topic.id}\n"
+            f"Title (en): {topic.title_en}\n"
+            f"Title (ru): {topic.title_ru}\n"
+            f"Level: A2\n"
+            f"Today: {self._today.isoformat()}\n"
+            "Start with englex."
+        )
+
+    @staticmethod
+    def _tool_message(call: ToolCall, payload: Any) -> dict[str, Any]:
+        return {"role": "tool", "tool_call_id": call.id, "content": json.dumps(payload, ensure_ascii=False)}
+
+    @staticmethod
+    def _record(state: _State, step: int, call: ToolCall, *, ok: bool, summary: str) -> None:
+        state.trajectory.append(
+            ToolCallRecord(step=step, tool=call.name, arguments=call.arguments, ok=ok, summary=summary[:300])
+        )
+
+    @staticmethod
+    def _summarize(call: ToolCall, payload: Any) -> str:
+        if call.name == "search_site":
+            return f"{len(payload)} hits on {call.arguments.get('site')}"
+        if call.name == "fetch_page":
+            return f"fetched {payload['url']} ({len(payload['text'])} chars)"
+        return call.name
