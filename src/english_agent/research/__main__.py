@@ -1,6 +1,6 @@
 """CLI: research one curriculum topic against the live sites.
 
-    uv run python -m english_agent.research --topic present_perfect_vs_past_simple
+uv run python -m english_agent.research --topic present_perfect_vs_past_simple
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
             tools,
             max_steps=settings.research_max_steps,
             max_fetches_per_site=settings.research_max_fetches_per_site,
+            curriculum_version=curriculum.version,
         )
         result = agent.run(topic)
 

@@ -1,6 +1,6 @@
 """Topic -> research -> lesson. The one place that wires the steps together.
 
-    uv run python -m english_agent.pipeline --topic there_is_are
+uv run python -m english_agent.pipeline --topic there_is_are
 """
 
 from __future__ import annotations
@@ -21,7 +21,9 @@ from english_agent.research.tools import LiveResearchTools
 from english_agent.writer import write_lesson
 
 
-def generate_lesson(topic: CurriculumTopic, settings: Settings) -> tuple[ResearchResult, Lesson | None]:
+def generate_lesson(
+    topic: CurriculumTopic, settings: Settings, *, curriculum_version: int | None = None
+) -> tuple[ResearchResult, Lesson | None]:
     """Returns the research result and, if a page was found, the lesson built from it."""
     with httpx.Client(
         timeout=settings.http_timeout_seconds,
@@ -35,12 +37,18 @@ def generate_lesson(topic: CurriculumTopic, settings: Settings) -> tuple[Researc
             tools,
             max_steps=settings.research_max_steps,
             max_fetches_per_site=settings.research_max_fetches_per_site,
+            curriculum_version=curriculum_version,
         )
         research = researcher.run(topic)
 
     if research.notes is None:
         return research, None
-    lesson = write_lesson(AnthropicLLM(settings, model=settings.writer_model), topic, research.notes)
+    lesson = write_lesson(
+        AnthropicLLM(settings, model=settings.writer_model),
+        topic,
+        research.notes,
+        curriculum_version=curriculum_version,
+    )
     return research, lesson
 
 
@@ -49,12 +57,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--topic", required=True, help="topic id from curriculum/a2_topics.yaml")
     args = parser.parse_args(argv)
 
-    topic = next((item for item in load_curriculum().topics if item.id == args.topic), None)
+    curriculum = load_curriculum()
+    topic = next((item for item in curriculum.topics if item.id == args.topic), None)
     if topic is None:
         print(f"unknown topic {args.topic!r}", file=sys.stderr)
         return 2
 
-    research, lesson = generate_lesson(topic, get_settings())
+    research, lesson = generate_lesson(topic, get_settings(), curriculum_version=curriculum.version)
     if lesson is None:
         print(research.message)
         return 1
