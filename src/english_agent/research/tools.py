@@ -35,9 +35,7 @@ MIN_KEYWORD_LENGTH = 3  # "a", "is", "to" match almost every slug and only add n
 def rank_urls(urls: list[str], keywords: list[str], limit: int) -> list[SearchHit]:
     """Score every URL by how many keywords occur in its slug. Pure, so it is unit-testable."""
     normalized_keywords = [
-        normalized
-        for keyword in keywords
-        if len(normalized := _normalize(keyword)) >= MIN_KEYWORD_LENGTH
+        normalized for keyword in keywords if len(normalized := _normalize(keyword)) >= MIN_KEYWORD_LENGTH
     ]
     if not normalized_keywords:
         return []
@@ -52,7 +50,7 @@ def rank_urls(urls: list[str], keywords: list[str], limit: int) -> list[SearchHi
     return hits[:limit]
 
 
-class ResearchTools(Protocol): #утиная типизация (duck typing)
+class ResearchTools(Protocol):  # утиная типизация (duck typing)
     def search_site(self, site: Site, keywords: list[str], limit: int = 5) -> list[SearchHit]: ...
 
     def fetch_page(self, url: str) -> PageContent: ...
@@ -69,7 +67,7 @@ class LiveResearchTools:
 
     def fetch_page(self, url: str) -> PageContent:
         site = site_for_url(url)
-        if site is None or not site.is_article(url): #allowlist - ограничиваем агента
+        if site is None or not site.is_article(url):  # allowlist - ограничиваем агента
             raise ValueError(f"URL is outside the allowed sites: {url}")
         response = self._http.get(url, follow_redirects=True)
         response.raise_for_status()

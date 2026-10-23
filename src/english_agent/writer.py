@@ -18,9 +18,10 @@ from english_agent.llm import ChatLLM
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.models.lesson import Lesson
 from english_agent.research.models import TopicNotes
+from english_agent.versions import SCHEMA_VERSIONS, build_provenance
 
 _PROMPT = (Path(__file__).resolve().parent / "prompts" / "write_lesson_system.md").read_text(encoding="utf-8")
-_OWNED_BY_CODE = ("topic_id", "cefr", "sources")
+_OWNED_BY_CODE = ("topic_id", "cefr", "sources", "provenance")
 
 
 class LessonWriteError(Exception):
@@ -34,13 +35,31 @@ def _submit_tool() -> dict[str, Any]:
     schema["required"] = [name for name in schema.get("required", []) if name not in _OWNED_BY_CODE]
     return {
         "type": "function",
-        "function": {"name": "submit_lesson", "description": "Submit the finished lesson.", "parameters": schema},
+        "function": {
+            "name": "submit_lesson",
+            "description": "Submit the finished lesson.",
+            "parameters": schema,
+        },
     }
 
 
-def write_lesson(llm: ChatLLM, topic: CurriculumTopic, notes: TopicNotes, *, attempts: int = 2) -> Lesson:
+def write_lesson(
+    llm: ChatLLM,
+    topic: CurriculumTopic,
+    notes: TopicNotes,
+    *,
+    attempts: int = 2,
+    curriculum_version: int | None = None,
+) -> Lesson:
     tool = _submit_tool()
     tool_choice = {"type": "function", "function": {"name": "submit_lesson"}}
+    provenance = build_provenance(
+        component="writer",
+        schema_version=SCHEMA_VERSIONS["lesson"],
+        model=getattr(llm, "model", None),
+        prompt_names=("write_lesson_system",),
+        curriculum_version=curriculum_version,
+    )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _PROMPT},
         {
@@ -61,7 +80,13 @@ def write_lesson(llm: ChatLLM, topic: CurriculumTopic, notes: TopicNotes, *, att
             messages.append({"role": "user", "content": "Call submit_lesson with the lesson."})
             continue
 
-        payload = {**call.arguments, "topic_id": topic.id, "cefr": "A2", "sources": [notes.source.model_dump()]}
+        payload = {
+            **call.arguments,
+            "topic_id": topic.id,
+            "cefr": "A2",
+            "sources": [notes.source.model_dump()],
+            "provenance": provenance,
+        }
         try:
             return Lesson.model_validate(payload)
         except ValidationError as error:

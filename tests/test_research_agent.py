@@ -28,14 +28,21 @@ SKYENG_URL = "https://skyeng.ru/articles/present-perfect-i-past-simple/"
 SKYSMART_URL = "https://skysmart.ru/articles/english/present-perfect-tense"
 
 GOOD_NOTES: dict[str, Any] = {
-    "source": {"url": ENGLEX_URL, "title": "whatever the model says", "accessed_at": "1999-01-01"},
+    "source": {
+        "url": ENGLEX_URL,
+        "title": "whatever the model says",
+        "accessed_at": "1999-01-01",
+    },
     "summary_ru": "Статья объясняет разницу между Present Perfect и Past Simple и показывает, когда время известно.",
     "rule_points": [
         "Past Simple — действие в известное время в прошлом.",
         "Present Perfect — результат к настоящему моменту.",
         "С yesterday, ago, last year используется Past Simple.",
     ],
-    "examples": [{"en": "I saw him yesterday.", "ru": "Я видел его вчера."}, {"en": "I have seen this film."}],
+    "examples": [
+        {"en": "I saw him yesterday.", "ru": "Я видел его вчера."},
+        {"en": "I have seen this film."},
+    ],
     "typical_mistakes": ["I have seen him yesterday."],
 }
 
@@ -67,7 +74,10 @@ class ScriptedLLM:
 
 
 def call(name: str, **arguments: Any) -> AssistantTurn:
-    return AssistantTurn(content=None, tool_calls=[ToolCall(id=f"call_{name}_{len(arguments)}", name=name, arguments=arguments)])
+    return AssistantTurn(
+        content=None,
+        tool_calls=[ToolCall(id=f"call_{name}_{len(arguments)}", name=name, arguments=arguments)],
+    )
 
 
 def search(site: str, *keywords: str) -> AssistantTurn:
@@ -93,8 +103,16 @@ def make_agent(turns: list[AssistantTurn], tools: FakeTools, **kwargs: Any) -> t
 
 def all_sites_tools() -> FakeTools:
     return FakeTools(
-        urls={"englex": [ENGLEX_URL], "skyeng": [SKYENG_URL], "skysmart": [SKYSMART_URL]},
-        pages={ENGLEX_URL: "Present Perfect vs Past Simple ...", SKYENG_URL: "...", SKYSMART_URL: "..."},
+        urls={
+            "englex": [ENGLEX_URL],
+            "skyeng": [SKYENG_URL],
+            "skysmart": [SKYSMART_URL],
+        },
+        pages={
+            ENGLEX_URL: "Present Perfect vs Past Simple ...",
+            SKYENG_URL: "...",
+            SKYSMART_URL: "...",
+        },
     )
 
 
@@ -108,7 +126,12 @@ def last_tool_result(llm: ScriptedLLM) -> str:
 def test_found_on_first_site_grounds_source_in_fetched_page() -> None:
     tools = all_sites_tools()
     agent, _ = make_agent(
-        [search("englex", "present", "perfect"), fetch(ENGLEX_URL), finish(True, GOOD_NOTES)], tools
+        [
+            search("englex", "present", "perfect"),
+            fetch(ENGLEX_URL),
+            finish(True, GOOD_NOTES),
+        ],
+        tools,
     )
     result = agent.run(TOPIC)
 
@@ -121,16 +144,31 @@ def test_found_on_first_site_grounds_source_in_fetched_page() -> None:
     assert result.notes.source.title == f"Title of {ENGLEX_URL}"
     assert result.notes.source.accessed_at == date(2026, 10, 13)
     assert result.notes.page_title == f"Title of {ENGLEX_URL}"
-    assert [record.tool for record in result.trajectory] == ["search_site", "fetch_page", "finish"]
+    assert [record.tool for record in result.trajectory] == [
+        "search_site",
+        "fetch_page",
+        "finish",
+    ]
     assert all(record.ok for record in result.trajectory)
+    # The result carries a provenance passport for reproducibility.
+    assert result.provenance is not None
+    assert result.provenance.component == "research"
+    assert "research_system" in result.provenance.prompts
 
 
 def test_falls_through_to_third_site() -> None:
     tools = FakeTools(
-        urls={"englex": ["https://englex.ru/idioms-about-food/"], "skyeng": [], "skysmart": [SKYSMART_URL]},
+        urls={
+            "englex": ["https://englex.ru/idioms-about-food/"],
+            "skyeng": [],
+            "skysmart": [SKYSMART_URL],
+        },
         pages={SKYSMART_URL: "Present Perfect ..."},
     )
-    notes = {**GOOD_NOTES, "source": {"url": SKYSMART_URL, "title": "x", "accessed_at": "2026-10-13"}}
+    notes = {
+        **GOOD_NOTES,
+        "source": {"url": SKYSMART_URL, "title": "x", "accessed_at": "2026-10-13"},
+    }
     agent, _ = make_agent(
         [
             search("englex", "present", "perfect"),
@@ -150,7 +188,12 @@ def test_falls_through_to_third_site() -> None:
 def test_not_found_on_any_site_returns_exact_message() -> None:
     tools = FakeTools(urls={"englex": [], "skyeng": [], "skysmart": []}, pages={})
     agent, _ = make_agent(
-        [search("englex", "present"), search("skyeng", "present"), search("skysmart", "present"), finish(False)],
+        [
+            search("englex", "present"),
+            search("skyeng", "present"),
+            search("skysmart", "present"),
+            finish(False),
+        ],
         tools,
     )
     result = agent.run(TOPIC)
@@ -166,7 +209,12 @@ def test_not_found_on_any_site_returns_exact_message() -> None:
 def test_site_order_is_enforced() -> None:
     tools = all_sites_tools()
     agent, llm = make_agent(
-        [search("skysmart", "present"), search("englex", "present"), fetch(ENGLEX_URL), finish(True, GOOD_NOTES)],
+        [
+            search("skysmart", "present"),
+            search("englex", "present"),
+            fetch(ENGLEX_URL),
+            finish(True, GOOD_NOTES),
+        ],
         tools,
     )
     result = agent.run(TOPIC)
@@ -179,8 +227,14 @@ def test_site_order_is_enforced() -> None:
 
 def test_cannot_declare_not_found_before_checking_all_sites() -> None:
     tools = all_sites_tools()
-    agent, llm = make_agent(
-        [search("englex", "nothing"), finish(False), search("skyeng", "present"), search("skysmart", "present"), finish(False)],
+    agent, _llm = make_agent(
+        [
+            search("englex", "nothing"),
+            finish(False),
+            search("skyeng", "present"),
+            search("skysmart", "present"),
+            finish(False),
+        ],
         tools,
     )
     result = agent.run(TOPIC)
@@ -212,9 +266,17 @@ def test_fetch_only_urls_offered_by_search_and_inside_allowlist() -> None:
 
 def test_finish_rejects_source_that_was_not_fetched() -> None:
     tools = all_sites_tools()
-    bad_notes = {**GOOD_NOTES, "source": {"url": SKYENG_URL, "title": "x", "accessed_at": "2026-10-13"}}
+    bad_notes = {
+        **GOOD_NOTES,
+        "source": {"url": SKYENG_URL, "title": "x", "accessed_at": "2026-10-13"},
+    }
     agent, _ = make_agent(
-        [search("englex", "present", "perfect"), fetch(ENGLEX_URL), finish(True, bad_notes), finish(True, GOOD_NOTES)],
+        [
+            search("englex", "present", "perfect"),
+            fetch(ENGLEX_URL),
+            finish(True, bad_notes),
+            finish(True, GOOD_NOTES),
+        ],
         tools,
     )
     result = agent.run(TOPIC)
@@ -225,10 +287,22 @@ def test_finish_rejects_source_that_was_not_fetched() -> None:
 
 def test_fetch_cap_per_site() -> None:
     urls = [f"https://englex.ru/post-{i}-present/" for i in range(3)]
-    tools = FakeTools(urls={"englex": urls, "skyeng": [], "skysmart": []}, pages={url: "text" for url in urls})
-    notes = {**GOOD_NOTES, "source": {"url": urls[0], "title": "x", "accessed_at": "2026-10-13"}}
+    tools = FakeTools(
+        urls={"englex": urls, "skyeng": [], "skysmart": []},
+        pages=dict.fromkeys(urls, "text"),
+    )
+    notes = {
+        **GOOD_NOTES,
+        "source": {"url": urls[0], "title": "x", "accessed_at": "2026-10-13"},
+    }
     agent, _ = make_agent(
-        [search("englex", "present"), fetch(urls[0]), fetch(urls[1]), fetch(urls[2]), finish(True, notes)],
+        [
+            search("englex", "present"),
+            fetch(urls[0]),
+            fetch(urls[1]),
+            fetch(urls[2]),
+            finish(True, notes),
+        ],
         tools,
         max_fetches_per_site=2,
     )
@@ -251,7 +325,12 @@ def test_budget_exhaustion_is_failed_not_not_found() -> None:
 def test_prose_without_tools_is_nudged_and_counts_as_step() -> None:
     tools = all_sites_tools()
     agent, llm = make_agent(
-        [AssistantTurn(content="Let me think..."), search("englex", "present", "perfect"), fetch(ENGLEX_URL), finish(True, GOOD_NOTES)],
+        [
+            AssistantTurn(content="Let me think..."),
+            search("englex", "present", "perfect"),
+            fetch(ENGLEX_URL),
+            finish(True, GOOD_NOTES),
+        ],
         tools,
     )
     result = agent.run(TOPIC)
@@ -262,7 +341,14 @@ def test_prose_without_tools_is_nudged_and_counts_as_step() -> None:
 
 def test_page_text_is_marked_untrusted() -> None:
     tools = all_sites_tools()
-    agent, llm = make_agent([search("englex", "present", "perfect"), fetch(ENGLEX_URL), finish(True, GOOD_NOTES)], tools)
+    agent, llm = make_agent(
+        [
+            search("englex", "present", "perfect"),
+            fetch(ENGLEX_URL),
+            finish(True, GOOD_NOTES),
+        ],
+        tools,
+    )
     agent.run(TOPIC)
     fetch_result = json.loads(llm.transcripts[2][-1]["content"])
     assert fetch_result["text"].startswith('<page_content untrusted="true">')
@@ -279,7 +365,11 @@ def test_rank_urls_prefers_more_keyword_matches_then_shorter_slug() -> None:
         "https://skysmart.ru/articles/english/glagol-to-sing",
     ]
     hits = rank_urls(urls, ["present", "perfect"], limit=5)
-    assert [hit.slug for hit in hits] == ["present-perfect-tense", "present-perfect-continuous", "present-simple-tense"]
+    assert [hit.slug for hit in hits] == [
+        "present-perfect-tense",
+        "present-perfect-continuous",
+        "present-simple-tense",
+    ]
     assert hits[0].score == 2
 
 

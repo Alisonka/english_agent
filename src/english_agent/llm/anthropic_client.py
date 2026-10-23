@@ -80,13 +80,13 @@ class AnthropicLLM:
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], tool_choice: Any = "auto"
     ) -> AssistantTurn:
         system, converted = to_anthropic_messages(messages)
-        response = self._client.messages.create(
+        response = self._client.messages.create(  # type: ignore[call-overload]
             model=self.model,
             max_tokens=self.max_tokens,
             system=system,
-            messages=converted,  # type: ignore[arg-type]
-            tools=to_anthropic_tools(tools),  # type: ignore[arg-type]
-            tool_choice=to_anthropic_tool_choice(tool_choice),  # type: ignore[arg-type]
+            messages=converted,
+            tools=to_anthropic_tools(tools),
+            tool_choice=to_anthropic_tool_choice(tool_choice),
         )
         blocks = [json.loads(block.model_dump_json(exclude_none=True)) for block in response.content]
         return parse_response_blocks(blocks)

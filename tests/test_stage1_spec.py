@@ -100,9 +100,7 @@ def test_goldens_v1_has_25_unique_curriculum_topics() -> None:
 def test_jsonl_matches_yaml_source() -> None:
     yaml_goldens = load_goldens_yaml()
     jsonl_goldens = load_goldens(goldens_v1_jsonl_path())
-    assert [case.model_dump() for case in jsonl_goldens] == [
-        case.model_dump() for case in yaml_goldens
-    ]
+    assert [case.model_dump() for case in jsonl_goldens] == [case.model_dump() for case in yaml_goldens]
     assert goldens_v1_yaml_path().exists()
 
 
@@ -134,8 +132,7 @@ def test_lesson_schema_rejects_invalid_payload(overrides: dict[str, object]) -> 
 
 def test_lesson_rejects_more_than_max_examples() -> None:
     extra = [
-        Example(en=f"Sentence {i}.", ru=f"Предложение {i}.", highlights=["Sentence"])
-        for i in range(EXAMPLE_MAX + 1)
+        Example(en=f"Sentence {i}.", ru=f"Предложение {i}.", highlights=["Sentence"]) for i in range(EXAMPLE_MAX + 1)
     ]
     with pytest.raises(ValidationError):
         Lesson.model_validate(_valid_lesson(examples=[item.model_dump() for item in extra]))

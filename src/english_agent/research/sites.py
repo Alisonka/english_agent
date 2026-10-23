@@ -6,21 +6,23 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 
-@dataclass(frozen=True) #frozen=True делает объект неизменяемым (immutable): после создания его поля нельзя переприсвоить. 
+@dataclass(
+    frozen=True
+)  # frozen=True делает объект неизменяемым (immutable): после создания его поля нельзя переприсвоить.
 class Site:
-    name: str #englex
-    domain: str #englex.ru
-    sitemaps: tuple[str, ...] #кортеж URL-адресов карт сайтов (sitemaps)
+    name: str  # englex
+    domain: str  # englex.ru
+    sitemaps: tuple[str, ...]  # кортеж URL-адресов карт сайтов (sitemaps)
     # Only follow child sitemaps whose URL contains this substring (for sitemap indexes).
-    child_sitemap_filter: str | None #фильтр для вложенных карт сайта
+    child_sitemap_filter: str | None  # фильтр для вложенных карт сайта
     # Only index article URLs whose path starts with one of these prefixes.
     article_path_prefixes: tuple[str, ...]
 
-    def owns(self, url: str) -> bool: #проверяет, принадлежит ли URL-адрес этому сайту
+    def owns(self, url: str) -> bool:  # проверяет, принадлежит ли URL-адрес этому сайту
         host = (urlparse(url).hostname or "").lower()
         return host == self.domain or host.endswith("." + self.domain)
 
-    def is_article(self, url: str) -> bool: #проверяет, является ли URL-адрес статьёй
+    def is_article(self, url: str) -> bool:  # проверяет, является ли URL-адрес статьёй
         path = urlparse(url).path
         return self.owns(url) and any(path.startswith(prefix) for prefix in self.article_path_prefixes)
 
@@ -54,5 +56,5 @@ SITE_BY_NAME: dict[str, Site] = {site.name: site for site in SITES}
 SITE_ORDER: tuple[str, ...] = tuple(site.name for site in SITES)
 
 
-def site_for_url(url: str) -> Site | None: #По произвольному URL находит, какому сайту он принадлежит
+def site_for_url(url: str) -> Site | None:  # По произвольному URL находит, какому сайту он принадлежит
     return next((site for site in SITES if site.owns(url)), None)

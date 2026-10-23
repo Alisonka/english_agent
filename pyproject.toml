@@ -15,6 +15,10 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.3",
+    "ruff>=0.14",
+    "mypy>=1.14",
+    "types-PyYAML>=6.0",
+    "pre-commit>=4.0",
 ]
 
 [build-system]
@@ -25,3 +29,28 @@ build-backend = "hatchling.build"
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, UP: pyupgrade, B: flake8-bugbear,
+# SIM: flake8-simplify, C4: flake8-comprehensions.
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4"]
+
+[tool.ruff.format]
+# Defaults are fine; declared explicitly so the config is self-documenting.
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["english_agent"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+no_implicit_optional = true
+disallow_untyped_defs = true
+check_untyped_defs = true
