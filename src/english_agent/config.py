@@ -1,7 +1,7 @@
-from pathlib import Path
 from functools import lru_cache
+from pathlib import Path
 
-from pydantic import Field, SecretStr #прячет значение при печати/логировании
+from pydantic import Field, SecretStr  # прячет значение при печати/логировании
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 4096
 
     cache_dir: Path = Path(".cache")
-    sitemap_ttl_days: int = 7 #сколько дней карта сайта (sitemap) считается «свежей» до повторной загрузки
+    sitemap_ttl_days: int = 7  # сколько дней карта сайта (sitemap) считается «свежей» до повторной загрузки
     http_timeout_seconds: float = 20.0
     http_user_agent: str = "english-agent/0.1"
 
@@ -25,9 +25,13 @@ class Settings(BaseSettings):
     research_max_fetches_per_site: int = 2
     research_page_char_limit: int = 40_000  # grammar articles on these sites run 15-35k chars
 
-@lru_cache(maxsize=2)  #кэширует (запоминает) результаты вызова функции
+
+@lru_cache(maxsize=2)  # кэширует (запоминает) результаты вызова функции
 def get_settings() -> Settings:
     return Settings()
 
-#Каждый вызов Settings() заново читает .env и переменные окружения и собирает объект. Если get_settings() вызывается в нескольких местах, это повторная лишняя работа. 
-#dependency injection (передача зависимостей): настройки создаются один раз «на краю» программы и прокидываются внутрь.
+
+# Каждый вызов Settings() заново читает .env и переменные окружения и собирает объект.
+# Если get_settings() вызывается в нескольких местах, это повторная лишняя работа.
+# dependency injection (передача зависимостей): настройки создаются один раз
+# «на краю» программы и прокидываются внутрь.

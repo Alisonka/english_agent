@@ -34,6 +34,7 @@ from english_agent.research.models import (
 )
 from english_agent.research.sites import SITE_BY_NAME, SITE_ORDER, site_for_url
 from english_agent.research.tools import ResearchTools, tool_specs
+from english_agent.versions import SCHEMA_VERSIONS, Provenance, build_provenance
 
 _PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "research_system.md"
 
@@ -42,20 +43,20 @@ class ToolError(Exception):
     """Rule violation or tool failure. Reported back to the model, never raised out of the loop."""
 
 
-@dataclass #в dataclass аннотация типа не проверяется во время выполнения 
+@dataclass  # в dataclass аннотация типа не проверяется во время выполнения
 class _State:
-    searches: dict[str, int] = field(default_factory=dict)
+    searches: dict[str, int] = field(default_factory=dict)  # счётчики по имени сайта (для лимитов)
     fetches: dict[str, int] = field(default_factory=dict)
-    offered_urls: set[str] = field(default_factory=set)
-    fetched: dict[str, PageContent] = field(default_factory=dict)
-    trajectory: list[ToolCallRecord] = field(default_factory=list)
+    offered_urls: set[str] = field(default_factory=set)  # URL, которые уже предложены
+    fetched: dict[str, PageContent] = field(default_factory=dict)  # кеш страниц
+    trajectory: list[ToolCallRecord] = field(default_factory=list)  # история вызовов инструментов
 
     @property
     def sites_checked(self) -> list[str]:
-        return [name for name in SITE_ORDER if name in self.searches]
+        return [name for name in SITE_ORDER if name in self.searches]  # список сайтов, которые уже проверены
 
     def unsearched_sites(self) -> list[str]:
-        return [name for name in SITE_ORDER if name not in self.searches]
+        return [name for name in SITE_ORDER if name not in self.searches]  # список сайтов, которые ещё не проверены
 
 
 class ResearchAgent:
@@ -68,6 +69,7 @@ class ResearchAgent:
         max_fetches_per_site: int = 2,
         max_searches_per_site: int = 3,
         today: date | None = None,
+        curriculum_version: int | None = None,
     ) -> None:
         self._llm = llm
         self._tools = tools
@@ -75,8 +77,18 @@ class ResearchAgent:
         self._max_fetches_per_site = max_fetches_per_site
         self._max_searches_per_site = max_searches_per_site
         self._today = today or date.today()
+        self._curriculum_version = curriculum_version
         self._system_prompt = _PROMPT_PATH.read_text(encoding="utf-8")
         self._tool_specs = tool_specs()
+
+    def _provenance(self) -> Provenance:
+        return build_provenance(
+            component="research",
+            schema_version=SCHEMA_VERSIONS["research_result"],
+            model=getattr(self._llm, "model", None),
+            prompt_names=("research_system",),
+            curriculum_version=self._curriculum_version,
+        )
 
     # -- public ------------------------------------------------------------------
 
@@ -93,7 +105,10 @@ class ResearchAgent:
 
             if not turn.tool_calls:
                 messages.append(
-                    {"role": "user", "content": "Use a tool: search_site, fetch_page, or finish. Do not answer in prose."}
+                    {
+                        "role": "user",
+                        "content": "Use a tool: search_site, fetch_page, or finish. Do not answer in prose.",
+                    }
                 )
                 continue
 
@@ -107,7 +122,13 @@ class ResearchAgent:
                         continue
                 try:
                     payload = self._dispatch(call, state)
-                    self._record(state, step, call, ok=True, summary=self._summarize(call, payload))
+                    self._record(
+                        state,
+                        step,
+                        call,
+                        ok=True,
+                        summary=self._summarize(call, payload),
+                    )
                 except ToolError as error:
                     payload = {"error": str(error)}
                     self._record(state, step, call, ok=False, summary=str(error))
@@ -120,6 +141,7 @@ class ResearchAgent:
             sites_checked=state.sites_checked,
             steps=self._max_steps,
             trajectory=state.trajectory,
+            provenance=self._provenance(),
         )
 
     # -- tool dispatch -------------------------------------------------------------
@@ -175,7 +197,7 @@ class ResearchAgent:
             "url": page.url,
             "title": page.title,
             "truncated": page.truncated,
-            "text": f"<page_content untrusted=\"true\">\n{page.text}\n</page_content>",
+            "text": f'<page_content untrusted="true">\n{page.text}\n</page_content>',  # prompt injection
         }
 
     def _finish(self, topic: CurriculumTopic, call: ToolCall, state: _State, step: int) -> ResearchResult:
@@ -195,12 +217,14 @@ class ResearchAgent:
                 sites_checked=state.sites_checked,
                 steps=step,
                 trajectory=state.trajectory,
+                provenance=self._provenance(),
             )
 
         raw_notes = call.arguments.get("notes")
         if not isinstance(raw_notes, dict):
             raise ToolError("found=true requires 'notes'")
-        source = raw_notes.get("source") if isinstance(raw_notes.get("source"), dict) else {}
+        raw_source = raw_notes.get("source")
+        source = raw_source if isinstance(raw_source, dict) else {}
         url = str(source.get("url", "")).strip()
         page = state.fetched.get(url)
         if page is None:
@@ -211,7 +235,11 @@ class ResearchAgent:
         # Code owns provenance fields: the model cannot mislabel site, title or date.
         raw_notes["site"] = site.name
         raw_notes["page_title"] = page.title
-        raw_notes["source"] = {"url": url, "title": page.title, "accessed_at": self._today.isoformat()}
+        raw_notes["source"] = {
+            "url": url,
+            "title": page.title,
+            "accessed_at": self._today.isoformat(),
+        }
         try:
             notes = TopicNotes.model_validate(raw_notes)
         except ValidationError as error:
@@ -226,6 +254,7 @@ class ResearchAgent:
             sites_checked=state.sites_checked,
             steps=step,
             trajectory=state.trajectory,
+            provenance=self._provenance(),
         )
 
     # -- helpers -------------------------------------------------------------------
@@ -242,12 +271,22 @@ class ResearchAgent:
 
     @staticmethod
     def _tool_message(call: ToolCall, payload: Any) -> dict[str, Any]:
-        return {"role": "tool", "tool_call_id": call.id, "content": json.dumps(payload, ensure_ascii=False)}
+        return {
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": json.dumps(payload, ensure_ascii=False),
+        }
 
     @staticmethod
     def _record(state: _State, step: int, call: ToolCall, *, ok: bool, summary: str) -> None:
         state.trajectory.append(
-            ToolCallRecord(step=step, tool=call.name, arguments=call.arguments, ok=ok, summary=summary[:300])
+            ToolCallRecord(
+                step=step,
+                tool=call.name,
+                arguments=call.arguments,
+                ok=ok,
+                summary=summary[:300],
+            )
         )
 
     @staticmethod

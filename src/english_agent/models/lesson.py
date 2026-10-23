@@ -3,6 +3,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
+from english_agent.versions import Provenance
+
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 EXAMPLE_MIN = 4
 EXAMPLE_MAX = 8
@@ -15,11 +17,11 @@ class Source(BaseModel):
 
     @field_validator("accessed_at", mode="before")
     @classmethod
-    def coerce_accessed_at(cls, value: date | datetime | str) -> date:
+    def coerce_accessed_at(cls, value: date | datetime | str) -> date | str:
         if isinstance(value, datetime):
             return value.date()
         if isinstance(value, str) and "T" in value:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+            return datetime.fromisoformat(value).date()
         return value
 
 
@@ -46,9 +48,14 @@ class Lesson(BaseModel):
     rule_ru: str = Field(min_length=300, max_length=2000)  # full theory: forms, uses, contractions
     form: str = Field(min_length=1, max_length=160)
     # Tricky cases, exceptions, contrasts with similar constructions and with Russian.
-    nuances_ru: Annotated[list[Annotated[str, Field(min_length=20, max_length=400)]], Field(min_length=3, max_length=8)]
+    nuances_ru: Annotated[
+        list[Annotated[str, Field(min_length=20, max_length=400)]],
+        Field(min_length=3, max_length=8),
+    ]
     examples: Annotated[list[Example], Field(min_length=EXAMPLE_MIN, max_length=EXAMPLE_MAX)]
     mistake_ru: str = Field(min_length=10, max_length=400)
     incorrect: str = Field(min_length=1, max_length=240)
     correct: str = Field(min_length=1, max_length=240)
     sources: Annotated[list[Source], Field(min_length=1, max_length=5)]
+    # Code-owned: how this lesson was produced (prompt / model / schema versions).
+    provenance: Provenance | None = None
