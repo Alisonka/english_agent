@@ -10,7 +10,9 @@ from english_agent.llm.anthropic_client import (
 def test_transcript_conversion_merges_tool_results_and_keeps_thinking_blocks() -> None:
     thinking = {"type": "thinking", "thinking": "...", "signature": "sig"}
     tool_use = {"type": "tool_use", "id": "t1", "name": "search_site", "input": {"site": "englex"}}
-    turn = parse_response_blocks([thinking, tool_use, {"type": "tool_use", "id": "t2", "name": "fetch_page", "input": {}}])
+    turn = parse_response_blocks(
+        [thinking, tool_use, {"type": "tool_use", "id": "t2", "name": "fetch_page", "input": {}}]
+    )
     messages = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "topic"},

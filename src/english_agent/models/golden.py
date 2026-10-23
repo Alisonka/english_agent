@@ -56,10 +56,7 @@ def load_goldens_yaml(path: Path | None = None) -> list[GoldenCase]:
 
 def dump_goldens_jsonl(goldens: list[GoldenCase], path: Path | None = None) -> Path:
     target = path or goldens_v1_jsonl_path()
-    lines = [
-        case.model_dump_json(ensure_ascii=False)
-        for case in goldens
-    ]
+    lines = [case.model_dump_json(ensure_ascii=False) for case in goldens]
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
 
