@@ -24,8 +24,11 @@ flowchart LR
   `sources`) are owned by code, so a lesson can never cite a page the research
   step did not read.
 - **Telegram** ([src/english_agent/telegram/](src/english_agent/telegram/)):
-  renders a `Lesson` as Telegram HTML (split into several messages if it exceeds
-  the 4096-character limit) and sends it through the Bot API.
+  renders a `Lesson` as a scannable Telegram HTML message (emoji-anchored
+  sections, an always-visible key idea, the detailed theory in a collapsible
+  quote, highlighted constructions in bold, sources as links), packed into
+  several messages on section boundaries if it exceeds the 4096-character limit,
+  and sends it through the Bot API.
 - **Pipeline** ([src/english_agent/pipeline.py](src/english_agent/pipeline.py)):
   wires topic -> research -> lesson -> Telegram together.
 
