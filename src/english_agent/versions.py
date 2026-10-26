@@ -27,7 +27,7 @@ from english_agent import __version__
 # Schema versions. Bump the relevant entry whenever the corresponding model's
 # shape changes in a way that downstream consumers must notice.
 SCHEMA_VERSIONS: dict[str, int] = {
-    "lesson": 1,
+    "lesson": 2,  # v2: added key_idea_ru; rule_ru/nuances_ru reshaped for messenger readability
     "research_result": 1,
     "topic_notes": 1,
 }
