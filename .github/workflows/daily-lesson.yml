@@ -29,7 +29,7 @@ jobs:
         run: uv sync --frozen --no-dev
 
       - name: Send the lesson
-        run: uv run python -m english_agent.pipeline
+        run: uv run --no-dev python -m english_agent.pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
