@@ -9,12 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Telegram delivery (`src/english_agent/telegram/`): a `Lesson` is rendered as
-  Telegram HTML (highlights in bold, sources as links), split on paragraph / line
-  boundaries when it exceeds the 4096-character limit, and sent through the Bot
-  API. The pipeline sends by default; `--no-send` only prints the JSON.
-  `python -m english_agent.telegram chats|ping` helps find the chat id and test
-  delivery. New settings: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+- Telegram delivery (`src/english_agent/telegram/`): a `Lesson` is rendered as a
+  scannable Telegram HTML message — emoji-anchored sections, an always-visible
+  "суть" (key idea), the detailed theory in a collapsible `<blockquote expandable>`
+  with bold paragraph labels, highlighted constructions in bold, compact one-line
+  examples, and sources as links. Long lessons are packed into several messages on
+  whole-section boundaries (keeping the theory quote intact) under the 4096-character
+  limit, and sent through the Bot API. The pipeline sends by default; `--no-send`
+  only prints the JSON. `python -m english_agent.telegram chats|ping` helps find the
+  chat id and test delivery. New settings: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 - Daily schedule (`.github/workflows/daily-lesson.yml`, 15-minute timeout): without
   `--topic` the pipeline picks the topic of the day from `CURRICULUM_START_DATE`,
   announces the end of the course once, and reports failed lessons to the chat.
@@ -31,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Lesson` schema reshaped for readable messenger delivery (schema version 1 -> 2):
+  new required `key_idea_ru` (one-sentence core idea, shown first and never hidden),
+  `rule_ru` shortened (max 1200) and written as short labelled paragraphs, and
+  `nuances_ru` trimmed to 3-4 short items (max 200 chars each). The
+  `write_lesson_system` prompt was updated to match.
 - Formatted the codebase with `ruff format` and fixed lint / type findings.
 
 ### Deprecated
