@@ -54,30 +54,49 @@ def highlight(example: Example) -> str:
     return "".join(out)
 
 
-def _example_block(example: Example) -> str:
+def _example_line(example: Example) -> str:
+    # Compact: construction and translation on one scannable line.
     marker = "❓" if example.en.rstrip().endswith("?") else "✅"
-    return f"{marker} {highlight(example)}\n— <i>{_e(example.ru)}</i>"
+    return f"{marker} {highlight(example)} — <i>{_e(example.ru)}</i>"
+
+
+# A short leading label like "Формы." or "Вопрос." at the start of a rule paragraph.
+_RULE_LABEL = re.compile(r"^(\S[^.\n]{0,24})\.(\s+)(\S)")
+
+
+def _rule_paragraph(paragraph: str) -> str:
+    """Escape a rule paragraph, bolding a short leading `Label.` if present."""
+    paragraph = paragraph.strip()
+    match = _RULE_LABEL.match(paragraph)
+    if not match:
+        return _e(paragraph)
+    label, gap = match.group(1), match.group(2)
+    rest = paragraph[match.start(3) :]
+    return f"<b>{_e(label)}.</b>{gap}{_e(rest)}"
+
+
+def _rule_body(rule_ru: str) -> str:
+    """The rule's paragraphs, with air between them and bold mini-labels, for the quote."""
+    paragraphs = [p for p in re.split(r"\n{2,}", rule_ru.strip()) if p.strip()]
+    return PARAGRAPH.join(_rule_paragraph(p) for p in paragraphs)
 
 
 def render_blocks(lesson: Lesson) -> list[str]:
     """The lesson as self-contained, tag-balanced HTML blocks, in reading order."""
     header = f"🇬🇧 <b>{_e(lesson.title_en)}</b>\n<i>{_e(lesson.title_ru)} · {lesson.cefr}</i>"
-    form = f"📐 <b>Формула</b>\n<code>{_e(lesson.form)}</code>"
-    # Collapse blank lines so the rule stays a single block with no `\n\n` to split on.
-    rule_text = re.sub(r"\n{2,}", "\n", lesson.rule_ru.strip())
-    rule = f"📖 <b>Правило</b>\n<blockquote expandable>{_e(rule_text)}</blockquote>"
-    nuances = "⚡️ <b>Нюансы</b>\n" + "\n".join(f"🔸 {_e(item)}" for item in lesson.nuances_ru)
-    examples = "📝 <b>Примеры</b>\n" + PARAGRAPH.join(_example_block(example) for example in lesson.examples)
+    form = f"📐 <code>{_e(lesson.form)}</code>"
+    key_idea = f"💡 <b>Суть:</b> {_e(lesson.key_idea_ru)}"
+    # The detailed theory lives in an expandable quote: compact when collapsed, airy when open.
+    rule = f"📖 <b>Как это работает</b>\n<blockquote expandable>{_rule_body(lesson.rule_ru)}</blockquote>"
+    examples = "📝 <b>Примеры</b>\n" + "\n".join(_example_line(example) for example in lesson.examples)
+    nuances = "⚡️ <b>Запомни</b>\n" + "\n".join(f"🔸 {_e(item)}" for item in lesson.nuances_ru)
     mistake = (
-        "🚫 <b>Типичная ошибка</b>\n"
-        f"❌ <s>{_e(lesson.incorrect)}</s>\n"
-        f"✅ {_e(lesson.correct)}\n"
-        f"<i>{_e(lesson.mistake_ru)}</i>"
+        f"🚫 <b>Ошибка</b>\n❌ <s>{_e(lesson.incorrect)}</s> → ✅ {_e(lesson.correct)}\n<i>{_e(lesson.mistake_ru)}</i>"
     )
     sources = "🔗 <b>Источники</b>\n" + "\n".join(
         f'• <a href="{html.escape(str(source.url), quote=True)}">{_e(source.title)}</a>' for source in lesson.sources
     )
-    return [header, form, rule, nuances, examples, mistake, sources]
+    return [header, form, key_idea, rule, examples, nuances, mistake, sources]
 
 
 def render_lesson(lesson: Lesson) -> str:
