@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Telegram delivery (`src/english_agent/telegram/`): a `Lesson` is rendered as
+  Telegram HTML (highlights in bold, sources as links), split on paragraph / line
+  boundaries when it exceeds the 4096-character limit, and sent through the Bot
+  API. The pipeline sends by default; `--no-send` only prints the JSON.
+  `python -m english_agent.telegram chats|ping` helps find the chat id and test
+  delivery. New settings: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+- Daily schedule (`.github/workflows/daily-lesson.yml`, 15-minute timeout): without
+  `--topic` the pipeline picks the topic of the day from `CURRICULUM_START_DATE`,
+  announces the end of the course once, and reports failed lessons to the chat.
 - Component versioning for the pipeline (`src/english_agent/versions.py`): a
   central registry of schema versions and prompt content fingerprints, plus a
   `Provenance` passport (pipeline version, component, schema version, LLM model,

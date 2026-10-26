@@ -1,0 +1,37 @@
+name: Daily lesson
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC = 09:00 Moscow; GitHub may start it a few minutes late
+  workflow_dispatch:
+
+# Never run two sends at once (e.g. a manual run overlapping the scheduled one).
+concurrency:
+  group: daily-lesson
+  cancel-in-progress: false
+
+jobs:
+  send:
+    name: research, write & send today's lesson
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python from .python-version
+        run: uv python install
+
+      - name: Install dependencies (locked)
+        run: uv sync --frozen --no-dev
+
+      - name: Send the lesson
+        run: uv run python -m english_agent.pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CURRICULUM_START_DATE: ${{ vars.CURRICULUM_START_DATE }}
