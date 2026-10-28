@@ -21,7 +21,8 @@ from anthropic import Anthropic
 
 from english_agent.config import Settings
 from english_agent.llm.base import AssistantTurn, ToolCall
-from english_agent.tracing import get_tracer
+from english_agent.llm.pricing import estimate_cost_usd
+from english_agent.tracing import get_tracer, record_model_output
 
 
 def to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
@@ -96,11 +97,31 @@ class AnthropicLLM:
                 tool_choice=to_anthropic_tool_choice(tool_choice),
             )
             if response.usage is not None:
-                span.set_attribute("gen_ai.usage.input_tokens", response.usage.input_tokens)
-                span.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                usage = response.usage
+                cache_write = usage.cache_creation_input_tokens or 0
+                cache_read = usage.cache_read_input_tokens or 0
+                span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
+                span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
+                if cache_write or cache_read:
+                    span.set_attribute("gen_ai.usage.cache_read_input_tokens", cache_read)
+                    span.set_attribute("gen_ai.usage.cache_creation_input_tokens", cache_write)
+                cost = estimate_cost_usd(
+                    self.model,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_write_tokens=cache_write,
+                    cache_read_tokens=cache_read,
+                )
+                if cost is not None:
+                    span.set_attribute("gen_ai.usage.cost_usd", round(cost, 6))
             if response.stop_reason is not None:
                 span.set_attribute("gen_ai.response.finish_reason", response.stop_reason)
             blocks = [json.loads(block.model_dump_json(exclude_none=True)) for block in response.content]
             turn = parse_response_blocks(blocks)
             span.set_attribute("gen_ai.response.tool_calls", len(turn.tool_calls))
+            record_model_output(
+                span,
+                turn.content,
+                [{"name": call.name, "arguments": call.arguments} for call in turn.tool_calls],
+            )
             return turn

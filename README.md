@@ -64,8 +64,19 @@ Tracing is **off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set** (see
 [src/english_agent/tracing.py](src/english_agent/tracing.py)): with no endpoint
 the tracer is a no-op, so CI and normal runs are unaffected. HTTP spans come for
 free via `opentelemetry-instrumentation-httpx`; the Telegram bot token is scrubbed
-from captured URLs. Prompt and page *text* are never put on spans - only sizes,
-counts, models, and token usage.
+from captured URLs.
+
+Each `llm.chat` span carries token usage, an estimated `gen_ai.usage.cost_usd`, and
+a `gen_ai.content.completion` event with *what the model answered* - its text and
+tool-call arguments, i.e. the research notes (`finish`) and the finished lesson
+(`submit_lesson`). Prompts and fetched page *text* are never put on spans. Because
+the capture only happens on recording spans, it costs nothing when tracing is off
+(no endpoint configured).
+
+The cost is estimated locally from token counts using the price table in
+[src/english_agent/llm/pricing.py](src/english_agent/llm/pricing.py) (the API does
+not return a price). Keep that table in sync with Anthropic's pricing; a model that
+is not listed there simply gets no cost attribute.
 
 To view traces locally, run [Jaeger](https://www.jaegertracing.io/) with the
 provided [docker-compose.yml](docker-compose.yml):
@@ -193,7 +204,7 @@ src/english_agent/
   pipeline.py      # topic -> research -> lesson -> Telegram
   tracing.py       # OpenTelemetry setup (opt-in OTLP export)
   writer.py        # notes -> validated Lesson
-  llm/             # Anthropic (Claude) client
+  llm/             # Anthropic (Claude) client + token-cost estimate
   models/          # pydantic models (curriculum, lesson, golden)
   prompts/         # system prompts
   research/        # research agent, tools, sitemaps, sources
