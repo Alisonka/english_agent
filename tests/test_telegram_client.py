@@ -109,7 +109,10 @@ def test_send_lesson_sends_rendered_text_as_one_message(lesson: Lesson) -> None:
 def test_send_lesson_splits_long_lessons_in_order(lesson: Lesson, monkeypatch: pytest.MonkeyPatch) -> None:
     import english_agent.telegram.client as client_module
 
-    monkeypatch.setattr(client_module, "split_message", lambda text: [text[: len(text) // 2], text[len(text) // 2 :]])
+    text = render_lesson(lesson)
+    monkeypatch.setattr(
+        client_module, "render_messages", lambda _lesson: [text[: len(text) // 2], text[len(text) // 2 :]]
+    )
     fake = FakeTelegram()
     ids = fake.client().send_lesson("42", lesson)
 
@@ -121,7 +124,7 @@ def test_send_lesson_splits_long_lessons_in_order(lesson: Lesson, monkeypatch: p
 def test_send_lesson_stops_at_first_failure(lesson: Lesson, monkeypatch: pytest.MonkeyPatch) -> None:
     import english_agent.telegram.client as client_module
 
-    monkeypatch.setattr(client_module, "split_message", lambda text: ["a", "b", "c"])
+    monkeypatch.setattr(client_module, "render_messages", lambda _lesson: ["a", "b", "c"])
     fake = FakeTelegram(
         [
             httpx.Response(200, json={"ok": True, "result": {"message_id": 1}}),

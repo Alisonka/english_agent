@@ -1,14 +1,18 @@
 """Render a validated `Lesson` as Telegram HTML.
 
 Telegram's HTML parse mode only needs `<`, `>` and `&` escaped, which is far more
-robust for LLM-written text than MarkdownV2 (a dozen reserved characters). Every
-line the renderer emits is tag-balanced, so `split_message` can break a long
-lesson on paragraph / line boundaries without ever producing an unclosed tag.
+robust for LLM-written text than MarkdownV2 (a dozen reserved characters).
+
+The lesson is emitted as a list of self-contained, tag-balanced blocks. The rule
+sits in a multi-line `<blockquote expandable>`, so a message can never be cut
+inside it: `render_messages` packs whole blocks and only ever line-splits the
+line-safe blocks (in practice just the examples at the field bounds).
 """
 
 from __future__ import annotations
 
 import html
+import re
 
 from english_agent.models.lesson import TELEGRAM_MAX_MESSAGE_LENGTH, Example, Lesson
 
@@ -50,27 +54,87 @@ def highlight(example: Example) -> str:
     return "".join(out)
 
 
+def _example_line(example: Example) -> str:
+    # Compact: construction and translation on one scannable line.
+    marker = "❓" if example.en.rstrip().endswith("?") else "✅"
+    return f"{marker} {highlight(example)} — <i>{_e(example.ru)}</i>"
+
+
+# A short leading label like "Формы." or "Вопрос." at the start of a rule paragraph.
+_RULE_LABEL = re.compile(r"^(\S[^.\n]{0,24})\.(\s+)(\S)")
+
+
+def _rule_paragraph(paragraph: str) -> str:
+    """Escape a rule paragraph, bolding a short leading `Label.` if present."""
+    paragraph = paragraph.strip()
+    match = _RULE_LABEL.match(paragraph)
+    if not match:
+        return _e(paragraph)
+    label, gap = match.group(1), match.group(2)
+    rest = paragraph[match.start(3) :]
+    return f"<b>{_e(label)}.</b>{gap}{_e(rest)}"
+
+
+def _rule_body(rule_ru: str) -> str:
+    """The rule's paragraphs, with air between them and bold mini-labels, for the quote."""
+    paragraphs = [p for p in re.split(r"\n{2,}", rule_ru.strip()) if p.strip()]
+    return PARAGRAPH.join(_rule_paragraph(p) for p in paragraphs)
+
+
 def render_blocks(lesson: Lesson) -> list[str]:
-    """The lesson as self-contained HTML blocks, in reading order."""
-    header = f"<b>{_e(lesson.title_en)}</b>\n{_e(lesson.title_ru)} · {lesson.cefr}"
-    form = f"<b>Формула</b>\n<code>{_e(lesson.form)}</code>"
-    rule = f"<b>Правило</b>\n{_e(lesson.rule_ru)}"
-    nuances = "<b>Нюансы</b>\n" + "\n".join(f"• {_e(item)}" for item in lesson.nuances_ru)
-    examples = "<b>Примеры</b>\n" + "\n".join(
-        f"{number}. {highlight(example)}\n   <i>{_e(example.ru)}</i>"
-        for number, example in enumerate(lesson.examples, start=1)
-    )
+    """The lesson as self-contained, tag-balanced HTML blocks, in reading order."""
+    header = f"🇬🇧 <b>{_e(lesson.title_en)}</b>\n<i>{_e(lesson.title_ru)} · {lesson.cefr}</i>"
+    form = f"📐 <code>{_e(lesson.form)}</code>"
+    key_idea = f"💡 <b>Суть:</b> {_e(lesson.key_idea_ru)}"
+    # The detailed theory lives in an expandable quote: compact when collapsed, airy when open.
+    rule = f"📖 <b>Как это работает</b>\n<blockquote expandable>{_rule_body(lesson.rule_ru)}</blockquote>"
+    examples = "📝 <b>Примеры</b>\n" + "\n".join(_example_line(example) for example in lesson.examples)
+    nuances = "⚡️ <b>Запомни</b>\n" + "\n".join(f"🔸 {_e(item)}" for item in lesson.nuances_ru)
     mistake = (
-        f"<b>Типичная ошибка</b>\n{_e(lesson.mistake_ru)}\n✗ <s>{_e(lesson.incorrect)}</s>\n✓ {_e(lesson.correct)}"
+        f"🚫 <b>Ошибка</b>\n❌ <s>{_e(lesson.incorrect)}</s> → ✅ {_e(lesson.correct)}\n<i>{_e(lesson.mistake_ru)}</i>"
     )
-    sources = "<b>Источники</b>\n" + "\n".join(
+    sources = "🔗 <b>Источники</b>\n" + "\n".join(
         f'• <a href="{html.escape(str(source.url), quote=True)}">{_e(source.title)}</a>' for source in lesson.sources
     )
-    return [header, form, rule, nuances, examples, mistake, sources]
+    return [header, form, key_idea, rule, examples, nuances, mistake, sources]
 
 
 def render_lesson(lesson: Lesson) -> str:
     return PARAGRAPH.join(render_blocks(lesson))
+
+
+def render_messages(lesson: Lesson, limit: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:
+    """Pack whole lesson blocks into messages of at most `limit` characters.
+
+    Blocks are kept intact so the multi-line `<blockquote>` around the rule is
+    never cut mid-tag. A block that alone exceeds `limit` — only ever the examples
+    block at the field bounds — is split on paragraph / line boundaries, where
+    every line is tag-balanced. The rule block is guaranteed to fit, so it is
+    never line-split; we fail loudly rather than risk an unclosed quote.
+    """
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    messages: list[str] = []
+    current = ""
+    for block in render_blocks(lesson):
+        candidate = block if not current else f"{current}{PARAGRAPH}{block}"
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            messages.append(current)
+            current = ""
+        if len(block) <= limit:
+            current = block
+            continue
+        if "<blockquote" in block:
+            raise ValueError("rule block exceeds the message limit and cannot be split without breaking the quote")
+        pieces = _split(block, limit, _SPLIT_SEPARATORS)
+        messages.extend(pieces[:-1])
+        current = pieces[-1]
+    if current:
+        messages.append(current)
+    return messages
 
 
 def split_message(text: str, limit: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:

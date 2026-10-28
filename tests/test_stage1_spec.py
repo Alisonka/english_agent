@@ -25,6 +25,7 @@ def _valid_lesson(**overrides: object) -> dict[str, object]:
         "title_en": "Present Simple third person -s",
         "title_ru": "Present Simple — окончание -s",
         "cefr": "A2",
+        "key_idea_ru": "В Present Simple глагол получает -s только в третьем лице единственного числа: he, she, it.",
         "rule_ru": (
             "В третьем лице единственного числа (he, she, it) к глаголу в Present Simple добавляется "
             "окончание -s: She works, He lives. После шипящих и -o пишем -es: watches, goes. "

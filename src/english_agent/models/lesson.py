@@ -45,12 +45,14 @@ class Lesson(BaseModel):
     title_en: str = Field(min_length=1, max_length=80)
     title_ru: str = Field(min_length=1, max_length=80)
     cefr: Literal["A2"]
-    rule_ru: str = Field(min_length=300, max_length=2000)  # full theory: forms, uses, contractions
+    # One-sentence core idea, always shown first (never hidden inside the expandable theory).
+    key_idea_ru: str = Field(min_length=40, max_length=200)
+    rule_ru: str = Field(min_length=200, max_length=1200)  # detailed theory: 2-4 short labelled paragraphs
     form: str = Field(min_length=1, max_length=160)
-    # Tricky cases, exceptions, contrasts with similar constructions and with Russian.
+    # Tricky cases, exceptions, contrasts; kept short so the message stays scannable.
     nuances_ru: Annotated[
-        list[Annotated[str, Field(min_length=20, max_length=400)]],
-        Field(min_length=3, max_length=8),
+        list[Annotated[str, Field(min_length=20, max_length=200)]],
+        Field(min_length=3, max_length=4),
     ]
     examples: Annotated[list[Example], Field(min_length=EXAMPLE_MIN, max_length=EXAMPLE_MAX)]
     mistake_ru: str = Field(min_length=10, max_length=400)
