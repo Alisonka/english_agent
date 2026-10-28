@@ -13,6 +13,7 @@ import sys
 from datetime import date
 
 import httpx
+from opentelemetry.trace import Span, Status, StatusCode
 
 from english_agent.config import Settings, get_settings
 from english_agent.llm import AnthropicLLM
@@ -23,6 +24,7 @@ from english_agent.research.models import ResearchResult
 from english_agent.research.sitemaps import SitemapIndex
 from english_agent.research.tools import LiveResearchTools
 from english_agent.telegram import TelegramClient, TelegramError
+from english_agent.tracing import configure_tracing, get_tracer
 from english_agent.writer import write_lesson
 
 COURSE_FINISHED = "Курс завершён: все темы пройдены."
@@ -101,6 +103,20 @@ def main(argv: list[str] | None = None) -> int:
 
     curriculum = load_curriculum()
     settings = get_settings()
+
+    # Tracing is a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set; shutdown() flushes
+    # the batched spans, which matters because this process exits right after main().
+    provider = configure_tracing(settings)
+    try:
+        with get_tracer().start_as_current_span("pipeline.run") as span:
+            span.set_attribute("pipeline.send", not args.no_send)
+            return _run(args, curriculum, settings, span)
+    finally:
+        if provider is not None:
+            provider.shutdown()
+
+
+def _run(args: argparse.Namespace, curriculum: Curriculum, settings: Settings, span: Span) -> int:
     send = not args.no_send
 
     if args.topic:
@@ -125,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
                 notify(settings, COURSE_FINISHED)
             return 0
 
+    span.set_attribute("topic.id", topic.id)
+
     # Fail before spending LLM calls on a lesson we could not deliver.
     if send and not settings.telegram_configured():
         print("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set (or pass --no-send)", file=sys.stderr)
@@ -138,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         reason = f"{type(error).__name__}: {error}"
     if lesson is None:
         print(f"lesson for {topic.id} failed: {reason}", file=sys.stderr)
+        span.set_status(Status(StatusCode.ERROR, reason))
         if send:
             notify(settings, f"Урок «{topic.title_ru}» сегодня не получился: {reason}")
         return 1
@@ -149,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         message_ids = deliver_lesson(lesson, settings)
     except TelegramError as error:
         print(f"telegram error: {error}", file=sys.stderr)
+        span.set_status(Status(StatusCode.ERROR, str(error)))
         return 1
     print(f"sent {len(message_ids)} message(s) to Telegram chat {settings.telegram_chat_id}", file=sys.stderr)
     return 0

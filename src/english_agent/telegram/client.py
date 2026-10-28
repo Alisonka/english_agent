@@ -11,6 +11,7 @@ import httpx
 
 from english_agent.models.lesson import Lesson
 from english_agent.telegram.render import render_messages
+from english_agent.tracing import get_tracer
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
@@ -55,7 +56,10 @@ class TelegramClient:
 
     def send_lesson(self, chat_id: str, lesson: Lesson) -> list[int]:
         """Render the lesson and send it, split into as many messages as needed, in order."""
-        return [self.send_message(chat_id, chunk) for chunk in render_messages(lesson)]
+        with get_tracer().start_as_current_span("telegram.send_lesson") as span:
+            chunks = render_messages(lesson)
+            span.set_attribute("telegram.messages", len(chunks))
+            return [self.send_message(chat_id, chunk) for chunk in chunks]
 
     def known_chats(self) -> list[tuple[str, str]]:
         """(chat id, label) for every chat that appears in the bot's pending updates.
