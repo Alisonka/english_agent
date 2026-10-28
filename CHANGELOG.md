@@ -13,12 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a trace of nested spans (`pipeline.run` -> `research.run` -> `llm.chat` /
   `tool.search_site` / `tool.fetch_page` / `tool.finish`, plus `writer.write_lesson`
   and `telegram.send_lesson`), with LLM model and token-usage attributes and HTTP
-  child spans via `opentelemetry-instrumentation-httpx`. Tracing is opt-in: it is a
-  no-op unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so CI and normal runs are
-  unaffected. The Telegram bot token is scrubbed from captured URLs, and prompt/page
-  text is never recorded. A `docker-compose.yml` runs Jaeger locally for viewing
-  traces (OTLP/HTTP on `:4318`, UI on `:16686`). New setting:
-  `OTEL_EXPORTER_OTLP_ENDPOINT`.
+  child spans via `opentelemetry-instrumentation-httpx`. Each `llm.chat` span also
+  records the model's own output (research notes and the lesson) as a
+  `gen_ai.content.completion` event and an estimated `gen_ai.usage.cost_usd` derived
+  from token counts via a local price table (`src/english_agent/llm/pricing.py`);
+  prompts and fetched page text are never recorded, and the Telegram bot token is
+  scrubbed from captured URLs. Tracing is
+  opt-in: it is a no-op unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so CI and normal
+  runs are unaffected. A `docker-compose.yml` runs Jaeger locally for viewing traces
+  (OTLP/HTTP on `:4318`, UI on `:16686`). New setting: `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
 - Telegram delivery (`src/english_agent/telegram/`): a `Lesson` is rendered as a
   scannable Telegram HTML message — emoji-anchored sections, an always-visible

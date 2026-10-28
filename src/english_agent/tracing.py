@@ -13,8 +13,9 @@ at `http://localhost:4318`; see the README's "Tracing" section.
 
 from __future__ import annotations
 
+import json
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -33,6 +34,9 @@ if TYPE_CHECKING:
 
 TRACER_NAME = "english_agent"
 
+# Cap captured content so one span event cannot balloon the trace.
+_MAX_CONTENT_CHARS = 8000
+
 # The Telegram Bot API embeds the bot token in the URL path (/bot<token>/method).
 # That must never reach a span attribute, so we scrub it from any captured URL.
 _TELEGRAM_TOKEN = re.compile(r"/bot[^/]+/")
@@ -41,6 +45,25 @@ _TELEGRAM_TOKEN = re.compile(r"/bot[^/]+/")
 def get_tracer() -> trace.Tracer:
     """The project tracer. No-op until `configure_tracing` installs a provider."""
     return trace.get_tracer(TRACER_NAME)
+
+
+def record_model_output(span: Span, content: str | None, tool_calls: list[dict[str, Any]]) -> None:
+    """Attach what the model generated to the current `llm.chat` span.
+
+    Records only the model's own output - its text and tool-call arguments (which is
+    where the research notes and the finished lesson live) - never the prompt or the
+    fetched page text. A no-op when the span is not recording (i.e. tracing is off),
+    so it costs nothing unless an OTLP endpoint is configured.
+    """
+    if not span.is_recording():
+        return
+    span.add_event(
+        "gen_ai.content.completion",
+        {
+            "gen_ai.completion.text": (content or "")[:_MAX_CONTENT_CHARS],
+            "gen_ai.completion.tool_calls": json.dumps(tool_calls, ensure_ascii=False)[:_MAX_CONTENT_CHARS],
+        },
+    )
 
 
 def _redact(url: str) -> str:
