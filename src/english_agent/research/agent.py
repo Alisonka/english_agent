@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from opentelemetry.trace import Span, Status, StatusCode
 from pydantic import ValidationError
 
 from english_agent.llm import ChatLLM, ToolCall
@@ -34,6 +35,7 @@ from english_agent.research.models import (
 )
 from english_agent.research.sites import SITE_BY_NAME, SITE_ORDER, site_for_url
 from english_agent.research.tools import ResearchTools, tool_specs
+from english_agent.tracing import get_tracer
 from english_agent.versions import SCHEMA_VERSIONS, Provenance, build_provenance
 
 _PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "research_system.md"
@@ -93,6 +95,17 @@ class ResearchAgent:
     # -- public ------------------------------------------------------------------
 
     def run(self, topic: CurriculumTopic) -> ResearchResult:
+        with get_tracer().start_as_current_span("research.run") as span:
+            span.set_attribute("topic.id", topic.id)
+            result = self._run_loop(topic)
+            span.set_attribute("research.status", result.status)
+            span.set_attribute("research.steps", result.steps)
+            span.set_attribute("research.sites_checked", result.sites_checked)
+            if result.status == "failed":
+                span.set_status(Status(StatusCode.ERROR, result.message))
+            return result
+
+    def _run_loop(self, topic: CurriculumTopic) -> ResearchResult:
         state = _State()
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt},
@@ -113,26 +126,34 @@ class ResearchAgent:
                 continue
 
             for call in turn.tool_calls:
-                if call.name == "finish":
+                with get_tracer().start_as_current_span(f"tool.{call.name}") as tool_span:
+                    tool_span.set_attribute("research.step", step)
+                    if call.name == "finish":
+                        tool_span.set_attribute("finish.found", bool(call.arguments.get("found")))
+                        try:
+                            return self._finish(topic, call, state, step)
+                        except ToolError as error:
+                            self._record(state, step, call, ok=False, summary=str(error))
+                            messages.append(self._tool_message(call, {"error": str(error)}))
+                            tool_span.record_exception(error)
+                            tool_span.set_status(Status(StatusCode.ERROR, str(error)))
+                            continue
                     try:
-                        return self._finish(topic, call, state, step)
+                        payload = self._dispatch(call, state)
+                        self._record(
+                            state,
+                            step,
+                            call,
+                            ok=True,
+                            summary=self._summarize(call, payload),
+                        )
+                        self._annotate_tool_span(tool_span, call, payload)
                     except ToolError as error:
+                        payload = {"error": str(error)}
                         self._record(state, step, call, ok=False, summary=str(error))
-                        messages.append(self._tool_message(call, {"error": str(error)}))
-                        continue
-                try:
-                    payload = self._dispatch(call, state)
-                    self._record(
-                        state,
-                        step,
-                        call,
-                        ok=True,
-                        summary=self._summarize(call, payload),
-                    )
-                except ToolError as error:
-                    payload = {"error": str(error)}
-                    self._record(state, step, call, ok=False, summary=str(error))
-                messages.append(self._tool_message(call, payload))
+                        tool_span.record_exception(error)
+                        tool_span.set_status(Status(StatusCode.ERROR, str(error)))
+                    messages.append(self._tool_message(call, payload))
 
         return ResearchResult(
             topic_id=topic.id,
@@ -288,6 +309,17 @@ class ResearchAgent:
                 summary=summary[:300],
             )
         )
+
+    @staticmethod
+    def _annotate_tool_span(span: Span, call: ToolCall, payload: Any) -> None:
+        if call.name == "search_site":
+            span.set_attribute("search.site", str(call.arguments.get("site")))
+            if isinstance(payload, list):
+                span.set_attribute("search.hits", len(payload))
+        elif call.name == "fetch_page" and isinstance(payload, dict):
+            span.set_attribute("fetch.url", str(payload.get("url", "")))
+            span.set_attribute("fetch.chars", len(str(payload.get("text", ""))))
+            span.set_attribute("fetch.truncated", bool(payload.get("truncated", False)))
 
     @staticmethod
     def _summarize(call: ToolCall, payload: Any) -> str:

@@ -42,6 +42,54 @@ curriculum version. Component versions live in one place,
 `SCHEMA_VERSIONS` entry when a model's shape changes; prompt fingerprints update
 automatically from the prompt files.
 
+## Tracing (OpenTelemetry)
+
+The pipeline is instrumented with [OpenTelemetry](https://opentelemetry.io/): one
+run becomes a trace whose spans mirror the pipeline, so you can see where time and
+tokens go.
+
+```mermaid
+flowchart TD
+    pipelineRun["pipeline.run"] --> researchRun["research.run"]
+    pipelineRun --> writeLesson["writer.write_lesson"]
+    pipelineRun --> sendLesson["telegram.send_lesson"]
+    researchRun --> llmChat["llm.chat (tokens)"]
+    researchRun --> toolSpans["tool.search_site / tool.fetch_page / tool.finish"]
+    toolSpans --> httpGet["GET englex.ru/... (auto httpx span)"]
+    writeLesson --> llmChat2["llm.chat"]
+    sendLesson --> httpPost["POST api.telegram.org (token redacted)"]
+```
+
+Tracing is **off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set** (see
+[src/english_agent/tracing.py](src/english_agent/tracing.py)): with no endpoint
+the tracer is a no-op, so CI and normal runs are unaffected. HTTP spans come for
+free via `opentelemetry-instrumentation-httpx`; the Telegram bot token is scrubbed
+from captured URLs. Prompt and page *text* are never put on spans - only sizes,
+counts, models, and token usage.
+
+To view traces locally, run [Jaeger](https://www.jaegertracing.io/) with the
+provided [docker-compose.yml](docker-compose.yml):
+
+```bash
+# 1. Start Jaeger (OTLP collector + storage + UI)
+docker compose up -d
+
+# 2. Run the pipeline with tracing on (prints the lesson, does not send it)
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+  uv run python -m english_agent.pipeline --topic there_is_are --no-send
+# drop --no-send to also see the telegram.send_lesson span
+
+# 3. Open the Jaeger UI and pick the "english-agent" service
+open http://localhost:16686
+
+# 4. Stop Jaeger when done (in-memory traces are lost)
+docker compose down
+```
+
+For always-on tracing (e.g. the scheduled GitHub Actions run) point the endpoint
+at a hosted OTLP backend such as Grafana Cloud instead of local Jaeger; only the
+endpoint changes, not the code.
+
 ## Requirements
 
 - Python >= 3.12
@@ -85,6 +133,7 @@ Configuration is read from environment variables or a local `.env` file (see
 | `RESEARCH_MAX_FETCHES_PER_SITE` | no | `2` | Max page fetches per site |
 | `RESEARCH_PAGE_CHAR_LIMIT` | no | `40000` | Max chars read per page |
 | `SITEMAP_TTL_DAYS` | no | `7` | Days a cached sitemap stays fresh |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | – | OTLP/HTTP endpoint for traces (e.g. `http://localhost:4318`); unset disables tracing |
 
 See [.env.example](.env.example) for the full template.
 
@@ -142,6 +191,7 @@ src/english_agent/
   config.py        # runtime settings (env / .env)
   paths.py         # repo-relative paths
   pipeline.py      # topic -> research -> lesson -> Telegram
+  tracing.py       # OpenTelemetry setup (opt-in OTLP export)
   writer.py        # notes -> validated Lesson
   llm/             # Anthropic (Claude) client
   models/          # pydantic models (curriculum, lesson, golden)
