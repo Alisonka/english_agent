@@ -1,0 +1,19 @@
+# Local tracing backend. Jaeger is only the collector + storage + UI; the app
+# itself is instrumented with the OpenTelemetry SDK and exports over OTLP/HTTP.
+#
+#   docker compose up -d                 # start Jaeger
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+#     uv run python -m english_agent.pipeline --topic there_is_are --no-send
+#   open http://localhost:16686          # the Jaeger UI
+#   docker compose down                  # stop it (in-memory traces are lost)
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: english-agent-jaeger
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4317:4317" # OTLP/gRPC
+      - "4318:4318" # OTLP/HTTP (what this project uses)
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
