@@ -14,6 +14,9 @@ def lesson_payload(**overrides: Any) -> dict[str, Any]:
         "title_en": "there is / there are",
         "title_ru": "Конструкция there is / there are",
         "cefr": "A2",
+        "key_idea_ru": (
+            "Там, где по-русски «на столе книга» без глагола, по-английски нужен оборот there is / there are."
+        ),
         "rule_ru": (
             "Конструкция there is / there are говорит, что где-то что-то есть или находится. There is "
             "используем с единственным числом и неисчисляемыми: There is a cat in the kitchen. There are — "

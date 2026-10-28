@@ -6,9 +6,9 @@ import pytest
 
 from conftest import lesson_payload
 from english_agent.models.lesson import EXAMPLE_MAX, TELEGRAM_MAX_MESSAGE_LENGTH, Example, Lesson
-from english_agent.telegram.render import highlight, render_blocks, render_lesson, split_message
+from english_agent.telegram.render import highlight, render_blocks, render_lesson, render_messages, split_message
 
-_TAG = re.compile(r"<(/?)(b|i|s|code|a)\b[^>]*>")
+_TAG = re.compile(r"<(/?)(b|i|s|code|a|blockquote)\b[^>]*>")
 
 
 def assert_balanced_tags(text: str) -> None:
@@ -28,9 +28,10 @@ def test_render_contains_every_lesson_field(lesson: Lesson) -> None:
     assert f"<b>{lesson.title_en}</b>" in text
     assert lesson.title_ru in text
     assert f"<code>{lesson.form}</code>" in text
-    assert lesson.rule_ru in text
+    assert lesson.key_idea_ru in text
+    assert f"<blockquote expandable>{lesson.rule_ru}</blockquote>" in text
     for nuance in lesson.nuances_ru:
-        assert f"• {nuance}" in text
+        assert f"🔸 {nuance}" in text
     for example in lesson.examples:
         assert f"<i>{example.ru}</i>" in text
     assert lesson.mistake_ru in text
@@ -78,22 +79,54 @@ def test_highlight_without_match_in_sentence_is_escaped_plain_text() -> None:
     assert highlight(example) == "Fish &amp; chips."
 
 
-def test_every_rendered_line_is_tag_balanced(lesson: Lesson) -> None:
-    for line in render_lesson(lesson).split("\n"):
-        assert_balanced_tags(line)
+def test_every_rendered_block_is_tag_balanced(lesson: Lesson) -> None:
+    # The rule block spans several lines inside one <blockquote>, so balance is a
+    # per-block property now, not a per-line one.
+    for block in render_blocks(lesson):
+        assert_balanced_tags(block)
 
 
 def test_render_blocks_are_in_reading_order(lesson: Lesson) -> None:
-    headings = [block.split("\n", 1)[0] for block in render_blocks(lesson)]
-    assert headings[0] == f"<b>{lesson.title_en}</b>"
-    assert headings[1:] == [
-        "<b>Формула</b>",
-        "<b>Правило</b>",
-        "<b>Нюансы</b>",
-        "<b>Примеры</b>",
-        "<b>Типичная ошибка</b>",
-        "<b>Источники</b>",
+    first_lines = [block.split("\n", 1)[0] for block in render_blocks(lesson)]
+    assert first_lines[0] == f"🇬🇧 <b>{lesson.title_en}</b>"
+    assert first_lines[1] == f"📐 <code>{lesson.form}</code>"
+    assert first_lines[2].startswith("💡 <b>Суть:</b> ")
+    assert first_lines[3:] == [
+        "📖 <b>Как это работает</b>",
+        "📝 <b>Примеры</b>",
+        "⚡️ <b>Запомни</b>",
+        "🚫 <b>Ошибка</b>",
+        "🔗 <b>Источники</b>",
     ]
+
+
+def test_rule_body_bolds_leading_labels_and_keeps_paragraph_air() -> None:
+    rule_ru = (
+        "Формы. am используется только с I, is с he, she, it и единственным числом, "
+        "are с we, you, they и множественным числом.\n\n"
+        "Отрицание. not ставится сразу после глагола to be: I am not late, it is not cold, we are not ready."
+    )
+    lesson = Lesson.model_validate(lesson_payload(rule_ru=rule_ru))
+    rule_block = next(block for block in render_blocks(lesson) if block.startswith("📖"))
+
+    assert "<b>Формы.</b> am используется" in rule_block
+    assert "<b>Отрицание.</b> not ставится" in rule_block
+    # The blank line between paragraphs survives inside the quote (breathing room).
+    assert "множественным числом.\n\n<b>Отрицание.</b>" in rule_block
+    assert_balanced_tags(rule_block)
+
+
+def test_rule_body_leaves_a_normal_sentence_without_a_bold_label() -> None:
+    # A long first clause (no short "Label." prefix) must not be mistaken for a label.
+    rule_ru = (
+        "В настоящем времени глагол to be связывает подлежащее с его описанием и почти всегда обязателен, "
+        "в отличие от русского языка, где связка обычно опускается, и поэтому её так легко потерять в "
+        "английском предложении, особенно когда после подлежащего идёт прилагательное или существительное."
+    )
+    lesson = Lesson.model_validate(lesson_payload(rule_ru=rule_ru))
+    rule_block = next(block for block in render_blocks(lesson) if block.startswith("📖"))
+
+    assert "<b>" not in rule_block.split("<blockquote expandable>", 1)[1]
 
 
 def test_split_message_keeps_short_text_whole() -> None:
@@ -144,8 +177,8 @@ def test_maximal_lesson_splits_into_valid_telegram_messages() -> None:
     ]
     lesson = Lesson.model_validate(
         lesson_payload(
-            rule_ru=(sentence * 60)[:2000],
-            nuances_ru=[("н" * 20 + f" {i} " + "ю" * 380)[:400] for i in range(8)],
+            rule_ru=(sentence * 60)[:1200],
+            nuances_ru=[("н" * 20 + f" {i} " + "ю" * 180)[:200] for i in range(4)],
             examples=examples,
             mistake_ru="м" * 400,
             incorrect="x" * 240,
@@ -153,11 +186,12 @@ def test_maximal_lesson_splits_into_valid_telegram_messages() -> None:
             sources=[lesson_payload()["sources"][0]] * 5,
         )
     )
-    text = render_lesson(lesson)
-    assert len(text) > TELEGRAM_MAX_MESSAGE_LENGTH
+    assert len(render_lesson(lesson)) > TELEGRAM_MAX_MESSAGE_LENGTH
 
-    chunks = split_message(text)
+    chunks = render_messages(lesson)
     assert len(chunks) >= 2
     for chunk in chunks:
         assert len(chunk) <= TELEGRAM_MAX_MESSAGE_LENGTH
         assert_balanced_tags(chunk)
+        # The expandable rule quote is never cut across messages.
+        assert chunk.count("<blockquote") == chunk.count("</blockquote>")
