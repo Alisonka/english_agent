@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # Day the course starts: topic N (by `order`) is sent on start + N - 1 days.
     curriculum_start_date: date | None = None
 
+    # OpenTelemetry: OTLP/HTTP base endpoint (e.g. http://localhost:4318 for local
+    # Jaeger). Empty = tracing disabled; spans become no-ops. Uses the standard
+    # OTEL_EXPORTER_OTLP_ENDPOINT env var name.
+    otel_exporter_otlp_endpoint: str = ""
+
     @field_validator("curriculum_start_date", mode="before")
     @classmethod
     def empty_date_is_none(cls, value: object) -> object:

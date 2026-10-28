@@ -21,6 +21,7 @@ from anthropic import Anthropic
 
 from english_agent.config import Settings
 from english_agent.llm.base import AssistantTurn, ToolCall
+from english_agent.tracing import get_tracer
 
 
 def to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
@@ -80,13 +81,26 @@ class AnthropicLLM:
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], tool_choice: Any = "auto"
     ) -> AssistantTurn:
         system, converted = to_anthropic_messages(messages)
-        response = self._client.messages.create(  # type: ignore[call-overload]
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system,
-            messages=converted,
-            tools=to_anthropic_tools(tools),
-            tool_choice=to_anthropic_tool_choice(tool_choice),
-        )
-        blocks = [json.loads(block.model_dump_json(exclude_none=True)) for block in response.content]
-        return parse_response_blocks(blocks)
+        # Attributes follow OTel GenAI semantic conventions. Prompt/response *text*
+        # is intentionally omitted (size and privacy); only shapes and counts.
+        with get_tracer().start_as_current_span("llm.chat") as span:
+            span.set_attribute("gen_ai.system", "anthropic")
+            span.set_attribute("gen_ai.request.model", self.model)
+            span.set_attribute("gen_ai.request.max_tokens", self.max_tokens)
+            response = self._client.messages.create(  # type: ignore[call-overload]
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=system,
+                messages=converted,
+                tools=to_anthropic_tools(tools),
+                tool_choice=to_anthropic_tool_choice(tool_choice),
+            )
+            if response.usage is not None:
+                span.set_attribute("gen_ai.usage.input_tokens", response.usage.input_tokens)
+                span.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+            if response.stop_reason is not None:
+                span.set_attribute("gen_ai.response.finish_reason", response.stop_reason)
+            blocks = [json.loads(block.model_dump_json(exclude_none=True)) for block in response.content]
+            turn = parse_response_blocks(blocks)
+            span.set_attribute("gen_ai.response.tool_calls", len(turn.tool_calls))
+            return turn

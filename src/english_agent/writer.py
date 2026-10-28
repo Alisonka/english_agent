@@ -12,12 +12,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+from opentelemetry.trace import Status, StatusCode
 from pydantic import ValidationError
 
 from english_agent.llm import ChatLLM
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.models.lesson import Lesson
 from english_agent.research.models import TopicNotes
+from english_agent.tracing import get_tracer
 from english_agent.versions import SCHEMA_VERSIONS, build_provenance
 
 _PROMPT = (Path(__file__).resolve().parent / "prompts" / "write_lesson_system.md").read_text(encoding="utf-8")
@@ -71,32 +73,38 @@ def write_lesson(
         },
     ]
 
-    last_error = "model did not call submit_lesson"
-    for _ in range(attempts):
-        turn = llm.chat(messages, [tool], tool_choice=tool_choice)
-        messages.append(turn.to_message())
-        call = next((c for c in turn.tool_calls if c.name == "submit_lesson"), None)
-        if call is None:
-            messages.append({"role": "user", "content": "Call submit_lesson with the lesson."})
-            continue
+    with get_tracer().start_as_current_span("writer.write_lesson") as span:
+        span.set_attribute("topic.id", topic.id)
+        last_error = "model did not call submit_lesson"
+        for attempt in range(1, attempts + 1):
+            turn = llm.chat(messages, [tool], tool_choice=tool_choice)
+            messages.append(turn.to_message())
+            call = next((c for c in turn.tool_calls if c.name == "submit_lesson"), None)
+            if call is None:
+                messages.append({"role": "user", "content": "Call submit_lesson with the lesson."})
+                continue
 
-        payload = {
-            **call.arguments,
-            "topic_id": topic.id,
-            "cefr": "A2",
-            "sources": [notes.source.model_dump()],
-            "provenance": provenance,
-        }
-        try:
-            return Lesson.model_validate(payload)
-        except ValidationError as error:
-            last_error = json.dumps(error.errors(include_url=False)[:5], ensure_ascii=False, default=str)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": f"Lesson rejected, fix these problems and call submit_lesson again: {last_error}",
-                }
-            )
+            payload = {
+                **call.arguments,
+                "topic_id": topic.id,
+                "cefr": "A2",
+                "sources": [notes.source.model_dump()],
+                "provenance": provenance,
+            }
+            try:
+                lesson = Lesson.model_validate(payload)
+                span.set_attribute("writer.attempts", attempt)
+                return lesson
+            except ValidationError as error:
+                last_error = json.dumps(error.errors(include_url=False)[:5], ensure_ascii=False, default=str)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": f"Lesson rejected, fix these problems and call submit_lesson again: {last_error}",
+                    }
+                )
 
-    raise LessonWriteError(f"could not produce a valid lesson after {attempts} attempts: {last_error}")
+        span.set_attribute("writer.attempts", attempts)
+        span.set_status(Status(StatusCode.ERROR, last_error))
+        raise LessonWriteError(f"could not produce a valid lesson after {attempts} attempts: {last_error}")
