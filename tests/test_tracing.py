@@ -17,7 +17,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import StatusCode
 
 from english_agent.config import Settings
-from english_agent.tracing import _redact, configure_tracing
+from english_agent.tracing import _redact, configure_tracing, get_tracer, record_model_output
 from test_research_agent import (
     ENGLEX_URL,
     GOOD_NOTES,
@@ -130,6 +130,25 @@ def test_tool_error_is_recorded_on_span(spans: InMemorySpanExporter) -> None:
     errored = [s for s in search_spans if s.status.status_code is StatusCode.ERROR]
     assert errored, "the out-of-order search should have produced an ERROR span"
     assert any(event.name == "exception" for event in errored[0].events)
+
+
+# -- model output capture ------------------------------------------------------------
+
+
+def test_record_model_output_adds_completion_event(spans: InMemorySpanExporter) -> None:
+    with get_tracer().start_as_current_span("llm.chat") as span:
+        record_model_output(
+            span,
+            "thinking out loud",
+            [{"name": "finish", "arguments": {"found": True, "notes": {"summary_ru": "правило"}}}],
+        )
+
+    (finished,) = spans.get_finished_spans()
+    (event,) = finished.events
+    assert event.name == "gen_ai.content.completion"
+    assert event.attributes is not None
+    assert event.attributes["gen_ai.completion.text"] == "thinking out loud"
+    assert "правило" in event.attributes["gen_ai.completion.tool_calls"]
 
 
 # -- token redaction -----------------------------------------------------------------
