@@ -1,19 +1,74 @@
-# Local tracing backend. Jaeger is only the collector + storage + UI; the app
-# itself is instrumented with the OpenTelemetry SDK and exports over OTLP/HTTP.
+# The server stack: PostgreSQL, a one-shot migration, the app (bot + daily lesson) and Jaeger.
+# Every port is published on 127.0.0.1 only: the server has a public IP, and Docker's
+# published ports bypass the host firewall. Reach them from a laptop over SSH, e.g.
+# `ssh -L 5432:localhost:5432 -L 16686:localhost:16686 vpn`.
 #
-#   docker compose up -d                 # start Jaeger
+#   docker compose up -d --build         # postgres -> migrate -> app, plus jaeger
+#   docker compose logs -f app
+#   open http://localhost:16686          # the Jaeger UI
+#
+# Locally, `docker compose up -d jaeger` starts only the tracing backend:
 #   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 #     uv run python -m english_agent.pipeline --topic there_is_are --no-send
-#   open http://localhost:16686          # the Jaeger UI
-#   docker compose down                  # stop it (in-memory traces are lost)
+x-app: &app
+  build: .
+  image: english-agent:latest
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+psycopg://english_agent:${POSTGRES_PASSWORD}@postgres:5432/english_agent
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+
 services:
+  postgres:
+    image: postgres:17
+    container_name: english-agent-postgres
+    environment:
+      POSTGRES_DB: english_agent
+      POSTGRES_USER: english_agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U english_agent -d english_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    <<: *app
+    container_name: english-agent-app
+    volumes:
+      - appcache:/app/.cache # sitemap cache
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+    stop_grace_period: 2m # let a lesson in progress finish on `docker compose stop`
+
   jaeger:
     image: jaegertracing/all-in-one:1.62.0
     container_name: english-agent-jaeger
     ports:
-      - "16686:16686" # Jaeger UI
-      - "4317:4317" # OTLP/gRPC
-      - "4318:4318" # OTLP/HTTP (what this project uses)
+      - "127.0.0.1:16686:16686" # Jaeger UI
+      - "127.0.0.1:4317:4317" # OTLP/gRPC
+      - "127.0.0.1:4318:4318" # OTLP/HTTP (what this project uses)
     environment:
       - COLLECTOR_OTLP_ENABLED=true
     restart: unless-stopped
+
+volumes:
+  pgdata:
+  appcache:
