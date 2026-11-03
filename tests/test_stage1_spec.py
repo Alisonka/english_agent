@@ -116,7 +116,7 @@ def test_lesson_schema_accepts_valid_payload() -> None:
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"cefr": "B1"},
+        {"cefr": "A1"},  # outside the supported A2..C1 range
         {"examples": []},
         {"examples": [{"en": "Hi", "ru": "Привет", "highlights": ["Hi"]}]},
         {"sources": []},

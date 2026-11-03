@@ -8,3 +8,6 @@ __pycache__/
 dist/
 .env
 .cache/
+.state/
+reports/
+research_notes/

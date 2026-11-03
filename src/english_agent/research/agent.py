@@ -25,6 +25,7 @@ from opentelemetry.trace import Span, Status, StatusCode
 from pydantic import ValidationError
 
 from english_agent.llm import ChatLLM, ToolCall
+from english_agent.models.cefr import Cefr
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.research.models import (
     NOT_FOUND_MESSAGE,
@@ -72,6 +73,7 @@ class ResearchAgent:
         max_searches_per_site: int = 3,
         today: date | None = None,
         curriculum_version: int | None = None,
+        cefr: Cefr = "A2",
     ) -> None:
         self._llm = llm
         self._tools = tools
@@ -80,6 +82,7 @@ class ResearchAgent:
         self._max_searches_per_site = max_searches_per_site
         self._today = today or date.today()
         self._curriculum_version = curriculum_version
+        self._cefr = cefr
         self._system_prompt = _PROMPT_PATH.read_text(encoding="utf-8")
         self._tool_specs = tool_specs()
 
@@ -285,7 +288,7 @@ class ResearchAgent:
             f"Topic id: {topic.id}\n"
             f"Title (en): {topic.title_en}\n"
             f"Title (ru): {topic.title_ru}\n"
-            f"Level: A2\n"
+            f"Level: {self._cefr}\n"
             f"Today: {self._today.isoformat()}\n"
             "Start with englex."
         )
