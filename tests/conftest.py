@@ -1,10 +1,46 @@
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from sqlalchemy import Engine
+from sqlalchemy.orm import sessionmaker
 
+from db import run_alembic, schema_engine
 from english_agent.models.lesson import Lesson
+from english_agent.storage import SessionFactory
+
+
+@pytest.fixture(scope="session")
+def database_url() -> str:
+    """PostgreSQL for the storage tests; they are skipped when DATABASE_URL is not set."""
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        pytest.skip("DATABASE_URL is not set")
+    return url
+
+
+@pytest.fixture(scope="session")
+def migrated_engine(database_url: str) -> Iterator[Engine]:
+    with schema_engine(database_url) as engine:
+        run_alembic(engine, "upgrade", "head")
+        yield engine
+
+
+@pytest.fixture
+def sessions(migrated_engine: Engine) -> Iterator[SessionFactory]:
+    """Sessions inside one outer transaction that is rolled back after the test.
+
+    Repository commits become savepoints, so every test starts from empty tables.
+    """
+    with migrated_engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            yield sessionmaker(bind=connection, join_transaction_mode="create_savepoint", expire_on_commit=False)
+        finally:
+            transaction.rollback()
 
 
 def lesson_payload(**overrides: Any) -> dict[str, Any]:
