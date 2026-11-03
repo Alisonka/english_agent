@@ -1,0 +1,320 @@
+# C1 curriculum skeleton: topic titles only. Lesson text is researched at send time.
+# Order is the send sequence. Do not rename ids once a topic has been sent.
+# Topics follow the standard C1 (advanced) syllabus: it builds on B2 and focuses
+# on nuance, register and complex syntax; a few B2 areas are revisited (tag `review`).
+version: 1
+cefr: C1
+explanation_language: ru
+example_language: en
+topics:
+  - id: tense_contrasts_advanced
+    title_en: Subtle tense and aspect contrasts
+    title_ru: Тонкие противопоставления времён и аспекта
+    order: 1
+    tags: [tenses, aspect, review]
+
+  - id: stative_dynamic_nuance
+    title_en: Stative and dynamic uses of verbs
+    title_ru: Статические и динамические значения глаголов
+    order: 2
+    tags: [tenses, aspect]
+
+  - id: present_perfect_advanced
+    title_en: Present Perfect in formal and academic use
+    title_ru: Present Perfect в формальном и академическом стиле
+    order: 3
+    tags: [tenses, perfect, register]
+
+  - id: narrative_tenses_advanced
+    title_en: Advanced narrative tenses and backshift
+    title_ru: Времена в повествовании и согласование — продвинутый уровень
+    order: 4
+    tags: [tenses, narrative]
+
+  - id: future_forms_nuance
+    title_en: Fine distinctions between future forms
+    title_ru: Тонкие различия между формами будущего
+    order: 5
+    tags: [tenses, future]
+
+  - id: mixed_conditionals_review
+    title_en: Mixed and multi-clause conditionals (review)
+    title_ru: Смешанные и многочастные условные — повторение
+    order: 6
+    tags: [conditionals, review]
+
+  - id: formal_conditionals
+    title_en: "Formal conditionals (should you, were to, but for)"
+    title_ru: "Формальные условные — should you, were to, but for"
+    order: 7
+    tags: [conditionals, formal]
+
+  - id: inversion_conditionals_advanced
+    title_en: "Advanced inversion in conditionals (Had it not been for)"
+    title_ru: "Инверсия в условных — Had it not been for"
+    order: 8
+    tags: [conditionals, inversion, formal]
+
+  - id: inversion_advanced_range
+    title_en: "Inversion for emphasis (Not only, Little, Rarely, Only then)"
+    title_ru: "Инверсия для эмфазы — Not only, Little, Rarely, Only then"
+    order: 9
+    tags: [inversion, emphasis, formal]
+
+  - id: fronting_for_emphasis
+    title_en: Fronting and marked word order
+    title_ru: Вынос в начало и маркированный порядок слов
+    order: 10
+    tags: [emphasis, syntax]
+
+  - id: cleft_sentences_advanced
+    title_en: "Advanced cleft sentences (all-cleft, there-cleft)"
+    title_ru: "Сложные расщеплённые предложения — all-cleft, there-cleft"
+    order: 11
+    tags: [emphasis, cleft]
+
+  - id: nominalisation
+    title_en: Nominalisation in formal writing
+    title_ru: Номинализация в формальном письме
+    order: 12
+    tags: [register, syntax, writing]
+
+  - id: passive_advanced_impersonal
+    title_en: Advanced and impersonal passive
+    title_ru: Продвинутый и безличный пассив
+    order: 13
+    tags: [passive, register, formal]
+
+  - id: get_passive_nuance
+    title_en: "The get-passive and its connotations"
+    title_ru: "Пассив с get и его оттенки значения"
+    order: 14
+    tags: [passive, spoken]
+
+  - id: participle_clauses_advanced
+    title_en: Advanced participle clauses
+    title_ru: Причастные обороты — продвинутый уровень
+    order: 15
+    tags: [participle_clauses, syntax]
+
+  - id: absolute_constructions
+    title_en: "Absolute constructions (The meeting over, we left)"
+    title_ru: "Абсолютные обороты — The meeting over, we left"
+    order: 16
+    tags: [participle_clauses, syntax, formal]
+
+  - id: subjunctive_formal
+    title_en: "Formal subjunctive (be it, suffice it to say, lest)"
+    title_ru: "Формальное сослагательное — be it, suffice it to say, lest"
+    order: 17
+    tags: [subjunctive, formal]
+
+  - id: unreal_past_advanced
+    title_en: "Advanced unreal past (it's high time, would sooner)"
+    title_ru: "Нереальное прошлое — it's high time, would sooner"
+    order: 18
+    tags: [unreal, modals]
+
+  - id: epistemic_modality_advanced
+    title_en: Advanced epistemic modality and certainty
+    title_ru: Эпистемическая модальность и степень уверенности
+    order: 19
+    tags: [modals, deduction]
+
+  - id: modal_hedging_academic
+    title_en: Modal hedging in academic style
+    title_ru: Модальное смягчение в академическом стиле
+    order: 20
+    tags: [modals, hedging, register]
+
+  - id: reporting_and_distancing
+    title_en: "Distancing and reporting (apparently, allegedly, reportedly)"
+    title_ru: "Дистанцирование в сообщении — apparently, allegedly"
+    order: 21
+    tags: [reported_speech, register]
+
+  - id: reporting_verbs_advanced
+    title_en: Advanced reporting verb patterns
+    title_ru: Продвинутые модели глаголов сообщения
+    order: 22
+    tags: [reported_speech, verb_patterns]
+
+  - id: relative_clauses_advanced
+    title_en: "Advanced relative clauses (prepositional, of which)"
+    title_ru: "Сложные относительные придаточные — of which, предлог + whom"
+    order: 23
+    tags: [relative_clauses, formal]
+
+  - id: ellipsis_advanced
+    title_en: Advanced ellipsis
+    title_ru: Эллипсис — продвинутый уровень
+    order: 24
+    tags: [cohesion, ellipsis]
+
+  - id: substitution_advanced
+    title_en: "Substitution (one, so, do so, the former / the latter)"
+    title_ru: "Замещение — one, so, do so, the former / the latter"
+    order: 25
+    tags: [cohesion, substitution]
+
+  - id: discourse_cohesion
+    title_en: Cohesion and reference across a text
+    title_ru: Связность и референция в тексте
+    order: 26
+    tags: [cohesion, discourse, writing]
+
+  - id: formal_connectors
+    title_en: "Formal connectors (notwithstanding, hence, thereby, whereby)"
+    title_ru: "Формальные коннекторы — notwithstanding, hence, thereby"
+    order: 27
+    tags: [linkers, register, formal]
+
+  - id: concession_advanced
+    title_en: "Advanced concession (much as, albeit, for all, while)"
+    title_ru: "Уступка — much as, albeit, for all, while"
+    order: 28
+    tags: [concession, linkers, formal]
+
+  - id: emphasis_and_intensification
+    title_en: Advanced emphasis and intensification
+    title_ru: Эмфаза и усиление — продвинутый уровень
+    order: 29
+    tags: [emphasis, degree]
+
+  - id: hedging_and_boosting_academic
+    title_en: Hedging and boosting in academic register
+    title_ru: Смягчение и усиление в академическом регистре
+    order: 30
+    tags: [register, hedging, writing]
+
+  - id: collocations_advanced
+    title_en: Advanced collocations
+    title_ru: Продвинутые коллокации
+    order: 31
+    tags: [vocabulary, collocations]
+
+  - id: idiomatic_language
+    title_en: Idiomatic and figurative language
+    title_ru: Идиоматический и образный язык
+    order: 32
+    tags: [vocabulary, idioms]
+
+  - id: phrasal_verbs_advanced_c1
+    title_en: Advanced and nominalised phrasal verbs
+    title_ru: Сложные и субстантивированные фразовые глаголы
+    order: 33
+    tags: [vocabulary, phrasal_verbs]
+
+  - id: register_and_style
+    title_en: Register and style shifting
+    title_ru: Регистр и переключение стиля
+    order: 34
+    tags: [register, spoken, writing]
+
+  - id: euphemism_and_understatement
+    title_en: Euphemism and understatement
+    title_ru: Эвфемизм и преуменьшение (understatement)
+    order: 35
+    tags: [register, spoken]
+
+  - id: articles_advanced_c1
+    title_en: "Articles in generalisation and fixed phrases"
+    title_ru: "Артикли в обобщениях и устойчивых выражениях"
+    order: 36
+    tags: [articles, register]
+
+  - id: quantification_advanced
+    title_en: "Approximation and proportion (the bulk of, a fraction of)"
+    title_ru: "Приблизительность и доля — the bulk of, a fraction of"
+    order: 37
+    tags: [quantifiers]
+
+  - id: adjective_order_advanced
+    title_en: Adjective order and complex premodification
+    title_ru: Порядок прилагательных и сложное определение
+    order: 38
+    tags: [adjectives, syntax]
+
+  - id: adverbials_scope_and_position
+    title_en: Adverbial scope and position
+    title_ru: Сфера действия и место обстоятельств
+    order: 39
+    tags: [adverbs, syntax]
+
+  - id: comparatives_advanced_c1
+    title_en: "Advanced comparison (all the more, none the worse)"
+    title_ru: "Сложное сравнение — all the more, none the worse"
+    order: 40
+    tags: [comparison, adjectives]
+
+  - id: prepositional_phrases_advanced
+    title_en: Advanced prepositional and participial phrases
+    title_ru: Сложные предложные и причастные обороты
+    order: 41
+    tags: [prepositions, syntax]
+
+  - id: dependent_prepositions_advanced
+    title_en: Advanced dependent prepositions
+    title_ru: Зависимые предлоги — продвинутые случаи
+    order: 42
+    tags: [prepositions, vocabulary]
+
+  - id: verb_complementation_advanced
+    title_en: Advanced verb complementation
+    title_ru: Продвинутое глагольное дополнение (модели управления)
+    order: 43
+    tags: [verb_patterns, syntax]
+
+  - id: that_clauses_and_subjunctive
+    title_en: "that-clauses after adjectives and nouns"
+    title_ru: "Придаточные с that после прилагательных и существительных"
+    order: 44
+    tags: [verb_patterns, syntax]
+
+  - id: tense_backshift_advanced
+    title_en: Advanced backshift and sequence of tenses
+    title_ru: Согласование времён — продвинутый уровень
+    order: 45
+    tags: [reported_speech, tenses]
+
+  - id: future_in_the_past_review
+    title_en: "Future in the past (review and nuance)"
+    title_ru: "Будущее в прошедшем — повторение и нюансы"
+    order: 46
+    tags: [tenses, future, review]
+
+  - id: complex_sentence_syntax
+    title_en: Complex sentence syntax and punctuation
+    title_ru: Синтаксис сложного предложения и пунктуация
+    order: 47
+    tags: [syntax, writing, punctuation]
+
+  - id: subordination_and_embedding
+    title_en: Subordination and embedded clauses
+    title_ru: Подчинение и вложенные придаточные
+    order: 48
+    tags: [syntax, clauses]
+
+  - id: emphatic_structures_combined
+    title_en: Combining emphatic structures
+    title_ru: Сочетание эмфатических конструкций
+    order: 49
+    tags: [emphasis, syntax]
+
+  - id: spoken_grammar_c1
+    title_en: "Spoken grammar (tails, headers, backchannelling)"
+    title_ru: "Грамматика устной речи — tails, headers, поддакивание"
+    order: 50
+    tags: [spoken, discourse]
+
+  - id: metaphor_in_register
+    title_en: Metaphor and connotation across registers
+    title_ru: Метафора и коннотация в разных регистрах
+    order: 51
+    tags: [vocabulary, register]
+
+  - id: cohesive_devices_review
+    title_en: "Cohesive devices (review and synthesis)"
+    title_ru: "Средства связности — повторение и синтез"
+    order: 52
+    tags: [cohesion, discourse, review]

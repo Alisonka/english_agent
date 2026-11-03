@@ -1,3 +1,4 @@
+from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
 from english_agent.models.golden import (
     ExampleConstraints,
@@ -15,6 +16,8 @@ from english_agent.models.lesson import (
 )
 
 __all__ = [
+    "CEFR_LEVELS",
+    "Cefr",
     "Curriculum",
     "CurriculumTopic",
     "EXAMPLE_MAX",

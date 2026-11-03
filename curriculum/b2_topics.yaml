@@ -1,0 +1,332 @@
+# B2 curriculum skeleton: topic titles only. Lesson text is researched at send time.
+# Order is the send sequence. Do not rename ids once a topic has been sent.
+# Topics follow the standard B2 (upper-intermediate) syllabus: it builds on B1
+# and revisits a few B1 areas at a deeper level (marked with the `review` tag).
+version: 1
+cefr: B2
+explanation_language: ru
+example_language: en
+topics:
+  - id: narrative_tenses_review_b2
+    title_en: Narrative tenses (review and nuance)
+    title_ru: Времена в рассказе — повторение и нюансы
+    order: 1
+    tags: [tenses, past, narrative, review]
+
+  - id: perfect_aspect_overview
+    title_en: The perfect aspect across tenses
+    title_ru: Перфектный аспект во всех временах — обзор
+    order: 2
+    tags: [tenses, perfect, review]
+
+  - id: continuous_for_emphasis
+    title_en: Continuous forms for emphasis and temporariness
+    title_ru: Длительные формы для эмфазы и временности
+    order: 3
+    tags: [tenses, continuous]
+
+  - id: future_forms_overview
+    title_en: Overview of future forms
+    title_ru: Все способы говорить о будущем — обзор
+    order: 4
+    tags: [tenses, future, review]
+
+  - id: future_perfect_continuous
+    title_en: Future Perfect Continuous
+    title_ru: Future Perfect Continuous — длительность к моменту в будущем
+    order: 5
+    tags: [tenses, future, perfect, continuous]
+
+  - id: future_in_the_past
+    title_en: "Future in the past (was going to, would)"
+    title_ru: "Будущее в прошедшем — was going to, would"
+    order: 6
+    tags: [tenses, past, future]
+
+  - id: mixed_conditionals
+    title_en: Mixed conditionals
+    title_ru: Смешанные условные предложения
+    order: 7
+    tags: [conditionals, unreal]
+
+  - id: conditionals_without_if
+    title_en: "Conditionals without if (unless, provided, as long as)"
+    title_ru: "Условие без if — unless, provided, as long as"
+    order: 8
+    tags: [conditionals, conjunctions]
+
+  - id: inversion_in_conditionals
+    title_en: "Inversion in conditionals (Had I known, Were I)"
+    title_ru: "Инверсия в условных — Had I known, Were I"
+    order: 9
+    tags: [conditionals, inversion, formal]
+
+  - id: wish_would
+    title_en: "wish / if only + would (annoyance, wanting change)"
+    title_ru: "wish и if only + would — раздражение и желание перемен"
+    order: 10
+    tags: [wish, unreal]
+
+  - id: unreal_past_its_time
+    title_en: "Unreal past: it's time, would rather, as if / as though"
+    title_ru: "Нереальное прошлое — it's time, would rather, as if"
+    order: 11
+    tags: [unreal, modals]
+
+  - id: modals_deduction_review
+    title_en: "Modals of deduction, present and past (review)"
+    title_ru: "Модальные предположения — настоящее и прошлое, повторение"
+    order: 12
+    tags: [modals, deduction, review]
+
+  - id: be_supposed_to_meant_to
+    title_en: "be supposed to / be meant to"
+    title_ru: "be supposed to и be meant to — ожидаемое и предписанное"
+    order: 13
+    tags: [modals, expectation]
+
+  - id: neednt_have_vs_didnt_need_to
+    title_en: "needn't have done vs didn't need to do"
+    title_ru: "needn't have done и didn't need to — ненужное действие"
+    order: 14
+    tags: [modals, past, contrast]
+
+  - id: would_nuances
+    title_en: "would for past habits, willingness and annoyance"
+    title_ru: "would — прошлые привычки, готовность и раздражение"
+    order: 15
+    tags: [modals, past, habits]
+
+  - id: passive_reporting_structures
+    title_en: "Passive reporting (It is said that... / He is said to...)"
+    title_ru: "Пассив в сообщениях — It is said that / He is said to"
+    order: 16
+    tags: [passive, reported_speech, formal]
+
+  - id: passive_gerund_and_infinitive
+    title_en: "Passive -ing and infinitive (being done, to be done)"
+    title_ru: "Пассив в герундии и инфинитиве — being done, to be done"
+    order: 17
+    tags: [passive, verb_patterns]
+
+  - id: causative_make_let_have_get
+    title_en: "make / let / have / get someone to do something"
+    title_ru: "make, let, have, get — заставить и попросить сделать"
+    order: 18
+    tags: [causative, verb_patterns]
+
+  - id: participle_clauses_present_past
+    title_en: "Participle clauses (-ing and -ed)"
+    title_ru: "Причастные обороты с -ing и -ed"
+    order: 19
+    tags: [participle_clauses]
+
+  - id: perfect_participle_clauses
+    title_en: "Perfect participle clauses (Having done...)"
+    title_ru: "Перфектные причастные обороты — Having done..."
+    order: 20
+    tags: [participle_clauses, perfect]
+
+  - id: reduced_relative_clauses
+    title_en: Reduced relative clauses
+    title_ru: Сокращённые определительные придаточные
+    order: 21
+    tags: [relative_clauses]
+
+  - id: relative_clauses_with_quantifiers
+    title_en: "Relative clauses with quantifiers (many of whom)"
+    title_ru: "Относительные придаточные с кванторами — many of whom"
+    order: 22
+    tags: [relative_clauses, quantifiers]
+
+  - id: reporting_verbs_patterns
+    title_en: "Reporting verbs and their patterns (admit, suggest, accuse of)"
+    title_ru: "Глаголы сообщения и их модели — admit, suggest, accuse of"
+    order: 23
+    tags: [reported_speech, verb_patterns]
+
+  - id: cleft_sentences_it
+    title_en: "Cleft sentences with it (It was John who...)"
+    title_ru: "Расщеплённые предложения с it — It was John who..."
+    order: 24
+    tags: [emphasis, cleft]
+
+  - id: cleft_sentences_what
+    title_en: "Cleft sentences with what (What I need is...)"
+    title_ru: "Расщеплённые предложения с what — What I need is..."
+    order: 25
+    tags: [emphasis, cleft]
+
+  - id: inversion_negative_adverbials
+    title_en: "Inversion after negative adverbials (Never have I...)"
+    title_ru: "Инверсия после отрицательных наречий — Never have I..."
+    order: 26
+    tags: [inversion, emphasis, formal]
+
+  - id: emphatic_do
+    title_en: "Emphatic do / does / did"
+    title_ru: "Усилительное do, does, did"
+    order: 27
+    tags: [emphasis]
+
+  - id: gradable_non_gradable_adjectives
+    title_en: Gradable and non-gradable adjectives
+    title_ru: Градуируемые и неградуируемые прилагательные
+    order: 28
+    tags: [adjectives, degree]
+
+  - id: comparatives_advanced
+    title_en: "Advanced comparatives (nowhere near, by far, not nearly)"
+    title_ru: "Сложные сравнения — nowhere near, by far, not nearly"
+    order: 29
+    tags: [adjectives, comparison]
+
+  - id: articles_advanced_b2
+    title_en: Advanced use of articles
+    title_ru: Артикли — сложные случаи употребления
+    order: 30
+    tags: [articles]
+
+  - id: quantifiers_advanced
+    title_en: "Advanced quantifiers (few / little, a great deal of)"
+    title_ru: "Сложные кванторы — few/little, a great deal of"
+    order: 31
+    tags: [quantifiers]
+
+  - id: determiners_each_every_either_neither
+    title_en: "each / every / either / neither"
+    title_ru: "each, every, either, neither — выбор и распределение"
+    order: 32
+    tags: [determiners]
+
+  - id: time_linkers_b2
+    title_en: "Time linkers (as, while, by the time, no sooner)"
+    title_ru: "Связки времени — as, while, by the time, no sooner"
+    order: 33
+    tags: [time_clauses, linkers]
+
+  - id: concession_clauses
+    title_en: "Concession (although, though, despite, in spite of)"
+    title_ru: "Уступка — although, though, despite, in spite of"
+    order: 34
+    tags: [clauses, concession, linkers]
+
+  - id: purpose_clauses
+    title_en: "Purpose clauses (so that, in order to, so as to)"
+    title_ru: "Придаточные цели — so that, in order to, so as to"
+    order: 35
+    tags: [clauses, purpose, linkers]
+
+  - id: result_clauses
+    title_en: "Result clauses (so / such ... that, as a result)"
+    title_ru: "Придаточные следствия — so/such ... that, as a result"
+    order: 36
+    tags: [clauses, result, linkers]
+
+  - id: verbs_of_perception
+    title_en: "Verbs of perception (see her leave / leaving)"
+    title_ru: "Глаголы восприятия — see her leave и see her leaving"
+    order: 37
+    tags: [verb_patterns, perception]
+
+  - id: gerund_infinitive_advanced
+    title_en: "Gerund and infinitive — advanced meaning changes"
+    title_ru: "Герундий и инфинитив — тонкие изменения смысла"
+    order: 38
+    tags: [verb_patterns, contrast]
+
+  - id: subjunctive_advice_verbs
+    title_en: "Subjunctive after suggest / insist / demand"
+    title_ru: "Сослагательное после suggest, insist, demand (+ base form)"
+    order: 39
+    tags: [subjunctive, verb_patterns, formal]
+
+  - id: ellipsis_and_substitution
+    title_en: "Ellipsis and substitution (so do I, neither do they)"
+    title_ru: "Эллипсис и замещение — so do I, neither do they"
+    order: 40
+    tags: [cohesion, ellipsis]
+
+  - id: adverb_position_and_focus
+    title_en: "Adverb position and focus adverbs (even, only, just)"
+    title_ru: "Место наречий и фокусные наречия — even, only, just"
+    order: 41
+    tags: [adverbs]
+
+  - id: intensifiers_and_mitigators
+    title_en: "Intensifiers and softeners (quite, fairly, rather, pretty)"
+    title_ru: "Усилители и смягчители — quite, fairly, rather, pretty"
+    order: 42
+    tags: [adverbs, degree]
+
+  - id: contrast_linkers_whereas_however
+    title_en: "Contrast linkers (whereas, however, on the other hand)"
+    title_ru: "Связки контраста — whereas, however, on the other hand"
+    order: 43
+    tags: [linkers, contrast]
+
+  - id: delexical_verbs_collocations
+    title_en: "Delexical verbs (make / do / take / have) collocations"
+    title_ru: "Делексические глаголы — make, do, take, have в коллокациях"
+    order: 44
+    tags: [vocabulary, collocations]
+
+  - id: phrasal_verbs_advanced
+    title_en: "Advanced phrasal verbs (separable and inseparable)"
+    title_ru: "Сложные фразовые глаголы — отделяемые и неотделяемые"
+    order: 45
+    tags: [vocabulary, phrasal_verbs]
+
+  - id: dependent_prepositions
+    title_en: Dependent prepositions after verbs and adjectives
+    title_ru: Зависимые предлоги после глаголов и прилагательных
+    order: 46
+    tags: [vocabulary, prepositions]
+
+  - id: fixed_prepositional_phrases
+    title_en: "Fixed prepositional phrases (on time, in charge of)"
+    title_ru: "Устойчивые предложные обороты — on time, in charge of"
+    order: 47
+    tags: [vocabulary, prepositions, collocations]
+
+  - id: compound_adjectives
+    title_en: "Compound adjectives (well-known, time-consuming)"
+    title_ru: "Составные прилагательные — well-known, time-consuming"
+    order: 48
+    tags: [adjectives, word_formation]
+
+  - id: word_formation_affixes
+    title_en: "Word formation (prefixes and suffixes)"
+    title_ru: "Словообразование — приставки и суффиксы"
+    order: 49
+    tags: [vocabulary, word_formation]
+
+  - id: future_time_clauses_review
+    title_en: "Future time and conditional clauses (review)"
+    title_ru: "Придаточные времени и условия для будущего — повторение"
+    order: 50
+    tags: [time_clauses, future, review]
+
+  - id: vague_language_hedging
+    title_en: "Vague language and hedging (sort of, kind of, -ish)"
+    title_ru: "Размытый язык и смягчение — sort of, kind of, -ish"
+    order: 51
+    tags: [spoken, hedging]
+
+  - id: discourse_markers_b2
+    title_en: "Discourse markers (anyway, actually, mind you)"
+    title_ru: "Дискурсивные маркеры — anyway, actually, mind you"
+    order: 52
+    tags: [spoken, discourse]
+
+  - id: relative_clauses_sentential
+    title_en: "Sentential relative clauses (..., which was a surprise)"
+    title_ru: "Относительное придаточное ко всему предложению — ..., which"
+    order: 53
+    tags: [relative_clauses]
+
+  - id: so_such_that_structures
+    title_en: "so / such ... that for degree and result"
+    title_ru: "Конструкции so/such ... that — степень и следствие"
+    order: 54
+    tags: [degree, result, emphasis]

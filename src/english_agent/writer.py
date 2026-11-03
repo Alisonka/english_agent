@@ -16,6 +16,7 @@ from opentelemetry.trace import Status, StatusCode
 from pydantic import ValidationError
 
 from english_agent.llm import ChatLLM
+from english_agent.models.cefr import Cefr
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.models.lesson import Lesson
 from english_agent.research.models import TopicNotes
@@ -50,6 +51,7 @@ def write_lesson(
     topic: CurriculumTopic,
     notes: TopicNotes,
     *,
+    cefr: Cefr = "A2",
     attempts: int = 2,
     curriculum_version: int | None = None,
 ) -> Lesson:
@@ -67,7 +69,7 @@ def write_lesson(
         {
             "role": "user",
             "content": (
-                f"Topic: {topic.title_en} / {topic.title_ru} (id: {topic.id}, level A2)\n\n"
+                f"Topic: {topic.title_en} / {topic.title_ru} (id: {topic.id}, level {cefr})\n\n"
                 f"Research notes (JSON):\n{notes.model_dump_json(indent=2, ensure_ascii=False)}"
             ),
         },
@@ -87,7 +89,7 @@ def write_lesson(
             payload = {
                 **call.arguments,
                 "topic_id": topic.id,
-                "cefr": "A2",
+                "cefr": cefr,
                 "sources": [notes.source.model_dump()],
                 "provenance": provenance,
             }

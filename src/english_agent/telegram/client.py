@@ -41,18 +41,67 @@ class TelegramClient:
             raise TelegramError(f"{method} failed: {description}")
         return body["result"]
 
-    def send_message(self, chat_id: str, text: str, *, parse_mode: str = "HTML") -> int:
+    def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        parse_mode: str = "HTML",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> int:
         """Send one message; returns Telegram's message_id."""
-        result = self._call(
-            "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": parse_mode,
-                "link_preview_options": {"is_disabled": True},
-            },
-        )
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "link_preview_options": {"is_disabled": True},
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        result = self._call("sendMessage", payload)
         return int(result["message_id"])
+
+    def edit_message_text(
+        self,
+        chat_id: str,
+        message_id: int,
+        text: str,
+        *,
+        parse_mode: str = "HTML",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        """Replace the text (and optionally the keyboard) of a message we sent."""
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "link_preview_options": {"is_disabled": True},
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        self._call("editMessageText", payload)
+
+    def answer_callback_query(self, callback_query_id: str, *, text: str | None = None) -> None:
+        """Acknowledge a button tap so Telegram stops its loading spinner."""
+        payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text is not None:
+            payload["text"] = text
+        self._call("answerCallbackQuery", payload)
+
+    def get_updates(self, offset: int | None = None, *, timeout: int = 0) -> list[dict[str, Any]]:
+        """Pending updates. `timeout` > 0 long-polls; `offset` acks everything below it."""
+        payload: dict[str, Any] = {"timeout": timeout}
+        if offset is not None:
+            payload["offset"] = offset
+        return list(self._call("getUpdates", payload))
+
+    def set_my_commands(self, commands: list[tuple[str, str]]) -> None:
+        """Register the bot's command menu (the list shown behind the `/` button)."""
+        self._call(
+            "setMyCommands",
+            {"commands": [{"command": command, "description": description} for command, description in commands]},
+        )
 
     def send_lesson(self, chat_id: str, lesson: Lesson) -> list[int]:
         """Render the lesson and send it, split into as many messages as needed, in order."""
