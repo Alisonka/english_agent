@@ -1,0 +1,7 @@
+# User unit: install into ~/.config/systemd/user/ together with the .timer (see README, "Backups").
+[Unit]
+Description=english-agent PostgreSQL backup (pg_dump)
+
+[Service]
+Type=oneshot
+ExecStart=%h/english_agent/scripts/pg_backup.sh
