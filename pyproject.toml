@@ -14,6 +14,10 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "pyyaml>=6.0",
     "trafilatura>=2.3.1",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.14",
+    "apscheduler>=3.11,<4",
 ]
 
 [dependency-groups]
@@ -58,3 +62,8 @@ warn_unused_configs = true
 no_implicit_optional = true
 disallow_untyped_defs = true
 check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# APScheduler 3.x ships without type information (no py.typed).
+module = ["apscheduler.*"]
+ignore_missing_imports = true

@@ -4,26 +4,28 @@
 
 A small long-polling loop over the sync `TelegramClient` (no aiogram yet): it
 answers /level and /start with an inline keyboard of the levels that actually
-have a curriculum, and writes the choice to the learner state file the daily
-pipeline reads. Run it on a machine with a persistent filesystem (local or a
-VPS); a stateless CI run instead uses the LEARNER_CEFR fallback.
+have a curriculum, and stores the choice in the `learners` table the daily
+pipeline reads. On the server the same loop runs inside `english_agent.app`,
+which must stay the only `getUpdates` consumer of the bot.
 """
 
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+import time
 from typing import Any, cast
 
 import httpx
+from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent.config import Settings
-from english_agent.learner import LearnerState, load_learner_state, save_learner_state
 from english_agent.models.cefr import Cefr
 from english_agent.paths import available_cefr_levels
+from english_agent.storage.repositories import LearnerStore, open_stores
 from english_agent.telegram.client import TelegramClient, TelegramError
 
 _LONG_POLL_SECONDS = 25
+_RETRY_SECONDS = 5
 
 _PROMPT = "Выбери свой уровень английского. Поменять можно в любой момент командой /level."
 _HELP = (
@@ -47,7 +49,7 @@ def _handle_message(
     client: TelegramClient,
     message: dict[str, Any],
     *,
-    state_path: Path,
+    learners: LearnerStore,
     available: list[str],
     default_cefr: Cefr,
 ) -> None:
@@ -56,10 +58,12 @@ def _handle_message(
     command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
 
     if command in {"/start", "/level"}:
+        if command == "/start":
+            learners.get_or_create(chat_id, default_cefr)
         client.send_message(chat_id, _PROMPT, reply_markup=_keyboard(available))
     elif command == "/mylevel":
-        state = load_learner_state(state_path)
-        current = state.cefr if state is not None else default_cefr
+        learner = learners.get(chat_id)
+        current = learner.cefr if learner is not None else default_cefr
         client.send_message(chat_id, f"Текущий уровень: <b>{current}</b>. Сменить — /level.")
     else:
         client.send_message(chat_id, _HELP)
@@ -69,7 +73,7 @@ def _handle_callback(
     client: TelegramClient,
     callback: dict[str, Any],
     *,
-    state_path: Path,
+    learners: LearnerStore,
     available: list[str],
 ) -> None:
     callback_id = str(callback["id"])
@@ -83,11 +87,17 @@ def _handle_callback(
         client.answer_callback_query(callback_id, text="Этот уровень пока недоступен.")
         return
 
-    save_learner_state(LearnerState(cefr=cast(Cefr, chosen)), state_path)
-    client.answer_callback_query(callback_id, text=f"Уровень обновлён: {chosen}")
-
     message = callback.get("message") or {}
     chat = message.get("chat") or {}
+    # In a private chat the chat id equals the user id, so `from` covers a callback without a message.
+    chat_id = chat.get("id", (callback.get("from") or {}).get("id"))
+    if chat_id is None:
+        client.answer_callback_query(callback_id)
+        return
+
+    learners.set_cefr(str(chat_id), cast(Cefr, chosen))
+    client.answer_callback_query(callback_id, text=f"Уровень обновлён: {chosen}")
+
     if chat.get("id") is not None and message.get("message_id") is not None:
         client.edit_message_text(
             str(chat["id"]),
@@ -100,7 +110,7 @@ def process_updates(
     client: TelegramClient,
     updates: list[dict[str, Any]],
     *,
-    state_path: Path,
+    learners: LearnerStore,
     available: list[str],
     default_cefr: Cefr,
 ) -> int | None:
@@ -109,19 +119,20 @@ def process_updates(
     for update in updates:
         last_update_id = int(update["update_id"])
         if "callback_query" in update:
-            _handle_callback(client, update["callback_query"], state_path=state_path, available=available)
+            _handle_callback(client, update["callback_query"], learners=learners, available=available)
         elif update.get("message", {}).get("chat"):
             _handle_message(
                 client,
                 update["message"],
-                state_path=state_path,
+                learners=learners,
                 available=available,
                 default_cefr=default_cefr,
             )
     return None if last_update_id is None else last_update_id + 1
 
 
-def run_leveling(settings: Settings) -> int:
+def serve_leveling(settings: Settings, learners: LearnerStore) -> int:
+    """Long-poll the bot until Ctrl+C / SIGTERM (raised as KeyboardInterrupt); returns an exit code."""
     token = settings.telegram_bot_token.get_secret_value()
     if not token:
         print("TELEGRAM_BOT_TOKEN is not set", file=sys.stderr)
@@ -141,19 +152,31 @@ def run_leveling(settings: Settings) -> int:
         )
         try:
             while True:
-                updates = client.get_updates(offset, timeout=_LONG_POLL_SECONDS)
-                next_offset = process_updates(
-                    client,
-                    updates,
-                    state_path=settings.learner_state_path,
-                    available=available,
-                    default_cefr=settings.learner_cefr,
-                )
+                try:
+                    updates = client.get_updates(offset, timeout=_LONG_POLL_SECONDS)
+                    next_offset = process_updates(
+                        client,
+                        updates,
+                        learners=learners,
+                        available=available,
+                        default_cefr=settings.learner_cefr,
+                    )
+                except (TelegramError, SQLAlchemyError) as error:
+                    # A long-running process must outlive network blips and database restarts.
+                    print(f"polling error, retrying in {_RETRY_SECONDS}s: {error}", file=sys.stderr)
+                    time.sleep(_RETRY_SECONDS)
+                    continue
                 if next_offset is not None:
                     offset = next_offset
         except KeyboardInterrupt:
             print("stopped", file=sys.stderr)
             return 0
-        except TelegramError as error:
-            print(f"telegram error: {error}", file=sys.stderr)
-            return 1
+
+
+def run_leveling(settings: Settings) -> int:
+    """Only the /level bot, without the daily scheduler (local debugging)."""
+    stores = open_stores(settings)
+    if stores is None:
+        print("DATABASE_URL is not set", file=sys.stderr)
+        return 2
+    return serve_leveling(settings, stores.learners)
