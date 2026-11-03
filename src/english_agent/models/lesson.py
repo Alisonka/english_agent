@@ -1,8 +1,9 @@
 from datetime import date, datetime
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
+from english_agent.models.cefr import Cefr
 from english_agent.versions import Provenance
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
@@ -44,7 +45,7 @@ class Lesson(BaseModel):
     topic_id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     title_en: str = Field(min_length=1, max_length=80)
     title_ru: str = Field(min_length=1, max_length=80)
-    cefr: Literal["A2"]
+    cefr: Cefr
     # One-sentence core idea, always shown first (never hidden inside the expandable theory).
     key_idea_ru: str = Field(min_length=40, max_length=200)
     rule_ru: str = Field(min_length=200, max_length=1200)  # detailed theory: 2-4 short labelled paragraphs

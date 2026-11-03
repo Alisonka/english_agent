@@ -2,6 +2,7 @@
 
 uv run python -m english_agent.telegram chats   # chats that have messaged the bot (to find TELEGRAM_CHAT_ID)
 uv run python -m english_agent.telegram ping    # send a test message to TELEGRAM_CHAT_ID
+uv run python -m english_agent.telegram level    # let the learner pick/change their CEFR level (long polling)
 """
 
 from __future__ import annotations
@@ -13,11 +14,12 @@ import httpx
 
 from english_agent.config import get_settings
 from english_agent.telegram.client import TelegramClient, TelegramError
+from english_agent.telegram.leveling import run_leveling
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Telegram setup helpers.")
-    parser.add_argument("command", choices=["chats", "ping"])
+    parser.add_argument("command", choices=["chats", "ping", "level"])
     args = parser.parse_args(argv)
 
     settings = get_settings()
@@ -25,6 +27,9 @@ def main(argv: list[str] | None = None) -> int:
     if not token:
         print("TELEGRAM_BOT_TOKEN is not set", file=sys.stderr)
         return 2
+
+    if args.command == "level":
+        return run_leveling(settings)
 
     with httpx.Client(timeout=settings.http_timeout_seconds) as http:
         client = TelegramClient(http, token)

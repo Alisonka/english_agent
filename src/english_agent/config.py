@@ -5,6 +5,8 @@ from pathlib import Path
 from pydantic import Field, SecretStr, field_validator  # SecretStr прячет значение при печати/логировании
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from english_agent.models.cefr import Cefr
+
 
 class Settings(BaseSettings):
     """Runtime configuration. Values come from env vars or a local .env file."""
@@ -33,6 +35,14 @@ class Settings(BaseSettings):
 
     # Day the course starts: topic N (by `order`) is sent on start + N - 1 days.
     curriculum_start_date: date | None = None
+
+    # Learner's CEFR level: picks which curriculum/<level>_topics.yaml is taught.
+    # Fallback only: if the learner has chosen a level in the bot (learner_state_path),
+    # that choice wins. Used when no state file exists yet (e.g. a fresh CI run).
+    learner_cefr: Cefr = "A2"
+    # Where the bot's `level` command stores the learner's chosen level. Needs a
+    # persistent filesystem (local run or VPS); a stateless CI run falls back to learner_cefr.
+    learner_state_path: Path = Path(".state/learner.json")
 
     # OpenTelemetry: OTLP/HTTP base endpoint (e.g. http://localhost:4318 for local
     # Jaeger). Empty = tracing disabled; spans become no-ops. Uses the standard
