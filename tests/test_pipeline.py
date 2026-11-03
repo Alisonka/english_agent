@@ -12,11 +12,21 @@ from english_agent.config import Settings
 from english_agent.models.curriculum import load_curriculum
 from english_agent.models.lesson import Lesson
 from english_agent.research.models import ResearchResult
+from english_agent.storage import Stores, open_stores
 from english_agent.telegram import TelegramError
+from fakes import fake_stores
 
 
 def make_settings(**overrides: Any) -> Settings:
     return Settings(_env_file=None, **overrides)
+
+
+@pytest.fixture(autouse=True)
+def stores(monkeypatch: pytest.MonkeyPatch) -> Stores:
+    """Every `main()` run records into in-memory repositories instead of PostgreSQL."""
+    fakes, _, _ = fake_stores()
+    monkeypatch.setattr(pipeline, "open_stores", lambda settings: fakes)
+    return fakes
 
 
 @pytest.fixture
@@ -236,7 +246,7 @@ def test_main_picks_topic_of_the_day(
 
 
 def test_main_uses_today_by_default(monkeypatch: pytest.MonkeyPatch, generated: list[str]) -> None:
-    scheduled(monkeypatch, curriculum_start_date=date.today())
+    scheduled(monkeypatch, curriculum_start_date=pipeline.local_today(make_settings()))
     assert pipeline.main(["--no-send"]) == 0
     assert generated == [load_curriculum().topic_ids()[0]]
 
@@ -308,3 +318,95 @@ def test_main_rejects_malformed_date(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_start_date_from_env(monkeypatch: pytest.MonkeyPatch, raw: str, expected: date | None) -> None:
     monkeypatch.setenv("CURRICULUM_START_DATE", raw)
     assert make_settings().curriculum_start_date == expected
+
+
+# --- storage ----------------------------------------------------------------
+
+
+def daily_settings() -> Settings:
+    return make_settings(curriculum_start_date=START, telegram_bot_token="123:TOKEN", telegram_chat_id="42")
+
+
+def test_run_daily_sends_and_records_once_per_day(
+    lesson: Lesson, generated: list[str], fake_telegram: None, sent: list[dict[str, Any]]
+) -> None:
+    stores, learners, lessons = fake_stores()
+
+    assert pipeline.run_daily(daily_settings(), stores, START) == 0
+    assert pipeline.run_daily(daily_settings(), stores, START) == 0  # e.g. the app restarted after the send
+
+    assert len(generated) == 1
+    assert len(sent) == 1
+    learner = learners.get("42")
+    assert learner is not None
+    record = lessons.rows[(learner.id, START)]
+    assert (record.status, record.lesson, record.telegram_message_ids) == ("sent", lesson, [1])
+
+
+def test_run_daily_retries_a_failed_day(
+    lesson: Lesson, monkeypatch: pytest.MonkeyPatch, fake_telegram: None, sent: list[dict[str, Any]]
+) -> None:
+    stores, learners, lessons = fake_stores()
+    outcomes = iter([(research_result(lesson.topic_id), None), (research_result(lesson.topic_id), lesson)])
+    monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: next(outcomes))
+
+    assert pipeline.run_daily(daily_settings(), stores, START) == 1
+    learner = learners.get("42")
+    assert learner is not None
+    assert lessons.rows[(learner.id, START)].status == "failed"
+    assert lessons.rows[(learner.id, START)].error == "boom"
+
+    assert pipeline.run_daily(daily_settings(), stores, START) == 0
+    assert lessons.rows[(learner.id, START)].status == "sent"
+    assert len(sent) == 2  # the failure notice, then the lesson
+
+
+def test_run_daily_records_telegram_failure(lesson: Lesson, monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"ok": False, "description": "Forbidden: bot was blocked by the user"})
+
+    monkeypatch.setattr(pipeline, "_http_client", lambda s: httpx.Client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (research_result(lesson.topic_id), lesson))
+    stores, learners, lessons = fake_stores()
+
+    assert pipeline.run_daily(daily_settings(), stores, START) == 1
+    learner = learners.get("42")
+    assert learner is not None
+    record = lessons.rows[(learner.id, START)]
+    assert record.status == "failed"
+    assert record.error is not None and "bot was blocked" in record.error
+
+
+def test_run_daily_teaches_the_learners_saved_level(
+    lesson: Lesson, monkeypatch: pytest.MonkeyPatch, fake_telegram: None
+) -> None:
+    levels: list[str] = []
+
+    def fake_generate(topic: Any, settings: Any, *, cefr: str, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
+        levels.append(cefr)
+        return research_result(topic.id), lesson
+
+    monkeypatch.setattr(pipeline, "generate_lesson", fake_generate)
+    stores, learners, _ = fake_stores()
+    learners.set_cefr("42", "B1")
+
+    assert pipeline.run_daily(daily_settings(), stores, START) == 0
+    assert levels == ["B1"]
+
+
+def test_main_no_send_does_not_open_the_database(lesson: Lesson, monkeypatch: pytest.MonkeyPatch) -> None:
+    def must_not_open(settings: Settings) -> None:
+        raise AssertionError("--no-send must not touch the database")
+
+    monkeypatch.setattr(pipeline, "open_stores", must_not_open)
+    monkeypatch.setattr(pipeline, "get_settings", make_settings)
+    monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (research_result(lesson.topic_id), lesson))
+    assert pipeline.main(["--topic", "there_is_are", "--no-send"]) == 0
+
+
+def test_main_send_requires_database_url(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    settings = make_settings(telegram_bot_token="123:TOKEN", telegram_chat_id="42", database_url="")
+    monkeypatch.setattr(pipeline, "open_stores", open_stores)
+    monkeypatch.setattr(pipeline, "get_settings", lambda: settings)
+    assert pipeline.main(["--topic", "there_is_are"]) == 2
+    assert "DATABASE_URL" in capsys.readouterr().err

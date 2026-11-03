@@ -3,6 +3,9 @@
 uv run python -m english_agent.pipeline                                 # topic of the day, send
 uv run python -m english_agent.pipeline --date 2026-11-05 --no-send     # topic of that day, print only
 uv run python -m english_agent.pipeline --topic there_is_are            # a specific topic, send
+
+A sent lesson is recorded in the `lessons` table (one per learner per day); a run for a
+day that already has a sent lesson does nothing. `--no-send` never touches the database.
 """
 
 from __future__ import annotations
@@ -10,22 +13,24 @@ from __future__ import annotations
 import argparse
 import html
 import sys
-from datetime import date
+from datetime import date, datetime
 from typing import cast
+from zoneinfo import ZoneInfo
 
 import httpx
 from opentelemetry.trace import Span, Status, StatusCode
 
 from english_agent.config import Settings, get_settings
-from english_agent.learner import load_learner_state
 from english_agent.llm import AnthropicLLM
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
 from english_agent.models.lesson import Lesson
+from english_agent.models.storage import LearnerRecord
 from english_agent.research.agent import ResearchAgent
 from english_agent.research.models import ResearchResult
 from english_agent.research.sitemaps import SitemapIndex
 from english_agent.research.tools import LiveResearchTools
+from english_agent.storage.repositories import Stores, open_stores
 from english_agent.telegram import TelegramClient, TelegramError
 from english_agent.tracing import configure_tracing, get_tracer
 from english_agent.writer import write_lesson
@@ -70,12 +75,16 @@ def generate_lesson(
     return research, lesson
 
 
-def resolve_cefr(explicit: str | None, settings: Settings) -> Cefr:
+def resolve_cefr(explicit: str | None, learner: LearnerRecord | None, default: Cefr) -> Cefr:
     """The level to teach: an explicit --level, else the learner's saved choice, else the default."""
     if explicit is not None:
         return cast(Cefr, explicit)
-    state = load_learner_state(settings.learner_state_path)
-    return state.cefr if state is not None else settings.learner_cefr
+    return learner.cefr if learner is not None else default
+
+
+def local_today(settings: Settings) -> date:
+    """Today's date in the configured TIMEZONE (the server itself runs in UTC)."""
+    return datetime.now(ZoneInfo(settings.timezone)).date()
 
 
 def deliver_lesson(lesson: Lesson, settings: Settings) -> list[int]:
@@ -113,6 +122,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--no-send", action="store_true", help="print the lesson but do not send it to Telegram")
     parser.add_argument(
+        "--no-store", action="store_true", help="do not read or record lessons in the database (implied by --no-send)"
+    )
+    parser.add_argument(
         "--level",
         choices=list(CEFR_LEVELS),
         help="CEFR level to teach (default: the learner's saved choice, else LEARNER_CEFR)",
@@ -120,36 +132,72 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     settings = get_settings()
-    cefr = resolve_cefr(args.level, settings)
-    curriculum = load_curriculum(cefr)
+    send = not args.no_send
+    stores: Stores | None = None
+    if send and not args.no_store:
+        stores = open_stores(settings)
+        if stores is None:
+            print("DATABASE_URL must be set (or pass --no-store)", file=sys.stderr)
+            return 2
 
     # Tracing is a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set; shutdown() flushes
     # the batched spans, which matters because this process exits right after main().
     provider = configure_tracing(settings)
     try:
-        with get_tracer().start_as_current_span("pipeline.run") as span:
-            span.set_attribute("pipeline.send", not args.no_send)
-            span.set_attribute("lesson.cefr", cefr)
-            return _run(args, curriculum, settings, span, cefr)
+        today = args.date or local_today(settings)
+        return run_daily(settings, stores, today, topic_id=args.topic, level=args.level, send=send)
     finally:
         if provider is not None:
             provider.shutdown()
 
 
-def _run(args: argparse.Namespace, curriculum: Curriculum, settings: Settings, span: Span, cefr: Cefr) -> int:
-    send = not args.no_send
+def run_daily(
+    settings: Settings,
+    stores: Stores | None,
+    today: date,
+    *,
+    topic_id: str | None = None,
+    level: str | None = None,
+    send: bool = True,
+) -> int:
+    """Pick the day's topic, write the lesson, send it and record it; returns an exit code.
 
-    if args.topic:
-        topic = next((item for item in curriculum.topics if item.id == args.topic), None)
+    Shared by the CLI and the scheduler in `english_agent.app`. With `stores=None` nothing
+    is read from or written to the database.
+    """
+    with get_tracer().start_as_current_span("pipeline.run") as span:
+        span.set_attribute("pipeline.send", send)
+        learner = None
+        if stores is not None and settings.telegram_chat_id:
+            learner = stores.learners.get(settings.telegram_chat_id)
+        cefr = resolve_cefr(level, learner, settings.learner_cefr)
+        span.set_attribute("lesson.cefr", cefr)
+        curriculum = load_curriculum(cefr)
+        return _run(settings, stores, learner, curriculum, today, topic_id, send, span, cefr)
+
+
+def _run(
+    settings: Settings,
+    stores: Stores | None,
+    learner: LearnerRecord | None,
+    curriculum: Curriculum,
+    today: date,
+    topic_id: str | None,
+    send: bool,
+    span: Span,
+    cefr: Cefr,
+) -> int:
+    if topic_id:
+        topic = next((item for item in curriculum.topics if item.id == topic_id), None)
         if topic is None:
-            print(f"unknown topic {args.topic!r}", file=sys.stderr)
+            print(f"unknown topic {topic_id!r}", file=sys.stderr)
             return 2
     else:
         start = settings.curriculum_start_date
         if start is None:
             print("CURRICULUM_START_DATE must be set (or pass --topic)", file=sys.stderr)
             return 2
-        day = ((args.date or date.today()) - start).days
+        day = (today - start).days
         if day < 0:
             print(f"course starts on {start.isoformat()}")
             return 0
@@ -168,20 +216,33 @@ def _run(args: argparse.Namespace, curriculum: Curriculum, settings: Settings, s
         print("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set (or pass --no-send)", file=sys.stderr)
         return 2
 
+    if stores is not None:
+        learner = learner or stores.learners.get_or_create(settings.telegram_chat_id, settings.learner_cefr)
+        if stores.lessons.sent_on(learner.id, today):
+            print(f"lesson for {today.isoformat()} is already sent", file=sys.stderr)
+            return 0
+
+    def record_failed(reason: str) -> None:
+        if stores is not None and learner is not None:
+            stores.lessons.record_failed(
+                learner.id, today, topic_id=topic.id, cefr=cefr, reason=reason, curriculum_version=curriculum.version
+            )
+
     lesson: Lesson | None = None
     try:
         research, lesson = generate_lesson(topic, settings, cefr=cefr, curriculum_version=curriculum.version)
         reason = research.message
-    except Exception as error:  # unattended run: every failure has to reach the chat, not just the CI log
+    except Exception as error:  # unattended run: every failure has to reach the chat, not just the log
         reason = f"{type(error).__name__}: {error}"
     if lesson is None:
         print(f"lesson for {topic.id} failed: {reason}", file=sys.stderr)
         span.set_status(Status(StatusCode.ERROR, reason))
+        record_failed(reason)
         if send:
             notify(settings, f"Урок «{topic.title_ru}» сегодня не получился: {reason}")
         return 1
     print(lesson.model_dump_json(indent=2, ensure_ascii=False))
-    if args.no_send:
+    if not send:
         return 0
 
     try:
@@ -189,8 +250,11 @@ def _run(args: argparse.Namespace, curriculum: Curriculum, settings: Settings, s
     except TelegramError as error:
         print(f"telegram error: {error}", file=sys.stderr)
         span.set_status(Status(StatusCode.ERROR, str(error)))
+        record_failed(f"telegram: {error}")
         return 1
     print(f"sent {len(message_ids)} message(s) to Telegram chat {settings.telegram_chat_id}", file=sys.stderr)
+    if stores is not None and learner is not None:
+        stores.lessons.record_sent(learner.id, today, lesson, message_ids, curriculum_version=curriculum.version)
     return 0
 
 
