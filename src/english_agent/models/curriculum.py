@@ -1,8 +1,9 @@
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
+from english_agent.models.cefr import Cefr
 from english_agent.paths import curriculum_path
 
 
@@ -16,17 +17,10 @@ class CurriculumTopic(BaseModel):
 
 class Curriculum(BaseModel):
     version: int = Field(ge=1)
-    cefr: str
+    cefr: Cefr
     explanation_language: str
     example_language: str
     topics: list[CurriculumTopic] = Field(min_length=40, max_length=80)
-
-    @field_validator("cefr")
-    @classmethod
-    def cefr_is_a2(cls, value: str) -> str:
-        if value != "A2":
-            raise ValueError("this curriculum is A2-only")
-        return value
 
     @model_validator(mode="after")
     def unique_ids_and_orders(self) -> "Curriculum":
@@ -45,7 +39,10 @@ class Curriculum(BaseModel):
         return [topic.id for topic in sorted(self.topics, key=lambda item: item.order)]
 
 
-def load_curriculum(path: Path | None = None) -> Curriculum:
-    target = path or curriculum_path()
+def load_curriculum(cefr: Cefr = "A2", *, path: Path | None = None) -> Curriculum:
+    target = path or curriculum_path(cefr)
     payload = yaml.safe_load(target.read_text(encoding="utf-8"))
-    return Curriculum.model_validate(payload)
+    curriculum = Curriculum.model_validate(payload)
+    if path is None and curriculum.cefr != cefr:
+        raise ValueError(f"{target.name} declares cefr {curriculum.cefr!r}, expected {cefr!r}")
+    return curriculum

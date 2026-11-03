@@ -11,12 +11,15 @@ import argparse
 import html
 import sys
 from datetime import date
+from typing import cast
 
 import httpx
 from opentelemetry.trace import Span, Status, StatusCode
 
 from english_agent.config import Settings, get_settings
+from english_agent.learner import load_learner_state
 from english_agent.llm import AnthropicLLM
+from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
 from english_agent.models.lesson import Lesson
 from english_agent.research.agent import ResearchAgent
@@ -39,7 +42,7 @@ def _http_client(settings: Settings) -> httpx.Client:
 
 
 def generate_lesson(
-    topic: CurriculumTopic, settings: Settings, *, curriculum_version: int | None = None
+    topic: CurriculumTopic, settings: Settings, *, cefr: Cefr = "A2", curriculum_version: int | None = None
 ) -> tuple[ResearchResult, Lesson | None]:
     """Returns the research result and, if a page was found, the lesson built from it."""
     with _http_client(settings) as http:
@@ -51,6 +54,7 @@ def generate_lesson(
             max_steps=settings.research_max_steps,
             max_fetches_per_site=settings.research_max_fetches_per_site,
             curriculum_version=curriculum_version,
+            cefr=cefr,
         )
         research = researcher.run(topic)
 
@@ -60,9 +64,18 @@ def generate_lesson(
         AnthropicLLM(settings, model=settings.writer_model),
         topic,
         research.notes,
+        cefr=cefr,
         curriculum_version=curriculum_version,
     )
     return research, lesson
+
+
+def resolve_cefr(explicit: str | None, settings: Settings) -> Cefr:
+    """The level to teach: an explicit --level, else the learner's saved choice, else the default."""
+    if explicit is not None:
+        return cast(Cefr, explicit)
+    state = load_learner_state(settings.learner_state_path)
+    return state.cefr if state is not None else settings.learner_cefr
 
 
 def deliver_lesson(lesson: Lesson, settings: Settings) -> list[int]:
@@ -94,15 +107,21 @@ def notify(settings: Settings, text: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Research a topic, write the lesson and send it to Telegram.")
-    parser.add_argument("--topic", help="topic id from curriculum/a2_topics.yaml (default: topic of the day)")
+    parser.add_argument("--topic", help="topic id from the level's curriculum file (default: topic of the day)")
     parser.add_argument(
         "--date", type=date.fromisoformat, help="pick the topic of this day, YYYY-MM-DD (default: today)"
     )
     parser.add_argument("--no-send", action="store_true", help="print the lesson but do not send it to Telegram")
+    parser.add_argument(
+        "--level",
+        choices=list(CEFR_LEVELS),
+        help="CEFR level to teach (default: the learner's saved choice, else LEARNER_CEFR)",
+    )
     args = parser.parse_args(argv)
 
-    curriculum = load_curriculum()
     settings = get_settings()
+    cefr = resolve_cefr(args.level, settings)
+    curriculum = load_curriculum(cefr)
 
     # Tracing is a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set; shutdown() flushes
     # the batched spans, which matters because this process exits right after main().
@@ -110,13 +129,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with get_tracer().start_as_current_span("pipeline.run") as span:
             span.set_attribute("pipeline.send", not args.no_send)
-            return _run(args, curriculum, settings, span)
+            span.set_attribute("lesson.cefr", cefr)
+            return _run(args, curriculum, settings, span, cefr)
     finally:
         if provider is not None:
             provider.shutdown()
 
 
-def _run(args: argparse.Namespace, curriculum: Curriculum, settings: Settings, span: Span) -> int:
+def _run(args: argparse.Namespace, curriculum: Curriculum, settings: Settings, span: Span, cefr: Cefr) -> int:
     send = not args.no_send
 
     if args.topic:
@@ -150,7 +170,7 @@ def _run(args: argparse.Namespace, curriculum: Curriculum, settings: Settings, s
 
     lesson: Lesson | None = None
     try:
-        research, lesson = generate_lesson(topic, settings, curriculum_version=curriculum.version)
+        research, lesson = generate_lesson(topic, settings, cefr=cefr, curriculum_version=curriculum.version)
         reason = research.message
     except Exception as error:  # unattended run: every failure has to reach the chat, not just the CI log
         reason = f"{type(error).__name__}: {error}"
