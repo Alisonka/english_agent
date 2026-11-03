@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily english-agent PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# Run a missed backup after the server was off at 03:00.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

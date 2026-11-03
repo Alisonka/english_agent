@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- PostgreSQL storage (`src/english_agent/storage/`): SQLAlchemy 2.0 (sync, psycopg 3)
+  mappings and repositories that return pydantic records (`models/storage.py`), with
+  Alembic migrations (`migrations/`, `0001_initial`: `learners`, `lessons`, `items`,
+  `errors`, `cards`, `review_logs`). Sent and failed lessons are recorded, one per
+  learner per day, so a restart or a manual run never sends a day twice. New
+  settings: `DATABASE_URL`, `LESSON_SEND_TIME`, `TIMEZONE`.
+- Server process `python -m english_agent.app`: the /level bot (long polling) and an
+  APScheduler job that sends the daily lesson, with catch-up when started late.
+  `Dockerfile` and compose services `postgres` (127.0.0.1 only), `migrate`, `app`.
+- `python -m english_agent.storage import-learner-json` to move the old
+  `.state/learner.json` level into the database.
+- `scripts/pg_backup.sh` and systemd user units for a daily database backup.
 - OpenTelemetry tracing (`src/english_agent/tracing.py`): one pipeline run becomes
   a trace of nested spans (`pipeline.run` -> `research.run` -> `llm.chat` /
   `tool.search_site` / `tool.fetch_page` / `tool.finish`, plus `writer.write_lesson`
@@ -55,9 +67,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `write_lesson_system` prompt was updated to match.
 - Formatted the codebase with `ruff format` and fixed lint / type findings.
 
+- The learner's level is stored in the `learners` table instead of
+  `.state/learner.json` (`LEARNER_STATE_PATH` is gone); sending a lesson now needs
+  `DATABASE_URL` (or `--no-store`).
+- Jaeger ports are published on 127.0.0.1 only.
+
 ### Deprecated
 
 ### Removed
+
+- `.github/workflows/daily-lesson.yml`: the daily lesson is sent by the server app.
 
 ### Fixed
 

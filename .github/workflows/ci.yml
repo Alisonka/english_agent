@@ -16,6 +16,20 @@ jobs:
   checks:
     name: lint, type-check & tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: english_agent_test
+          POSTGRES_USER: english_agent
+          POSTGRES_PASSWORD: english_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U english_agent -d english_agent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
@@ -42,3 +56,5 @@ jobs:
 
       - name: Tests (pytest)
         run: uv run pytest
+        env:
+          DATABASE_URL: postgresql+psycopg://english_agent:english_agent@localhost:5432/english_agent_test

@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date, time
 from functools import lru_cache
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator  # SecretStr прячет значение при печати/логировании
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -37,12 +38,16 @@ class Settings(BaseSettings):
     curriculum_start_date: date | None = None
 
     # Learner's CEFR level: picks which curriculum/<level>_topics.yaml is taught.
-    # Fallback only: if the learner has chosen a level in the bot (learner_state_path),
-    # that choice wins. Used when no state file exists yet (e.g. a fresh CI run).
+    # Default for a new learner only: once the learner picks a level in the bot, the
+    # choice stored in the `learners` table wins.
     learner_cefr: Cefr = "A2"
-    # Where the bot's `level` command stores the learner's chosen level. Needs a
-    # persistent filesystem (local run or VPS); a stateless CI run falls back to learner_cefr.
-    learner_state_path: Path = Path(".state/learner.json")
+
+    # PostgreSQL, e.g. postgresql+psycopg://english_agent:<pw>@localhost:5432/english_agent.
+    database_url: SecretStr = Field(default=SecretStr(""))
+
+    # When the long-running app (`python -m english_agent.app`) sends the daily lesson.
+    lesson_send_time: time = time(9, 0)
+    timezone: str = "Europe/Moscow"
 
     # OpenTelemetry: OTLP/HTTP base endpoint (e.g. http://localhost:4318 for local
     # Jaeger). Empty = tracing disabled; spans become no-ops. Uses the standard
@@ -54,6 +59,15 @@ class Settings(BaseSettings):
     def empty_date_is_none(cls, value: object) -> object:
         # GitHub Actions passes an unset variable as an empty string.
         return value or None
+
+    @field_validator("timezone")
+    @classmethod
+    def known_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(f"unknown timezone {value!r}") from error
+        return value
 
     def telegram_configured(self) -> bool:
         return bool(self.telegram_bot_token.get_secret_value()) and bool(self.telegram_chat_id)

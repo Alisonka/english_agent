@@ -30,6 +30,13 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "lesson": 2,  # v2: added key_idea_ru; rule_ru/nuances_ru reshaped for messenger readability
     "research_result": 1,
     "topic_notes": 1,
+    # Storage records (models/storage.py); the table shapes themselves are versioned by Alembic.
+    "learner_record": 1,
+    "lesson_record": 1,
+    "item_record": 1,
+    "error_record": 1,
+    "card_record": 1,
+    "review_log_record": 1,
 }
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
