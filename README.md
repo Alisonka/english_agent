@@ -31,6 +31,14 @@ flowchart LR
   and sends it through the Bot API.
 - **Pipeline** ([src/english_agent/pipeline.py](src/english_agent/pipeline.py)):
   wires topic -> research -> lesson -> Telegram together.
+- **Practice** ([src/english_agent/practice.py](src/english_agent/practice.py),
+  [src/english_agent/grader.py](src/english_agent/grader.py)): the writer also
+  produces a 3-question quiz and 3 sentences to translate. The quiz goes out as
+  Telegram quiz polls `QUIZ_DELAY_MINUTES` after the lesson, the translation task
+  at `TRANSLATION_SEND_TIME`; poll answers and the learner's translation are
+  stored, wrong answers go to the `errors` table, and the translation is graded
+  by `GRADER_MODEL` (corrections and an explanation in Russian, with a button to
+  dispute the grade).
 
 ## Reproducibility (provenance)
 
@@ -142,9 +150,15 @@ Configuration is read from environment variables or a local `.env` file (see
 | `LESSON_SEND_TIME` | no | `09:00` | When the server app sends the daily lesson |
 | `TIMEZONE` | no | `Europe/Moscow` | Time zone for `LESSON_SEND_TIME` and for "today" |
 | `LEARNER_CEFR` | no | `A2` | Level of a new learner; the level chosen with /level wins |
+| `QUIZ_DELAY_MINUTES` | no | `60` | Quiz polls are sent this long after the lesson |
+| `TRANSLATION_SEND_TIME` | no | `18:00` | When the translation task is sent (at least `PRACTICE_GAP_MINUTES` after the quiz) |
+| `PRACTICE_GAP_MINUTES` | no | `60` | Minimum gap between the quiz and the translation task |
+| `PRACTICE_CUTOFF_TIME` | no | `22:00` | No practice is sent after this local time |
+| `GRADER_MODEL` | no | `claude-haiku-5-5` | Model that grades the learner's translation |
+| `GRADER_EFFORT` | no | `high` | Claude API `output_config.effort` for the grader |
 | `RESEARCH_MODEL` | no | `claude-haiku-5-5` | Model used by the research agent |
 | `WRITER_MODEL` | no | `claude-haiku-5-5` | Model used by the lesson writer |
-| `LLM_MAX_TOKENS` | no | `4096` | Max tokens per LLM call |
+| `LLM_MAX_TOKENS` | no | `8192` | Max tokens per LLM call |
 | `RESEARCH_MAX_STEPS` | no | `12` | Max research agent steps |
 | `RESEARCH_MAX_FETCHES_PER_SITE` | no | `2` | Max page fetches per site |
 | `RESEARCH_PAGE_CHAR_LIMIT` | no | `40000` | Max chars read per page |
@@ -181,9 +195,11 @@ Everything runs on the server (`ssh vpn`) as one docker compose stack, see
 - `postgres` — PostgreSQL 17, data in the `pgdata` volume, published on `127.0.0.1:5432` only;
 - `migrate` — runs `alembic upgrade head` once, before the app starts;
 - `app` — `python -m english_agent.app`: one long-running process that answers
-  /level and /mylevel (long polling) and sends the daily lesson at
-  `LESSON_SEND_TIME` in `TIMEZONE`. Started after that time (a restart, a deploy),
-  it sends today's lesson right away unless it is already sent;
+  /level and /mylevel, quiz answers and translation answers (long polling) and
+  sends the daily lesson at `LESSON_SEND_TIME` in `TIMEZONE`. Started after that
+  time (a restart, a deploy), it sends today's lesson right away unless it is
+  already sent. Every 5 minutes it sends the practice that is due; that state is
+  in the database, so a restart neither loses nor repeats it;
 - `jaeger` — traces from `app`.
 
 ```bash
@@ -270,18 +286,20 @@ release history.
 
 ```
 src/english_agent/
-  app.py           # server process: /level bot + daily lesson scheduler
+  app.py           # server process: bot + daily lesson and practice scheduler
   config.py        # runtime settings (env / .env)
+  grader.py        # learner's translation -> validated TranslationGrade
   paths.py         # repo-relative paths
   pipeline.py      # topic -> research -> lesson -> Telegram -> lessons table
+  practice.py      # quiz and translation task after the lesson (scheduling, sending)
   tracing.py       # OpenTelemetry setup (opt-in OTLP export)
   writer.py        # notes -> validated Lesson
   llm/             # Anthropic (Claude) client + token-cost estimate
-  models/          # pydantic models (curriculum, lesson, golden, storage records)
+  models/          # pydantic models (curriculum, lesson, practice, golden, storage records)
   prompts/         # system prompts
   research/        # research agent, tools, sitemaps, sources
   storage/         # PostgreSQL: SQLAlchemy mappings, repositories
-  telegram/        # Lesson -> HTML rendering, Bot API client, /level bot
+  telegram/        # HTML rendering, Bot API client, the bot's update handlers
 migrations/        # Alembic migrations
 deploy/systemd/    # backup timer units
 scripts/           # pg_backup.sh

@@ -4,7 +4,18 @@ from sqlalchemy import inspect
 
 from db import run_alembic, schema_engine
 
-TABLES = {"learners", "lessons", "items", "errors", "cards", "review_logs"}
+TABLES = {
+    "learners",
+    "lessons",
+    "items",
+    "errors",
+    "cards",
+    "review_logs",
+    "practice_deliveries",
+    "quiz_polls",
+    "quiz_answers",
+    "translation_answers",
+}
 
 
 def test_upgrade_downgrade_upgrade(database_url: str) -> None:

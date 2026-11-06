@@ -159,3 +159,25 @@ def test_known_chats_lists_each_chat_once() -> None:
 def test_known_chats_empty_when_nobody_wrote_to_the_bot() -> None:
     fake = FakeTelegram([httpx.Response(200, json={"ok": True, "result": []})])
     assert fake.client().known_chats() == []
+
+
+def test_send_poll_sends_a_non_anonymous_quiz() -> None:
+    poll = httpx.Response(200, json={"ok": True, "result": {"message_id": 7, "poll": {"id": "P1"}}})
+    fake = FakeTelegram([poll])
+
+    result = fake.client().send_poll("42", "Q?", ["a", "b", "c"], correct_option=2, explanation="because")
+
+    assert result == (7, "P1")
+    method, payload = fake.requests[0]
+    assert method == "sendPoll"
+    assert payload["type"] == "quiz"
+    assert payload["is_anonymous"] is False
+    assert payload["correct_option_ids"] == [2]
+    assert payload["options"] == [{"text": "a"}, {"text": "b"}, {"text": "c"}]
+    assert payload["explanation"] == "because"
+
+
+def test_get_updates_passes_allowed_updates() -> None:
+    fake = FakeTelegram([httpx.Response(200, json={"ok": True, "result": []})])
+    fake.client().get_updates(5, timeout=1, allowed_updates=["poll_answer"])
+    assert fake.requests[0] == ("getUpdates", {"timeout": 1, "offset": 5, "allowed_updates": ["poll_answer"]})

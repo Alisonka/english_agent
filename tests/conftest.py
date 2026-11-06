@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from db import run_alembic, schema_engine
 from english_agent.models.lesson import Lesson
 from english_agent.storage import SessionFactory
+from samples import QUIZ, TRANSLATION
 
 
 @pytest.fixture(scope="session")
@@ -82,6 +83,8 @@ def lesson_payload(**overrides: Any) -> dict[str, Any]:
                 "accessed_at": "2026-10-16",
             }
         ],
+        "quiz": QUIZ,
+        "translation": TRANSLATION,
     }
     payload.update(overrides)
     return payload

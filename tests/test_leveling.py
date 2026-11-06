@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
 
+from conftest import lesson_payload
 from english_agent.models.curriculum import load_curriculum
+from english_agent.models.lesson import Lesson
+from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.storage import LearnerRecord
 from english_agent.paths import available_cefr_levels
 from english_agent.pipeline import resolve_cefr
 from english_agent.telegram import TelegramClient
-from english_agent.telegram.leveling import process_updates
-from fakes import FakeLearners
+from english_agent.telegram.leveling import Grader, PracticeHandlers, process_updates
+from fakes import FakeLearners, FakePractice, fake_practice, fake_stores
+from samples import QUIZ
 
 TOKEN = "123:TOKEN"
 
@@ -145,3 +149,131 @@ def test_available_levels_match_curriculum_files() -> None:
 def test_load_curriculum_by_level() -> None:
     for level in ("A2", "B1", "B2", "C1"):
         assert load_curriculum(level).cefr == level
+
+
+# --- practice: quiz answers and the translation task ------------------------------
+
+
+def _practice_setup(grade: Grader | None = None) -> tuple[RecordingTelegram, FakePractice, PracticeHandlers]:
+    stores, learners, lessons = fake_stores()
+    learner_record = learners.get_or_create("42", "A2")
+    lesson = Lesson.model_validate(lesson_payload())
+    record = lessons.record_sent(learner_record.id, date(2026, 11, 6), lesson, [1], curriculum_version=1)
+    practice = fake_practice(stores)
+    quiz = practice.claim_delivery(record.id, "quiz", 3)
+    assert quiz is not None
+    for position, item in enumerate(QUIZ):
+        practice.add_poll(
+            quiz.id,
+            position=position,
+            telegram_poll_id=f"p{position}",
+            telegram_message_id=10 + position,
+            question=QuizQuestion.model_validate(item),
+        )
+    practice.mark_sent(quiz.id, [10, 11, 12])
+    task = practice.claim_delivery(record.id, "translation", 3)
+    assert task is not None
+    practice.mark_sent(task.id, [20])
+    handlers = PracticeHandlers(practice, grade or (lambda lesson, text: TranslationGrade.model_validate(GRADE)))
+    return RecordingTelegram(), practice, handlers
+
+
+GRADE: dict[str, Any] = {
+    "sentences": [
+        {
+            "n": 1,
+            "learner_text": "There is a window in my room.",
+            "verdict": "correct",
+            "corrected": "There is a window in my room.",
+            "explanation_ru": "",
+        },
+        {
+            "n": 2,
+            "learner_text": "There is no children in the park.",
+            "verdict": "fixed",
+            "corrected": "There are no children in the park.",
+            "explanation_ru": "Children — множественное число, поэтому there are.",
+            "error_type": "target_form",
+        },
+        {"n": 3, "learner_text": "", "verdict": "missing", "corrected": "Is there a cafe here?", "explanation_ru": ""},
+    ],
+    "focus_ru": "Смотри на число существительного после there.",
+}
+
+
+def _poll_answer(update_id: int, poll_id: str, option: int) -> dict[str, Any]:
+    return _update(update_id, poll_answer={"poll_id": poll_id, "user": {"id": 42}, "option_ids": [option]})
+
+
+def _run(fake: RecordingTelegram, updates: list[dict[str, Any]], practice: PracticeHandlers) -> None:
+    process_updates(
+        fake.client(), updates, learners=FakeLearners(), available=["A2"], default_cefr="A2", practice=practice
+    )
+
+
+def test_quiz_summary_comes_after_the_last_answer() -> None:
+    fake, store, practice = _practice_setup()
+
+    _run(fake, [_poll_answer(1, "p0", 1), _poll_answer(2, "p1", 0)], practice)
+    assert fake.requests == []  # no message until every poll is answered
+
+    _run(fake, [_poll_answer(3, "p2", 1), _poll_answer(4, "p2", 0)], practice)  # a repeat is ignored
+
+    [(method, payload)] = fake.requests
+    assert method == "sendMessage"
+    assert "Итог: 2/3" in payload["text"]
+    assert ("quiz", "It is milk in the fridge.", "There is milk in the fridge.") in store.errors
+
+
+def test_retracted_vote_is_ignored() -> None:
+    fake, store, practice = _practice_setup()
+    _run(fake, [_update(1, poll_answer={"poll_id": "p0", "user": {"id": 42}, "option_ids": []})], practice)
+    assert store.poll_answers == {}
+
+
+def test_text_answers_the_open_translation_task() -> None:
+    fake, store, practice = _practice_setup()
+
+    _run(fake, [_update(1, message={"chat": {"id": 42}, "text": "There is a window in my room."})], practice)
+
+    methods = [method for method, _ in fake.requests]
+    assert methods == ["sendMessage", "editMessageText"]
+    assert fake.requests[0][1]["text"] == "⏳ Проверяю…"
+    result = fake.requests[1][1]
+    assert "Результат: 1/3" in result["text"]
+    assert result["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "dispute:1"
+    [answer] = store.translation_answers.values()
+    assert answer.status == "graded"
+    assert ("text", "There is no children in the park.", "There are no children in the park.") in store.errors
+
+    _run(fake, [_update(2, message={"chat": {"id": 42}, "text": "ещё ответ"})], practice)
+    assert "/level" in fake.requests[-1][1]["text"]  # task closed: back to the help text
+
+
+def test_failed_grading_lets_the_learner_retry() -> None:
+    def broken(lesson: Lesson, text: str) -> TranslationGrade:
+        raise RuntimeError("model is down")
+
+    fake, store, practice = _practice_setup(grade=broken)
+    _run(fake, [_update(1, message={"chat": {"id": 42}, "text": "There is a window."})], practice)
+
+    assert "Не получилось проверить" in fake.requests[-1][1]["text"]
+    [answer] = store.translation_answers.values()
+    assert answer.status == "failed"
+
+    retry = PracticeHandlers(store, lambda lesson, text: TranslationGrade.model_validate(GRADE))
+    _run(fake, [_update(2, message={"chat": {"id": 42}, "text": "There is a window in my room."})], retry)
+    [answer] = store.translation_answers.values()
+    assert answer.status == "graded"
+
+
+def test_dispute_flags_the_grade() -> None:
+    fake, store, practice = _practice_setup()
+    _run(fake, [_update(1, message={"chat": {"id": 42}, "text": "There is a window in my room."})], practice)
+
+    _run(fake, [_update(2, callback_query={"id": "cq", "data": "dispute:1", "from": {"id": 42}})], practice)
+
+    assert store.translation_answers[1].disputed is True
+    method, payload = fake.requests[-1]
+    assert method == "answerCallbackQuery"
+    assert payload["text"] == "Спасибо, оценка отмечена как спорная."

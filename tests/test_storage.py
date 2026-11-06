@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from english_agent.models.lesson import Lesson
+from english_agent.models.practice import TranslationGrade
 from english_agent.models.storage import LessonRecord
 from english_agent.storage import (
     CardRepo,
@@ -13,10 +15,11 @@ from english_agent.storage import (
     LearnerRepo,
     LessonAlreadySentError,
     LessonRepo,
+    PracticeRepo,
     SessionFactory,
     session_scope,
 )
-from english_agent.storage.orm import LessonRow
+from english_agent.storage.orm import ErrorRow, LessonRow
 from english_agent.versions import SCHEMA_VERSIONS
 
 DAY = date(2026, 11, 3)
@@ -119,3 +122,86 @@ def test_card_repo_due_returns_due_cards_oldest_first(sessions: SessionFactory, 
 
     assert [card.id for card in cards.due(learner.id, now)] == [late.id, soon.id]
     assert items.get_by_key("there_is_are:late") is not None
+
+
+# --- practice -------------------------------------------------------------------
+
+
+def _quiz_setup(sessions: SessionFactory, lesson: Lesson) -> tuple[PracticeRepo, int]:
+    learner = LearnerRepo(sessions).get_or_create("42", "A2")
+    record = LessonRepo(sessions).record_sent(learner.id, DAY, lesson, [1], curriculum_version=1)
+    practice = PracticeRepo(sessions)
+    delivery = practice.claim_delivery(record.id, "quiz", len(lesson.quiz))
+    assert delivery is not None
+    for position, question in enumerate(lesson.quiz):
+        practice.add_poll(
+            delivery.id,
+            position=position,
+            telegram_poll_id=f"p{position}",
+            telegram_message_id=10 + position,
+            question=question,
+        )
+    practice.mark_sent(delivery.id, [10, 11, 12])
+    return practice, record.id
+
+
+def test_delivery_is_claimed_once(sessions: SessionFactory, lesson: Lesson) -> None:
+    practice, lesson_id = _quiz_setup(sessions, lesson)
+    assert practice.claim_delivery(lesson_id, "quiz", 3) is None
+    delivery = practice.delivery(lesson_id, "quiz")
+    assert delivery is not None and delivery.sent_at is not None
+    assert delivery.telegram_message_ids == [10, 11, 12]
+
+
+def test_poll_answers_complete_the_quiz_and_log_errors(sessions: SessionFactory, lesson: Lesson) -> None:
+    practice, lesson_id = _quiz_setup(sessions, lesson)
+
+    first = practice.record_poll_answer("p0", "42", [lesson.quiz[0].correct_option])
+    assert first is not None and first.is_correct and not first.completed
+    assert practice.record_poll_answer("p0", "42", [0]) is None  # repeated answer
+    assert practice.record_poll_answer("unknown", "42", [0]) is None
+    practice.record_poll_answer("p1", "42", [0])
+    last = practice.record_poll_answer("p2", "42", [lesson.quiz[2].correct_option])
+
+    assert last is not None and last.completed
+    assert [correct for _, correct in last.results] == [True, False, True]
+    with session_scope(sessions) as session:
+        errors = session.scalars(select(ErrorRow)).all()
+        assert [(e.kind, e.original, e.corrected) for e in errors] == [
+            ("quiz", lesson.quiz[1].options[0], lesson.quiz[1].options[lesson.quiz[1].correct_option])
+        ]
+    delivery = practice.delivery(lesson_id, "quiz")
+    assert delivery is not None and delivery.completed_at is not None
+
+
+def test_translation_answer_lifecycle(sessions: SessionFactory, lesson: Lesson) -> None:
+    practice, lesson_id = _quiz_setup(sessions, lesson)
+    assert practice.open_translation("42") is None  # not sent yet
+    task = practice.claim_delivery(lesson_id, "translation", 3)
+    assert task is not None
+    practice.mark_sent(task.id, [20])
+
+    open_task = practice.open_translation("42")
+    assert open_task is not None and open_task.lesson == lesson
+    answer = practice.start_translation_answer(task.id, open_task.learner_id, "first try")
+    assert answer is not None
+    assert practice.start_translation_answer(task.id, open_task.learner_id, "again") is None  # pending
+    practice.fail_translation_answer(answer.id, "model is down")
+    retry = practice.start_translation_answer(task.id, open_task.learner_id, "second try")
+    assert retry is not None and retry.id == answer.id and retry.answer_text == "second try"
+
+    grade = TranslationGrade.model_validate(
+        {
+            "sentences": [
+                {"n": 1, "learner_text": "ok", "verdict": "correct", "corrected": "ok", "explanation_ru": ""},
+                {"n": 2, "learner_text": "bad", "verdict": "fixed", "corrected": "good", "explanation_ru": "Так надо."},
+                {"n": 3, "learner_text": "", "verdict": "missing", "corrected": "ref", "explanation_ru": ""},
+            ],
+            "focus_ru": "Следи за формой.",
+        }
+    )
+    graded = practice.finish_translation_answer(answer.id, grade)
+    assert graded.status == "graded" and graded.grade == grade
+    assert practice.open_translation("42") is None
+    assert practice.dispute(answer.id) is True
+    assert practice.dispute(999) is False

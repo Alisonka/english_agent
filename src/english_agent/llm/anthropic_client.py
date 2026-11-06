@@ -71,11 +71,12 @@ def parse_response_blocks(blocks: list[dict[str, Any]]) -> AssistantTurn:
 
 
 class AnthropicLLM:
-    def __init__(self, settings: Settings, model: str | None = None) -> None:
+    def __init__(self, settings: Settings, model: str | None = None, *, effort: str | None = None) -> None:
         if not settings.anthropic_api_key.get_secret_value():
             raise RuntimeError("ANTHROPIC_API_KEY is not set")
         self.model = model or settings.research_model
         self.max_tokens = settings.llm_max_tokens
+        self.effort = effort  # `output_config.effort`; None keeps the model's default
         self._client = Anthropic(api_key=settings.anthropic_api_key.get_secret_value())
 
     def chat(
@@ -88,6 +89,10 @@ class AnthropicLLM:
             span.set_attribute("gen_ai.system", "anthropic")
             span.set_attribute("gen_ai.request.model", self.model)
             span.set_attribute("gen_ai.request.max_tokens", self.max_tokens)
+            extra: dict[str, Any] = {}
+            if self.effort is not None:
+                span.set_attribute("gen_ai.request.effort", self.effort)
+                extra["output_config"] = {"effort": self.effort}
             response = self._client.messages.create(  # type: ignore[call-overload]
                 model=self.model,
                 max_tokens=self.max_tokens,
@@ -95,6 +100,7 @@ class AnthropicLLM:
                 messages=converted,
                 tools=to_anthropic_tools(tools),
                 tool_choice=to_anthropic_tool_choice(tool_choice),
+                **extra,
             )
             if response.usage is not None:
                 usage = response.usage
