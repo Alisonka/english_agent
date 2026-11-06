@@ -4,6 +4,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from english_agent.models.cefr import Cefr
+from english_agent.models.practice import QUIZ_SIZE, TRANSLATION_SIZE, QuizQuestion, TranslationTask
 from english_agent.versions import Provenance
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
@@ -60,5 +61,9 @@ class Lesson(BaseModel):
     incorrect: str = Field(min_length=1, max_length=240)
     correct: str = Field(min_length=1, max_length=240)
     sources: Annotated[list[Source], Field(min_length=1, max_length=5)]
+    # Sent later in the day, not with the lesson. Empty in lessons stored before schema v3;
+    # the writer requires exactly QUIZ_SIZE / TRANSLATION_SIZE items.
+    quiz: list[QuizQuestion] = Field(default_factory=list, max_length=QUIZ_SIZE)
+    translation: list[TranslationTask] = Field(default_factory=list, max_length=TRANSLATION_SIZE)
     # Code-owned: how this lesson was produced (prompt / model / schema versions).
     provenance: Provenance | None = None

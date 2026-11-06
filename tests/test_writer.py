@@ -7,7 +7,8 @@ import pytest
 from english_agent.llm import AssistantTurn, ToolCall
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.research.models import TopicNotes
-from english_agent.writer import LessonWriteError, write_lesson
+from english_agent.writer import LessonWriteError, _submit_tool, write_lesson
+from samples import QUIZ, TRANSLATION
 
 TOPIC = CurriculumTopic(
     id="there_is_are",
@@ -79,6 +80,8 @@ GOOD_ARGS: dict[str, Any] = {
     "mistake_ru": "Калька с русского «это есть кот» даёт It is a cat вместо There is.",
     "incorrect": "It is a cat in the kitchen.",
     "correct": "There is a cat in the kitchen.",
+    "quiz": QUIZ,
+    "translation": TRANSLATION,
 }
 
 
@@ -154,3 +157,20 @@ def test_writer_gives_up_after_attempts() -> None:
     llm = ScriptedLLM([submit(bad), submit(bad)])
     with pytest.raises(LessonWriteError):
         write_lesson(llm, TOPIC, NOTES)
+
+
+def test_writer_requires_exactly_three_practice_items() -> None:
+    params = _submit_tool()["function"]["parameters"]
+    for field in ("quiz", "translation"):
+        assert field in params["required"]
+        assert params["properties"][field]["minItems"] == params["properties"][field]["maxItems"] == 3
+
+
+def test_writer_retries_when_practice_is_incomplete() -> None:
+    incomplete = {**GOOD_ARGS, "quiz": QUIZ[:2], "translation": []}
+    llm = ScriptedLLM([submit(incomplete), submit(GOOD_ARGS)])
+    lesson = write_lesson(llm, TOPIC, NOTES)
+    assert len(lesson.quiz) == len(lesson.translation) == 3
+    feedback = llm.calls[1]["messages"][-1]["content"]
+    assert "quiz must have exactly 3" in feedback
+    assert "translation must have exactly 3" in feedback

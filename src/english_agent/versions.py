@@ -27,7 +27,7 @@ from english_agent import __version__
 # Schema versions. Bump the relevant entry whenever the corresponding model's
 # shape changes in a way that downstream consumers must notice.
 SCHEMA_VERSIONS: dict[str, int] = {
-    "lesson": 2,  # v2: added key_idea_ru; rule_ru/nuances_ru reshaped for messenger readability
+    "lesson": 3,  # v3: added quiz and translation (practice sent after the lesson)
     "research_result": 1,
     "topic_notes": 1,
     # Storage records (models/storage.py); the table shapes themselves are versioned by Alembic.
@@ -37,6 +37,10 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "error_record": 1,
     "card_record": 1,
     "review_log_record": 1,
+    "practice_delivery_record": 1,
+    "quiz_poll_record": 1,
+    "translation_answer_record": 1,
+    "translation_grade": 1,
 }
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
@@ -45,6 +49,7 @@ _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 PROMPT_FILES: dict[str, Path] = {
     "research_system": _PROMPTS_DIR / "research_system.md",
     "write_lesson_system": _PROMPTS_DIR / "write_lesson_system.md",
+    "grade_translation_system": _PROMPTS_DIR / "grade_translation_system.md",
 }
 
 

@@ -1,6 +1,7 @@
 from datetime import date, time
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator  # SecretStr прячет значение при печати/логировании
@@ -18,7 +19,7 @@ class Settings(BaseSettings):
     # Claude API model ids. Haiku 5.5 supports forced tool_choice (needed by the writer).
     research_model: str = "claude-haiku-5-5"
     writer_model: str = "claude-haiku-5-5"
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 8192
 
     cache_dir: Path = Path(".cache")
     sitemap_ttl_days: int = 7  # сколько дней карта сайта (sitemap) считается «свежей» до повторной загрузки
@@ -48,6 +49,18 @@ class Settings(BaseSettings):
     # When the long-running app (`python -m english_agent.app`) sends the daily lesson.
     lesson_send_time: time = time(9, 0)
     timezone: str = "Europe/Moscow"
+
+    # Practice after the lesson: the quiz QUIZ_DELAY_MINUTES after the lesson, the translation
+    # task at TRANSLATION_SEND_TIME but at least PRACTICE_GAP_MINUTES after the quiz; nothing
+    # is sent after PRACTICE_CUTOFF_TIME (local time).
+    quiz_delay_minutes: int = Field(default=60, ge=0)
+    translation_send_time: time = time(18, 0)
+    practice_gap_minutes: int = Field(default=60, ge=0)
+    practice_cutoff_time: time = time(22, 0)
+
+    # Grades the learner's translation; effort is the Claude API `output_config.effort`.
+    grader_model: str = "claude-haiku-5-5"
+    grader_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
 
     # OpenTelemetry: OTLP/HTTP base endpoint (e.g. http://localhost:4318 for local
     # Jaeger). Empty = tracing disabled; spans become no-ops. Uses the standard

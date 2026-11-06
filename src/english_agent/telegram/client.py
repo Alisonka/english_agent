@@ -89,11 +89,33 @@ class TelegramClient:
             payload["text"] = text
         self._call("answerCallbackQuery", payload)
 
-    def get_updates(self, offset: int | None = None, *, timeout: int = 0) -> list[dict[str, Any]]:
+    def send_poll(
+        self, chat_id: str, question: str, options: list[str], *, correct_option: int, explanation: str
+    ) -> tuple[int, str]:
+        """Send a quiz poll; returns (message_id, poll_id). Not anonymous, so answers arrive as `poll_answer`."""
+        result = self._call(
+            "sendPoll",
+            {
+                "chat_id": chat_id,
+                "question": question,
+                "options": [{"text": option} for option in options],
+                "type": "quiz",
+                "is_anonymous": False,
+                "correct_option_ids": [correct_option],
+                "explanation": explanation,
+            },
+        )
+        return int(result["message_id"]), str(result["poll"]["id"])
+
+    def get_updates(
+        self, offset: int | None = None, *, timeout: int = 0, allowed_updates: list[str] | None = None
+    ) -> list[dict[str, Any]]:
         """Pending updates. `timeout` > 0 long-polls; `offset` acks everything below it."""
         payload: dict[str, Any] = {"timeout": timeout}
         if offset is not None:
             payload["offset"] = offset
+        if allowed_updates is not None:
+            payload["allowed_updates"] = allowed_updates
         return list(self._call("getUpdates", payload))
 
     def set_my_commands(self, commands: list[tuple[str, str]]) -> None:

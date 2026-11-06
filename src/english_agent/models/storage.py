@@ -11,9 +11,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson, Source
+from english_agent.models.practice import QuizQuestion, TranslationGrade
 
 LessonStatus = Literal["sent", "failed"]
 ErrorKind = Literal["quiz", "text"]
+PracticeKind = Literal["quiz", "translation"]
+TranslationAnswerStatus = Literal["pending", "graded", "failed"]
 
 
 class LearnerRecord(BaseModel):
@@ -98,3 +101,62 @@ class ReviewLogRecord(BaseModel):
     reviewed_at: datetime
     source: str
     payload: dict[str, Any] | None
+
+
+class PracticeDeliveryRecord(BaseModel):
+    """The quiz or the translation task of one lesson; `sent_at` is None while it is being sent."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    lesson_id: int
+    kind: PracticeKind
+    item_count: int
+    claimed_at: datetime
+    sent_at: datetime | None
+    telegram_message_ids: list[int]
+    completed_at: datetime | None
+
+
+class QuizPollRecord(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    delivery_id: int
+    position: int
+    telegram_poll_id: str
+    telegram_message_id: int
+    question: QuizQuestion  # options in the order they were sent
+    created_at: datetime
+
+
+class QuizResult(BaseModel):
+    """What answering one poll changed; `results` is filled once every poll of the quiz is answered."""
+
+    is_correct: bool
+    completed: bool
+    results: list[tuple[QuizQuestion, bool]] = Field(default_factory=list)
+
+
+class TranslationAnswerRecord(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    delivery_id: int
+    learner_id: int
+    answer_text: str
+    status: TranslationAnswerStatus
+    grade: TranslationGrade | None
+    error: str | None
+    progress_message_id: int | None
+    disputed: bool
+    created_at: datetime
+    graded_at: datetime | None
+
+
+class OpenTranslationTask(BaseModel):
+    """A sent translation task that waits for the learner's answer."""
+
+    learner_id: int
+    delivery: PracticeDeliveryRecord
+    lesson: Lesson

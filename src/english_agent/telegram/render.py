@@ -15,6 +15,7 @@ import html
 import re
 
 from english_agent.models.lesson import TELEGRAM_MAX_MESSAGE_LENGTH, Example, Lesson
+from english_agent.models.practice import QuizQuestion, TranslationGrade
 
 PARAGRAPH = "\n\n"
 _SPLIT_SEPARATORS = (PARAGRAPH, "\n")
@@ -178,3 +179,47 @@ def _split(text: str, limit: int, separators: tuple[str, ...]) -> list[str]:
     if current:
         chunks.append(current)
     return chunks
+
+
+# --- practice sent after the lesson ------------------------------------------------
+
+_VERDICT_MARKS = {"correct": "✅", "fixed": "✏️", "missing": "➖"}
+
+
+def render_quiz_intro(lesson: Lesson) -> str:
+    return f"🧠 <b>Проверь себя:</b> {_e(lesson.title_en)} · {len(lesson.quiz)} вопроса"
+
+
+def render_quiz_summary(results: list[tuple[QuizQuestion, bool]]) -> str:
+    correct = sum(ok for _, ok in results)
+    lines = [f"<b>Итог: {correct}/{len(results)}</b> {'🎉' if correct == len(results) else '✅'}"]
+    for question, ok in results:
+        if not ok:
+            answer = question.options[question.correct_option]
+            lines.append(f"❌ {_e(question.question)}\n→ <b>{_e(answer)}</b>")
+    lines.append("Вечером будет перевод на эту тему.")
+    return PARAGRAPH.join(lines)
+
+
+def render_translation_task(lesson: Lesson) -> str:
+    sentences = "\n".join(f"{n}. {_e(task.ru)}" for n, task in enumerate(lesson.translation, start=1))
+    return (
+        f"✍️ <b>Переведи на английский</b> · {_e(lesson.title_en)}\n\n{sentences}\n\n"
+        "Ответь одним сообщением, каждое предложение с новой строки."
+    )
+
+
+def render_grade(grade: TranslationGrade) -> str:
+    lines = [f"<b>Результат: {grade.correct_count}/{len(grade.sentences)}</b>"]
+    for item in sorted(grade.sentences, key=lambda sentence: sentence.n):
+        mark = _VERDICT_MARKS[item.verdict]
+        if item.verdict == "correct":
+            lines.append(f"{item.n}. {mark} {_e(item.learner_text)}")
+            continue
+        written = _e(item.learner_text) if item.learner_text else "<i>нет ответа</i>"
+        block = f"{item.n}. {mark} {written}\n→ <b>{_e(item.corrected)}</b>"
+        if item.explanation_ru:
+            block += f"\n<i>{_e(item.explanation_ru)}</i>"
+        lines.append(block)
+    lines.append(f"🎯 <b>Завтра обрати внимание:</b> {_e(grade.focus_ru)}")
+    return PARAGRAPH.join(lines)
