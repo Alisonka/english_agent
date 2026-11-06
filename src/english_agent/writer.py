@@ -19,6 +19,7 @@ from english_agent.llm import ChatLLM
 from english_agent.models.cefr import Cefr
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.models.lesson import Lesson
+from english_agent.models.practice import QUIZ_SIZE, TRANSLATION_SIZE
 from english_agent.research.models import TopicNotes
 from english_agent.tracing import get_tracer
 from english_agent.versions import SCHEMA_VERSIONS, build_provenance
@@ -36,6 +37,11 @@ def _submit_tool() -> dict[str, Any]:
     for field in _OWNED_BY_CODE:
         schema["properties"].pop(field, None)
     schema["required"] = [name for name in schema.get("required", []) if name not in _OWNED_BY_CODE]
+    # Optional in the model (old stored lessons have none), required from the writer.
+    for field, size in (("quiz", QUIZ_SIZE), ("translation", TRANSLATION_SIZE)):
+        schema["properties"][field].pop("default", None)
+        schema["properties"][field].update(minItems=size, maxItems=size)
+        schema["required"].append(field)
     return {
         "type": "function",
         "function": {
@@ -44,6 +50,16 @@ def _submit_tool() -> dict[str, Any]:
             "parameters": schema,
         },
     }
+
+
+def _practice_problem(lesson: Lesson) -> str:
+    """Why the lesson's practice is incomplete, or "" when it is complete."""
+    problems: list[str] = []
+    if len(lesson.quiz) != QUIZ_SIZE:
+        problems.append(f"quiz must have exactly {QUIZ_SIZE} questions, got {len(lesson.quiz)}")
+    if len(lesson.translation) != TRANSLATION_SIZE:
+        problems.append(f"translation must have exactly {TRANSLATION_SIZE} sentences, got {len(lesson.translation)}")
+    return "; ".join(problems)
 
 
 def write_lesson(
@@ -95,17 +111,19 @@ def write_lesson(
             }
             try:
                 lesson = Lesson.model_validate(payload)
-                span.set_attribute("writer.attempts", attempt)
-                return lesson
+                last_error = _practice_problem(lesson)
+                if not last_error:
+                    span.set_attribute("writer.attempts", attempt)
+                    return lesson
             except ValidationError as error:
                 last_error = json.dumps(error.errors(include_url=False)[:5], ensure_ascii=False, default=str)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": f"Lesson rejected, fix these problems and call submit_lesson again: {last_error}",
-                    }
-                )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": f"Lesson rejected, fix these problems and call submit_lesson again: {last_error}",
+                }
+            )
 
         span.set_attribute("writer.attempts", attempts)
         span.set_status(Status(StatusCode.ERROR, last_error))

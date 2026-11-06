@@ -6,7 +6,16 @@ import pytest
 
 from conftest import lesson_payload
 from english_agent.models.lesson import EXAMPLE_MAX, TELEGRAM_MAX_MESSAGE_LENGTH, Example, Lesson
-from english_agent.telegram.render import highlight, render_blocks, render_lesson, render_messages, split_message
+from english_agent.models.practice import TranslationGrade
+from english_agent.telegram.render import (
+    highlight,
+    render_blocks,
+    render_grade,
+    render_lesson,
+    render_messages,
+    render_quiz_summary,
+    split_message,
+)
 
 _TAG = re.compile(r"<(/?)(b|i|s|code|a|blockquote)\b[^>]*>")
 
@@ -195,3 +204,43 @@ def test_maximal_lesson_splits_into_valid_telegram_messages() -> None:
         assert_balanced_tags(chunk)
         # The expandable rule quote is never cut across messages.
         assert chunk.count("<blockquote") == chunk.count("</blockquote>")
+
+
+def test_practice_is_not_part_of_the_lesson_message() -> None:
+    lesson = Lesson.model_validate(lesson_payload())
+    text = "\n".join(render_messages(lesson))
+    assert lesson.quiz[0].question not in text
+    assert lesson.translation[0].ru not in text
+
+
+def test_quiz_summary_lists_only_the_wrong_answers() -> None:
+    lesson = Lesson.model_validate(lesson_payload())
+    text = render_quiz_summary([(lesson.quiz[0], True), (lesson.quiz[1], False), (lesson.quiz[2], True)])
+    assert "Итог: 2/3" in text
+    assert lesson.quiz[1].question in text and "There is milk in the fridge." in text
+    assert lesson.quiz[0].question not in text
+
+
+def test_grade_shows_fixes_and_escapes_learner_text() -> None:
+    grade = TranslationGrade.model_validate(
+        {
+            "sentences": [
+                {"n": 1, "learner_text": "a <b> c", "verdict": "correct", "corrected": "a <b> c", "explanation_ru": ""},
+                {
+                    "n": 2,
+                    "learner_text": "There is no children.",
+                    "verdict": "fixed",
+                    "corrected": "There are no children.",
+                    "explanation_ru": "Множественное число.",
+                },
+                {"n": 3, "learner_text": "", "verdict": "missing", "corrected": "Is there?", "explanation_ru": ""},
+            ],
+            "focus_ru": "Число после there.",
+        }
+    )
+    text = render_grade(grade)
+    assert "Результат: 1/3" in text
+    assert "a &lt;b&gt; c" in text
+    assert "→ <b>There are no children.</b>" in text
+    assert "нет ответа" in text
+    assert "Число после there." in text

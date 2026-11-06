@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Practice after the lesson. The writer now also returns `quiz` (3 Telegram quiz
+  polls) and `translation` (3 RU->EN sentences) in the same call (lesson schema v3).
+  The app sends the quiz `QUIZ_DELAY_MINUTES` after the lesson and the translation
+  task at `TRANSLATION_SEND_TIME`, records poll answers and sends the result after
+  the last one. A text reply to the translation task is graded by `GRADER_MODEL` at
+  `GRADER_EFFORT` (`src/english_agent/grader.py`) and answered with corrections, an
+  explanation and a "disagree" button. Wrong answers go to `errors`. Migration
+  `0002_practice`: `practice_deliveries`, `quiz_polls`, `quiz_answers`,
+  `translation_answers`. New settings: `QUIZ_DELAY_MINUTES`, `TRANSLATION_SEND_TIME`,
+  `PRACTICE_GAP_MINUTES`, `PRACTICE_CUTOFF_TIME`, `GRADER_MODEL`, `GRADER_EFFORT`.
 - PostgreSQL storage (`src/english_agent/storage/`): SQLAlchemy 2.0 (sync, psycopg 3)
   mappings and repositories that return pydantic records (`models/storage.py`), with
   Alembic migrations (`migrations/`, `0001_initial`: `learners`, `lessons`, `items`,
@@ -60,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `LLM_MAX_TOKENS` default raised from 4096 to 8192: the writer now also writes the
+  practice, and adaptive thinking counts against the limit.
 - `Lesson` schema reshaped for readable messenger delivery (schema version 1 -> 2):
   new required `key_idea_ru` (one-sentence core idea, shown first and never hidden),
   `rule_ru` shortened (max 1200) and written as short labelled paragraphs, and

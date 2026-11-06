@@ -63,3 +63,13 @@ def test_scheduled_run_uses_today_in_the_configured_timezone(monkeypatch: pytest
     app.run_scheduled_lesson(settings(), fake_stores()[0])
 
     assert days == [date(2026, 11, 3)]
+
+
+def test_practice_tick_runs_every_few_minutes_one_at_a_time(scheduler: BackgroundScheduler) -> None:
+    app.schedule_practice(scheduler, settings(), fake_stores()[0])
+    app.schedule_practice(scheduler, settings(), fake_stores()[0])  # replaces, does not add a second job
+
+    [job] = scheduler.get_jobs()
+    assert job.id == app.PRACTICE_JOB_ID
+    assert job.max_instances == 1
+    assert job.trigger.interval.total_seconds() == 5 * 60

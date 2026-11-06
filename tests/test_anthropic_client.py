@@ -1,5 +1,10 @@
+from types import SimpleNamespace
+from typing import Any
+
+from english_agent.config import Settings
 from english_agent.llm import AssistantTurn, ToolCall
 from english_agent.llm.anthropic_client import (
+    AnthropicLLM,
     parse_response_blocks,
     to_anthropic_messages,
     to_anthropic_tool_choice,
@@ -52,3 +57,31 @@ def test_tool_and_tool_choice_conversion() -> None:
     assert to_anthropic_tools([spec]) == [{"name": "f", "description": "d", "input_schema": {"type": "object"}}]
     assert to_anthropic_tool_choice("auto") == {"type": "auto"}
     assert to_anthropic_tool_choice({"type": "function", "function": {"name": "f"}}) == {"type": "tool", "name": "f"}
+
+
+class _RecordingMessages:
+    def __init__(self) -> None:
+        self.kwargs: dict[str, Any] = {}
+
+    def create(self, **kwargs: Any) -> SimpleNamespace:
+        self.kwargs = kwargs
+        return SimpleNamespace(usage=None, stop_reason="end_turn", content=[])
+
+
+def _llm(effort: str | None) -> tuple[AnthropicLLM, _RecordingMessages]:
+    llm = AnthropicLLM(Settings(_env_file=None, anthropic_api_key="k"), "claude-haiku-5-5", effort=effort)
+    messages = _RecordingMessages()
+    llm._client = SimpleNamespace(messages=messages)  # type: ignore[assignment]
+    return llm, messages
+
+
+def test_effort_goes_into_output_config() -> None:
+    llm, messages = _llm("high")
+    llm.chat([{"role": "user", "content": "hi"}], [])
+    assert messages.kwargs["output_config"] == {"effort": "high"}
+
+
+def test_no_effort_keeps_the_model_default() -> None:
+    llm, messages = _llm(None)
+    llm.chat([{"role": "user", "content": "hi"}], [])
+    assert "output_config" not in messages.kwargs
