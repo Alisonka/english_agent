@@ -7,39 +7,49 @@ can be shared by the polling thread and the scheduler thread.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from english_agent.config import Settings
 from english_agent.models.cefr import Cefr
-from english_agent.models.lesson import Lesson, Source
+from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
+from english_agent.models.profile import LearnerProfile
 from english_agent.models.storage import (
+    CORE_SLUG,
     CardRecord,
+    ErrorRecord,
+    ItemDraft,
     ItemRecord,
+    LearnerProfileRecord,
     LearnerRecord,
     LessonRecord,
     OpenTranslationTask,
     PracticeDeliveryRecord,
     PracticeKind,
+    ProfileInputs,
     QuizPollRecord,
     QuizResult,
     TranslationAnswerRecord,
+    core_item_key,
 )
+from english_agent.srs import ReviewScheduler, due_at, make_scheduler, quiz_rating, translation_rating
 from english_agent.storage.db import SessionFactory, make_engine, make_session_factory, session_scope
 from english_agent.storage.orm import (
     CardRow,
     ErrorRow,
     ItemRow,
+    LearnerProfileRow,
     LearnerRow,
     LessonRow,
     PracticeDeliveryRow,
     QuizAnswerRow,
     QuizPollRow,
+    ReviewLogRow,
     TranslationAnswerRow,
 )
 from english_agent.versions import SCHEMA_VERSIONS
@@ -70,6 +80,14 @@ class LessonStore(Protocol):
         self, learner_id: int, day: date, *, topic_id: str, cefr: Cefr, reason: str, curriculum_version: int | None
     ) -> LessonRecord: ...
 
+    def list_sent(self) -> list[LessonRecord]: ...
+
+
+class ItemStore(Protocol):
+    def get_by_key(self, key: str) -> ItemRecord | None: ...
+
+    def get_or_create(self, draft: ItemDraft, *, source_lesson_id: int | None = None) -> tuple[ItemRecord, bool]: ...
+
 
 class PracticeStore(Protocol):
     def delivery(self, lesson_id: int, kind: PracticeKind) -> PracticeDeliveryRecord | None: ...
@@ -85,6 +103,7 @@ class PracticeStore(Protocol):
         position: int,
         telegram_poll_id: str,
         telegram_message_id: int,
+        item_id: int | None,
         question: QuizQuestion,
     ) -> QuizPollRecord: ...
 
@@ -107,22 +126,111 @@ class PracticeStore(Protocol):
     def dispute(self, answer_id: int) -> bool: ...
 
 
+class CardStore(Protocol):
+    def get(self, learner_id: int, item_id: int) -> CardRecord | None: ...
+
+    def due(self, learner_id: int, now: datetime, *, limit: int = 20) -> list[CardRecord]: ...
+
+    def review(
+        self,
+        learner_id: int,
+        item_id: int,
+        rating: int,
+        at: datetime,
+        *,
+        source: str,
+        source_ref: str,
+        payload: dict[str, Any] | None = None,
+    ) -> CardRecord: ...
+
+
+class ProfileStore(Protocol):
+    def latest(self, learner_id: int) -> LearnerProfileRecord | None: ...
+
+    def append(self, learner_id: int, profile: LearnerProfile) -> LearnerProfileRecord: ...
+
+    def inputs(self, learner_id: int, now: datetime, *, window_days: int) -> ProfileInputs: ...
+
+
 @dataclass(frozen=True)
 class Stores:
     learners: LearnerStore
     lessons: LessonStore
     practice: PracticeStore
+    items: ItemStore
+    cards: CardStore
+    profiles: ProfileStore
 
 
-def sql_stores(sessions: SessionFactory) -> Stores:
-    return Stores(learners=LearnerRepo(sessions), lessons=LessonRepo(sessions), practice=PracticeRepo(sessions))
+def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = None) -> Stores:
+    scheduler = scheduler or ReviewScheduler()
+    return Stores(
+        learners=LearnerRepo(sessions),
+        lessons=LessonRepo(sessions),
+        practice=PracticeRepo(sessions, scheduler),
+        items=ItemRepo(sessions),
+        cards=CardRepo(sessions, scheduler),
+        profiles=ProfileRepo(sessions),
+    )
 
 
 def open_stores(settings: Settings) -> Stores | None:
     """SQL-backed stores for DATABASE_URL, or None when it is not set."""
     if not settings.database_url.get_secret_value():
         return None
-    return sql_stores(make_session_factory(make_engine(settings)))
+    return sql_stores(make_session_factory(make_engine(settings)), make_scheduler(settings))
+
+
+def _review_card(
+    session: Session,
+    scheduler: ReviewScheduler,
+    *,
+    learner_id: int,
+    item_id: int,
+    rating: int,
+    at: datetime,
+    source: str,
+    source_ref: str,
+    payload: dict[str, Any] | None = None,
+) -> tuple[CardRow, bool]:
+    """Rate one item once, inside the caller's transaction.
+
+    Creates the card on first contact, applies FSRS and writes the review log. The flag is False
+    when `source_ref` was rated before: the card is then returned unchanged (safe replays).
+    """
+    locked = select(CardRow).where(CardRow.learner_id == learner_id, CardRow.item_id == item_id).with_for_update()
+    card = session.scalar(locked)
+    if card is None:
+        # ON CONFLICT: the polling and the grading thread may rate the same new item at once.
+        session.execute(
+            insert(CardRow)
+            .values(learner_id=learner_id, item_id=item_id, fsrs_state=scheduler.new_card(at), due_at=at)
+            .on_conflict_do_nothing(index_elements=["learner_id", "item_id"])
+        )
+        card = session.scalar(locked)
+        assert card is not None
+    # Checked under the card lock, so two threads with the same event cannot both apply it.
+    if session.scalar(select(ReviewLogRow.id).where(ReviewLogRow.source_ref == source_ref)) is not None:
+        return card, False
+    state, log = scheduler.review(card.fsrs_state, rating, at)
+    card.fsrs_state, card.due_at = state, due_at(state)
+    card.last_reviewed_at, card.reviews = at, card.reviews + 1
+    session.add(
+        ReviewLogRow(
+            card_id=card.id,
+            rating=rating,
+            reviewed_at=at,
+            source=source,
+            source_ref=source_ref,
+            payload={"fsrs": log, **(payload or {})},
+        )
+    )
+    session.flush()
+    return card, True
+
+
+def _core_item(session: Session, topic_id: str) -> ItemRow | None:
+    return session.scalar(select(ItemRow).where(ItemRow.key == core_item_key(topic_id)))
 
 
 class LearnerRepo:
@@ -215,6 +323,14 @@ class LessonRepo:
             sent_at=None,
         )
 
+    def list_sent(self) -> list[LessonRecord]:
+        """Every sent lesson, oldest first. For maintenance commands: one lesson a day, so no paging."""
+        with session_scope(self._sessions) as session:
+            rows = session.scalars(
+                select(LessonRow).where(LessonRow.status == "sent").order_by(LessonRow.lesson_date, LessonRow.id)
+            )
+            return [LessonRecord.model_validate(row) for row in rows]
+
     def _save(self, learner_id: int, day: date, **values: Any) -> LessonRecord:
         """Insert the day's row, or overwrite an earlier failed attempt; a sent lesson is final."""
         values["schema_version"] = SCHEMA_VERSIONS["lesson"]
@@ -233,55 +349,74 @@ class LessonRepo:
 
 
 class ItemRepo:
-    """Learnable items; filled from A6 on."""
+    """Learnable items: the core item of every taught topic (see `english_agent.items`)."""
 
     def __init__(self, sessions: SessionFactory) -> None:
         self._sessions = sessions
+
+    @staticmethod
+    def _find(session: Session, key: str) -> ItemRow | None:
+        return session.scalar(select(ItemRow).where(ItemRow.key == key))
 
     def get_by_key(self, key: str) -> ItemRecord | None:
         with session_scope(self._sessions) as session:
-            row = session.scalar(select(ItemRow).where(ItemRow.key == key))
+            row = self._find(session, key)
             return None if row is None else ItemRecord.model_validate(row)
 
-    def add(
-        self,
-        *,
-        key: str,
-        topic_id: str,
-        cefr: Cefr,
-        form: str,
-        function_ru: str,
-        explanation_ru: str,
-        sources: list[Source],
-        source_lesson_id: int | None = None,
-    ) -> ItemRecord:
-        row = ItemRow(
-            key=key,
-            topic_id=topic_id,
-            cefr=cefr,
-            form=form,
-            function_ru=function_ru,
-            explanation_ru=explanation_ru,
-            sources=[source.model_dump(mode="json") for source in sources],
-            source_lesson_id=source_lesson_id,
+    def get_or_create(self, draft: ItemDraft, *, source_lesson_id: int | None = None) -> tuple[ItemRecord, bool]:
+        """The item with `draft.key`, created from the draft if missing; the flag says whether it was created.
+
+        An existing item is returned unchanged, so the lesson that first taught a topic stays its
+        source. ON CONFLICT: the same item may be created from two threads or runs at once.
+        """
+        statement = (
+            insert(ItemRow)
+            .values(**draft.model_dump(mode="json"), source_lesson_id=source_lesson_id)
+            .on_conflict_do_nothing(index_elements=[ItemRow.key])
+            .returning(ItemRow.id)
         )
         with session_scope(self._sessions) as session:
-            session.add(row)
-            session.flush()
-            return ItemRecord.model_validate(row)
+            created_id = session.execute(statement).scalar_one_or_none()
+            row = self._find(session, draft.key)
+            assert row is not None
+            return ItemRecord.model_validate(row), created_id is not None
 
 
 class CardRepo:
-    """FSRS cards (one per learner and item); filled from A8 on."""
+    """FSRS cards, one per learner and item. Practice rates them itself; this is for readers and replays."""
 
-    def __init__(self, sessions: SessionFactory) -> None:
+    def __init__(self, sessions: SessionFactory, scheduler: ReviewScheduler) -> None:
         self._sessions = sessions
+        self._scheduler = scheduler
 
-    def add(self, learner_id: int, item_id: int, *, fsrs_state: dict[str, Any], due_at: datetime) -> CardRecord:
-        row = CardRow(learner_id=learner_id, item_id=item_id, fsrs_state=fsrs_state, due_at=due_at)
+    def get(self, learner_id: int, item_id: int) -> CardRecord | None:
         with session_scope(self._sessions) as session:
-            session.add(row)
-            session.flush()
+            row = session.scalar(select(CardRow).where(CardRow.learner_id == learner_id, CardRow.item_id == item_id))
+            return None if row is None else CardRecord.model_validate(row)
+
+    def review(
+        self,
+        learner_id: int,
+        item_id: int,
+        rating: int,
+        at: datetime,
+        *,
+        source: str,
+        source_ref: str,
+        payload: dict[str, Any] | None = None,
+    ) -> CardRecord:
+        with session_scope(self._sessions) as session:
+            row, _ = _review_card(
+                session,
+                self._scheduler,
+                learner_id=learner_id,
+                item_id=item_id,
+                rating=rating,
+                at=at,
+                source=source,
+                source_ref=source_ref,
+                payload=payload,
+            )
             return CardRecord.model_validate(row)
 
     def due(self, learner_id: int, now: datetime, *, limit: int = 20) -> list[CardRecord]:
@@ -296,11 +431,161 @@ class CardRepo:
             return [CardRecord.model_validate(row) for row in rows]
 
 
-class PracticeRepo:
-    """The quiz and the translation task sent after each lesson, and the learner's answers to them."""
+class ProfileRepo:
+    """Versions of the learner profile, and the raw numbers a new version is computed from."""
 
     def __init__(self, sessions: SessionFactory) -> None:
         self._sessions = sessions
+
+    def latest(self, learner_id: int) -> LearnerProfileRecord | None:
+        with session_scope(self._sessions) as session:
+            row = session.scalar(
+                select(LearnerProfileRow)
+                .where(LearnerProfileRow.learner_id == learner_id)
+                .order_by(LearnerProfileRow.version.desc())
+                .limit(1)
+            )
+            return None if row is None else LearnerProfileRecord.model_validate(row)
+
+    def append(self, learner_id: int, profile: LearnerProfile) -> LearnerProfileRecord:
+        with session_scope(self._sessions) as session:
+            # The learner row lock serialises appends from the polling and the grading thread.
+            session.get_one(LearnerRow, learner_id, with_for_update=True)
+            current = session.scalar(
+                select(func.max(LearnerProfileRow.version)).where(LearnerProfileRow.learner_id == learner_id)
+            )
+            row = LearnerProfileRow(
+                learner_id=learner_id,
+                version=(current or 0) + 1,
+                schema_version=SCHEMA_VERSIONS["learner_profile"],
+                profile=profile.model_dump(mode="json"),
+            )
+            session.add(row)
+            session.flush()
+            return LearnerProfileRecord.model_validate(row)
+
+    def inputs(self, learner_id: int, now: datetime, *, window_days: int) -> ProfileInputs:
+        since = now - timedelta(days=window_days)
+        with session_scope(self._sessions) as session:
+            learner = session.get_one(LearnerRow, learner_id)
+            lessons_sent = session.scalar(
+                select(func.count())
+                .select_from(LessonRow)
+                .where(LessonRow.learner_id == learner_id, LessonRow.status == "sent")
+            )
+            errors = session.scalars(
+                select(ErrorRow).where(ErrorRow.learner_id == learner_id, ErrorRow.created_at >= since)
+            ).all()
+            item_ids = {error.item_id for error in errors if error.item_id is not None}
+            items = session.scalars(select(ItemRow).where(ItemRow.id.in_(item_ids))).all() if item_ids else []
+            quiz_answers, quiz_correct = session.execute(
+                select(func.count(), func.count().filter(QuizAnswerRow.is_correct.is_(True)))
+                .select_from(QuizAnswerRow)
+                .where(QuizAnswerRow.learner_id == learner_id, QuizAnswerRow.answered_at >= since)
+            ).one()
+            grades = session.scalars(
+                select(TranslationAnswerRow.grade).where(
+                    TranslationAnswerRow.learner_id == learner_id,
+                    TranslationAnswerRow.status == "graded",
+                    TranslationAnswerRow.graded_at >= since,
+                )
+            ).all()
+            cards, due_cards = session.execute(
+                select(func.count(), func.count().filter(CardRow.due_at <= now))
+                .select_from(CardRow)
+                .where(CardRow.learner_id == learner_id)
+            ).one()
+            return ProfileInputs(
+                cefr=learner.cefr,
+                window_days=window_days,
+                lessons_sent=lessons_sent or 0,
+                errors=[ErrorRecord.model_validate(error) for error in errors],
+                items={item.id: ItemRecord.model_validate(item) for item in items},
+                quiz_answers=quiz_answers,
+                quiz_correct=quiz_correct,
+                translation_grades=[TranslationGrade.model_validate(grade) for grade in grades if grade is not None],
+                cards=cards,
+                due_cards=due_cards,
+            )
+
+
+class MaintenanceRepo:
+    """One-off repairs run from `python -m english_agent.storage`; every method is safe to rerun."""
+
+    def __init__(self, sessions: SessionFactory, scheduler: ReviewScheduler) -> None:
+        self._sessions = sessions
+        self._scheduler = scheduler
+
+    def link_polls_to_items(self) -> int:
+        """Point polls sent before items existed at their lesson's core item; returns how many were linked."""
+        statement = (
+            update(QuizPollRow)
+            .where(
+                QuizPollRow.item_id.is_(None),
+                QuizPollRow.delivery_id == PracticeDeliveryRow.id,
+                PracticeDeliveryRow.lesson_id == LessonRow.id,
+                ItemRow.key == LessonRow.topic_id + f":{CORE_SLUG}",
+            )
+            .values(item_id=ItemRow.id)
+        )
+        with session_scope(self._sessions) as session:
+            return session.execute(statement).rowcount
+
+    def replay_reviews(self) -> int:
+        """Rate every stored quiz answer and graded translation that has no review log yet, oldest first."""
+        events: list[tuple[datetime, int, int, int, str, str, dict[str, Any]]] = []
+        with session_scope(self._sessions) as session:
+            answers = session.execute(
+                select(QuizAnswerRow, QuizPollRow.item_id)
+                .join(QuizPollRow, QuizPollRow.id == QuizAnswerRow.poll_id)
+                .where(QuizPollRow.item_id.is_not(None))
+            ).all()
+            for answer, item_id in answers:
+                rating = quiz_rating(answer.is_correct)
+                ref = f"quiz_answer:{answer.id}"
+                payload = {"poll_id": answer.poll_id}
+                events.append((answer.answered_at, answer.learner_id, item_id, rating, "quiz", ref, payload))
+            graded = session.execute(
+                select(TranslationAnswerRow, LessonRow.topic_id)
+                .join(PracticeDeliveryRow, PracticeDeliveryRow.id == TranslationAnswerRow.delivery_id)
+                .join(LessonRow, LessonRow.id == PracticeDeliveryRow.lesson_id)
+                .where(TranslationAnswerRow.status == "graded", TranslationAnswerRow.grade.is_not(None))
+            ).all()
+            for answer, topic_id in graded:
+                item = _core_item(session, topic_id)
+                if item is None or answer.graded_at is None:
+                    continue
+                for sentence in TranslationGrade.model_validate(answer.grade).sentences:
+                    rating = translation_rating(sentence.verdict)
+                    if rating is None:
+                        continue
+                    ref = f"translation_answer:{answer.id}:{sentence.n}"
+                    payload = {"verdict": sentence.verdict}
+                    events.append((answer.graded_at, answer.learner_id, item.id, rating, "translation", ref, payload))
+
+            applied = 0
+            for at, learner_id, item_id, rating, source, source_ref, payload in sorted(events, key=lambda e: e[0]):
+                _, is_new = _review_card(
+                    session,
+                    self._scheduler,
+                    learner_id=learner_id,
+                    item_id=item_id,
+                    rating=rating,
+                    at=at,
+                    source=source,
+                    source_ref=source_ref,
+                    payload=payload,
+                )
+                applied += is_new
+            return applied
+
+
+class PracticeRepo:
+    """The quiz and the translation task sent after each lesson, and the learner's answers to them."""
+
+    def __init__(self, sessions: SessionFactory, scheduler: ReviewScheduler) -> None:
+        self._sessions = sessions
+        self._scheduler = scheduler
 
     def delivery(self, lesson_id: int, kind: PracticeKind) -> PracticeDeliveryRecord | None:
         with session_scope(self._sessions) as session:
@@ -341,6 +626,7 @@ class PracticeRepo:
         position: int,
         telegram_poll_id: str,
         telegram_message_id: int,
+        item_id: int | None,
         question: QuizQuestion,
     ) -> QuizPollRecord:
         row = QuizPollRow(
@@ -348,6 +634,7 @@ class PracticeRepo:
             position=position,
             telegram_poll_id=telegram_poll_id,
             telegram_message_id=telegram_message_id,
+            item_id=item_id,
             question=question.model_dump(mode="json"),
         )
         with session_scope(self._sessions) as session:
@@ -358,7 +645,12 @@ class PracticeRepo:
     def record_poll_answer(
         self, telegram_poll_id: str, telegram_chat_id: str, option_ids: list[int]
     ) -> QuizResult | None:
-        """Store one answer (a wrong one also goes to `errors`); None for an unknown poll or a repeated answer."""
+        """Store one answer; a wrong one also goes to `errors`, and the poll's item is rated for FSRS.
+
+        None for an unknown poll or a repeated answer. One transaction: the answer, the error,
+        the card and the review log are all there or none of them is.
+        """
+        now = datetime.now(UTC)
         with session_scope(self._sessions) as session:
             poll = session.scalar(select(QuizPollRow).where(QuizPollRow.telegram_poll_id == telegram_poll_id))
             learner = session.scalar(select(LearnerRow).where(LearnerRow.telegram_chat_id == telegram_chat_id))
@@ -366,9 +658,10 @@ class PracticeRepo:
                 return None
             question = QuizQuestion.model_validate(poll.question)
             is_correct = option_ids == [question.correct_option]
+            answer = {"poll_id": poll.id, "learner_id": learner.id, "option_ids": option_ids, "is_correct": is_correct}
             answer_id = session.execute(
                 insert(QuizAnswerRow)
-                .values(poll_id=poll.id, learner_id=learner.id, option_ids=option_ids, is_correct=is_correct)
+                .values(**answer, answered_at=now)
                 .on_conflict_do_nothing(index_elements=["poll_id", "learner_id"])
                 .returning(QuizAnswerRow.id)
             ).scalar_one_or_none()
@@ -378,12 +671,25 @@ class PracticeRepo:
                 session.add(
                     ErrorRow(
                         learner_id=learner.id,
+                        item_id=poll.item_id,
                         kind="quiz",
                         original=", ".join(question.options[i] for i in option_ids if 0 <= i < len(question.options)),
                         corrected=question.options[question.correct_option],
                         error_type=question.kind,
                         explanation_ru=question.explanation_ru,
                     )
+                )
+            if poll.item_id is not None:
+                _review_card(
+                    session,
+                    self._scheduler,
+                    learner_id=learner.id,
+                    item_id=poll.item_id,
+                    rating=quiz_rating(is_correct),
+                    at=now,
+                    source="quiz",
+                    source_ref=f"quiz_answer:{answer_id}",
+                    payload={"poll_id": poll.id},
                 )
 
             delivery = session.get_one(PracticeDeliveryRow, poll.delivery_id, with_for_update=True)
@@ -394,9 +700,10 @@ class PracticeRepo:
                 .order_by(QuizPollRow.position)
             ).all()
             if delivery.completed_at is not None or len(answered) < delivery.item_count:
-                return QuizResult(is_correct=is_correct, completed=False)
-            delivery.completed_at = datetime.now(UTC)
+                return QuizResult(learner_id=learner.id, is_correct=is_correct, completed=False)
+            delivery.completed_at = now
             return QuizResult(
+                learner_id=learner.id,
                 is_correct=is_correct,
                 completed=True,
                 results=[(QuizQuestion.model_validate(payload), correct) for payload, correct in answered],
@@ -454,24 +761,45 @@ class PracticeRepo:
             session.get_one(TranslationAnswerRow, answer_id).progress_message_id = message_id
 
     def finish_translation_answer(self, answer_id: int, grade: TranslationGrade) -> TranslationAnswerRecord:
-        """Save the grade, close the task and log every corrected sentence in `errors`."""
+        """Save the grade, close the task, log every corrected sentence in `errors` and rate the lesson's item.
+
+        Each sentence is one FSRS rating (correct -> good, fixed -> again, missing -> none).
+        """
         now = datetime.now(UTC)
         with session_scope(self._sessions) as session:
             row = session.get_one(TranslationAnswerRow, answer_id)
             row.status, row.grade, row.error, row.graded_at = "graded", grade.model_dump(mode="json"), None, now
-            session.get_one(PracticeDeliveryRow, row.delivery_id).completed_at = now
+            delivery = session.get_one(PracticeDeliveryRow, row.delivery_id)
+            delivery.completed_at = now
+            item = _core_item(session, session.get_one(LessonRow, delivery.lesson_id).topic_id)
             session.add_all(
                 ErrorRow(
                     learner_id=row.learner_id,
+                    item_id=None if item is None else item.id,
                     kind="text",
-                    original=item.learner_text,
-                    corrected=item.corrected,
-                    error_type=item.error_type,
-                    explanation_ru=item.explanation_ru,
+                    original=sentence.learner_text,
+                    corrected=sentence.corrected,
+                    error_type=sentence.error_type,
+                    explanation_ru=sentence.explanation_ru,
                 )
-                for item in grade.sentences
-                if item.verdict == "fixed"
+                for sentence in grade.sentences
+                if sentence.verdict == "fixed"
             )
+            for sentence in grade.sentences:
+                rating = translation_rating(sentence.verdict)
+                if item is None or rating is None:
+                    continue
+                _review_card(
+                    session,
+                    self._scheduler,
+                    learner_id=row.learner_id,
+                    item_id=item.id,
+                    rating=rating,
+                    at=now,
+                    source="translation",
+                    source_ref=f"translation_answer:{row.id}:{sentence.n}",
+                    payload={"verdict": sentence.verdict},
+                )
             session.flush()
             return TranslationAnswerRecord.model_validate(row)
 

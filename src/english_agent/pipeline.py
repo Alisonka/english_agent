@@ -21,6 +21,7 @@ import httpx
 from opentelemetry.trace import Span, Status, StatusCode
 
 from english_agent.config import Settings, get_settings
+from english_agent.items import record_core_item
 from english_agent.llm import AnthropicLLM
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
@@ -254,7 +255,10 @@ def _run(
         return 1
     print(f"sent {len(message_ids)} message(s) to Telegram chat {settings.telegram_chat_id}", file=sys.stderr)
     if stores is not None and learner is not None:
-        stores.lessons.record_sent(learner.id, today, lesson, message_ids, curriculum_version=curriculum.version)
+        record = stores.lessons.record_sent(
+            learner.id, today, lesson, message_ids, curriculum_version=curriculum.version
+        )
+        record_core_item(stores.items, lesson, record.id)
     return 0
 
 

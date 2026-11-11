@@ -15,7 +15,7 @@ from english_agent.models.storage import LessonRecord, PracticeDeliveryRecord
 from english_agent.practice import deliver_due_practice, due_practice, shuffle_options
 from english_agent.storage import Stores
 from english_agent.telegram import TelegramClient
-from fakes import fake_practice, fake_stores
+from fakes import fake_items, fake_practice, fake_stores
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 DAY = date(2026, 11, 6)
@@ -156,6 +156,10 @@ def test_quiz_is_sent_once_and_recorded(stores: Stores, lesson: Lesson) -> None:
     assert poll["correct_option_ids"] == [stored.correct_option]
     [sent] = practice.deliveries.values()
     assert sent.sent_at is not None and sent.telegram_message_ids == [1, 2, 3, 4]
+    # Every poll rates the lesson's core item, created on the spot if the lesson predates items.
+    item = fake_items(stores).get_by_key(f"{lesson.topic_id}:core")
+    assert item is not None and item.source_lesson_id == 1
+    assert {p.item_id for p in practice.polls.values()} == {item.id}
 
 
 def test_translation_is_sent_with_force_reply(stores: Stores, lesson: Lesson) -> None:

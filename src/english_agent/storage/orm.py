@@ -102,10 +102,14 @@ class ItemRow(Base):
 
 class ErrorRow(Base):
     __tablename__ = "errors"
-    __table_args__ = (CheckConstraint("kind IN ('quiz', 'text')", name="kind"),)
+    __table_args__ = (
+        CheckConstraint("kind IN ('quiz', 'text')", name="kind"),
+        # The profile and the planner read "this learner's errors of the last N days".
+        Index("ix_errors_learner_id_created_at", "learner_id", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"), index=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
     item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="SET NULL"))
     kind: Mapped[str] = mapped_column(String(16))
     original: Mapped[str] = mapped_column(Text)
@@ -127,6 +131,8 @@ class CardRow(Base):
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"))
     fsrs_state: Mapped[dict[str, Any]] = mapped_column(JSONB)
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviews: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     created_at: Mapped[datetime] = _created_at()
 
 
@@ -138,7 +144,23 @@ class ReviewLogRow(Base):
     rating: Mapped[int] = mapped_column(SmallInteger)
     reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     source: Mapped[str] = mapped_column(String(32))
+    # The rated event ("quiz_answer:<id>", "translation_answer:<id>:<n>"): unique, so replaying it is a no-op.
+    source_ref: Mapped[str] = mapped_column(String(64), unique=True)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+
+class LearnerProfileRow(Base):
+    """Append-only versions of `models.profile.LearnerProfile`; the latest version is the profile."""
+
+    __tablename__ = "learner_profiles"
+    __table_args__ = (UniqueConstraint("learner_id", "version"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    version: Mapped[int] = mapped_column(Integer)
+    schema_version: Mapped[int] = mapped_column(Integer)
+    profile: Mapped[dict[str, Any]] = mapped_column("payload", JSONB)
+    created_at: Mapped[datetime] = _created_at()
 
 
 class PracticeDeliveryRow(Base):
@@ -169,6 +191,7 @@ class QuizPollRow(Base):
     position: Mapped[int] = mapped_column(Integer)
     telegram_poll_id: Mapped[str] = mapped_column(String(64), unique=True)
     telegram_message_id: Mapped[int] = mapped_column(Integer)
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="SET NULL"))
     # `QuizQuestion.model_dump(mode="json")` with the options in the order they were sent.
     question: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = _created_at()

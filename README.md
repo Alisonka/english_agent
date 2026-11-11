@@ -156,6 +156,8 @@ Configuration is read from environment variables or a local `.env` file (see
 | `PRACTICE_CUTOFF_TIME` | no | `22:00` | No practice is sent after this local time |
 | `GRADER_MODEL` | no | `claude-haiku-5-5` | Model that grades the learner's translation |
 | `GRADER_EFFORT` | no | `high` | Claude API `output_config.effort` for the grader |
+| `FSRS_DESIRED_RETENTION` | no | `0.9` | Recall probability the review schedule aims for |
+| `FSRS_MAXIMUM_INTERVAL_DAYS` | no | `180` | Longest gap between two reviews of an item |
 | `RESEARCH_MODEL` | no | `claude-haiku-5-5` | Model used by the research agent |
 | `WRITER_MODEL` | no | `claude-haiku-5-5` | Model used by the lesson writer |
 | `LLM_MAX_TOKENS` | no | `8192` | Max tokens per LLM call |
@@ -225,8 +227,22 @@ Storage is PostgreSQL through SQLAlchemy 2.0 (sync, psycopg 3), see
 [src/english_agent/storage/](src/english_agent/storage/). Repositories return the
 pydantic records from [models/storage.py](src/english_agent/models/storage.py);
 ORM objects stay inside the package. Tables: `learners`, `lessons` (the lesson
-JSON, status and Telegram message ids), and `items`, `errors`, `cards`,
-`review_logs`, which later steps (quizzes, FSRS reviews) will fill.
+JSON, status and Telegram message ids), the practice tables, and the learner model:
+
+- `items` — one core item per taught topic, `<topic_id>:core`, created when the
+  lesson is sent ([items.py](src/english_agent/items.py)); the unit that reviews
+  and errors attach to.
+- `cards`, `review_logs` — FSRS-6 state per learner and item
+  ([srs.py](src/english_agent/srs.py), the `fsrs` package with learning steps off).
+  Every quiz answer and every graded translation sentence is one rating (correct ->
+  good, wrong -> again), applied in the same transaction as the answer; `source_ref`
+  makes a replayed event a no-op.
+- `errors` — wrong answers and corrected sentences, each pointing at its item.
+- `learner_profiles` — append-only versions of the profile
+  ([models/profile.py](src/english_agent/models/profile.py)): weak items, error
+  patterns and 7-day accuracy, recomputed by code after a finished quiz or a graded
+  translation ([profile.py](src/english_agent/profile.py)); `notes_ru` is reserved
+  for the Reflector.
 
 Migrations are managed by [Alembic](migrations/):
 
@@ -240,6 +256,14 @@ The level chosen in the bot used to live in `.state/learner.json`; import it onc
 ```bash
 uv run python -m english_agent.storage import-learner-json            # local file
 docker compose run --rm --no-deps -T app python -m english_agent.storage import-learner-json - < .state/learner.json
+```
+
+Lessons and answers stored before the learner model existed are brought in with
+two idempotent commands (run in this order; safe to rerun):
+
+```bash
+docker compose run --rm --no-deps app python -m english_agent.storage backfill-items    # core items for sent lessons
+docker compose run --rm --no-deps app python -m english_agent.storage backfill-reviews  # link old polls, rate old answers
 ```
 
 ### Backups
@@ -289,6 +313,9 @@ src/english_agent/
   app.py           # server process: bot + daily lesson and practice scheduler
   config.py        # runtime settings (env / .env)
   grader.py        # learner's translation -> validated TranslationGrade
+  items.py         # sent lesson -> core item in the `items` table (+ backfill)
+  profile.py       # learner profile: computed from answers, errors and cards; versioned
+  srs.py           # spaced repetition (FSRS-6 via py-fsrs): ratings, scheduling
   paths.py         # repo-relative paths
   pipeline.py      # topic -> research -> lesson -> Telegram -> lessons table
   practice.py      # quiz and translation task after the lesson (scheduling, sending)

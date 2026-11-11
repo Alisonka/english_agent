@@ -18,6 +18,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "alembic>=1.14",
     "apscheduler>=3.11,<4",
+    "fsrs>=6.3.2",
 ]
 
 [dependency-groups]

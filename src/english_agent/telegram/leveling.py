@@ -18,6 +18,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import httpx
@@ -30,7 +31,8 @@ from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import TranslationGrade
 from english_agent.paths import available_cefr_levels
-from english_agent.storage.repositories import LearnerStore, PracticeStore, Stores, open_stores
+from english_agent.profile import refresh_profile
+from english_agent.storage.repositories import LearnerStore, PracticeStore, ProfileStore, Stores, open_stores
 from english_agent.telegram.client import TelegramClient, TelegramError
 from english_agent.telegram.render import render_grade, render_quiz_summary
 
@@ -64,6 +66,17 @@ class PracticeHandlers:
     store: PracticeStore
     grade: Grader
     background: Background = _run_now
+    profiles: ProfileStore | None = None  # refreshed after a finished quiz or a graded translation
+
+
+def _refresh_profile(practice: PracticeHandlers, learner_id: int) -> None:
+    """The profile is derived data: a failure here is logged and never reaches the learner."""
+    if practice.profiles is None:
+        return
+    try:
+        refresh_profile(practice.profiles, learner_id, datetime.now(UTC))
+    except SQLAlchemyError as error:
+        print(f"profile refresh failed for learner {learner_id}: {error}", file=sys.stderr)
 
 
 # Shown in Telegram's `/` command menu (registered via setMyCommands on startup).
@@ -100,10 +113,12 @@ def _grade_answer(
             practice.store.fail_translation_answer(answer_id, f"{type(error).__name__}: {error}")
             client.edit_message_text(chat_id, message_id, _GRADE_FAILED)
             return
-        practice.store.finish_translation_answer(answer_id, grade)
+        graded = practice.store.finish_translation_answer(answer_id, grade)
         client.edit_message_text(chat_id, message_id, render_grade(grade), reply_markup=_dispute_keyboard(answer_id))
     except (TelegramError, SQLAlchemyError) as error:
         print(f"could not deliver the grade: {error}", file=sys.stderr)
+        return
+    _refresh_profile(practice, graded.learner_id)
 
 
 def _take_translation_answer(client: TelegramClient, chat_id: str, text: str, practice: PracticeHandlers) -> bool:
@@ -135,6 +150,7 @@ def _handle_poll_answer(client: TelegramClient, poll_answer: dict[str, Any], pra
     result = practice.store.record_poll_answer(str(poll_answer["poll_id"]), chat_id, option_ids)
     if result is not None and result.completed:
         client.send_message(chat_id, render_quiz_summary(result.results))
+        _refresh_profile(practice, result.learner_id)
 
 
 def _handle_message(
@@ -269,7 +285,9 @@ def serve_leveling(settings: Settings, stores: Stores) -> int:
     # One worker: grading is rare, and answers are then graded in the order they came.
     with httpx.Client(timeout=_LONG_POLL_SECONDS + 15) as http, ThreadPoolExecutor(1, "grader") as executor:
         client = TelegramClient(http, token)
-        practice = PracticeHandlers(stores.practice, make_grader(settings), background=executor.submit)
+        practice = PracticeHandlers(
+            stores.practice, make_grader(settings), background=executor.submit, profiles=stores.profiles
+        )
         try:
             client.set_my_commands(_COMMANDS)  # make /level and /mylevel show in the bot's menu
         except TelegramError as error:
