@@ -30,6 +30,7 @@ from sqlalchemy import text
 from english_agent.config import Settings, get_settings
 from english_agent.pipeline import local_today, run_daily
 from english_agent.practice import run_practice_tick
+from english_agent.srs import make_scheduler
 from english_agent.storage.db import make_engine, make_session_factory
 from english_agent.storage.repositories import Stores, sql_stores
 from english_agent.telegram.leveling import serve_leveling
@@ -101,7 +102,7 @@ def main() -> int:
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))  # fail fast on a wrong DATABASE_URL
-        stores = sql_stores(make_session_factory(engine))
+        stores = sql_stores(make_session_factory(engine), make_scheduler(settings))
 
         timezone = ZoneInfo(settings.timezone)
         scheduler = BackgroundScheduler(timezone=timezone)

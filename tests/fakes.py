@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
+from english_agent.models.profile import LearnerProfile
 from english_agent.models.storage import (
+    CardRecord,
+    ItemDraft,
+    ItemRecord,
+    LearnerProfileRecord,
     LearnerRecord,
     LessonRecord,
     OpenTranslationTask,
     PracticeDeliveryRecord,
     PracticeKind,
+    ProfileInputs,
     QuizPollRecord,
     QuizResult,
     TranslationAnswerRecord,
@@ -85,6 +92,10 @@ class FakeLessons:
             message_ids=[],
         )
 
+    def list_sent(self) -> list[LessonRecord]:
+        sent = (record for record in self.rows.values() if record.status == "sent")
+        return sorted(sent, key=lambda record: (record.lesson_date, record.id))
+
     def _save(
         self,
         learner_id: int,
@@ -117,6 +128,105 @@ class FakeLessons:
         )
         self.rows[(learner_id, day)] = record
         return record
+
+
+class FakeItems:
+    def __init__(self) -> None:
+        self.by_key: dict[str, ItemRecord] = {}
+        self.failure: Exception | None = None  # raised by get_or_create, to test callers' failure handling
+
+    def get_by_key(self, key: str) -> ItemRecord | None:
+        return self.by_key.get(key)
+
+    def get_or_create(self, draft: ItemDraft, *, source_lesson_id: int | None = None) -> tuple[ItemRecord, bool]:
+        if self.failure is not None:
+            raise self.failure
+        if draft.key in self.by_key:
+            return self.by_key[draft.key], False
+        record = ItemRecord(
+            id=len(self.by_key) + 1,
+            **draft.model_dump(),
+            version=1,
+            source_lesson_id=source_lesson_id,
+            created_at=datetime.now(UTC),
+        )
+        self.by_key[draft.key] = record
+        return record, True
+
+
+class FakeCards:
+    """Cards without FSRS: a review bumps the counter and pushes `due_at` one day out."""
+
+    def __init__(self) -> None:
+        self.by_key: dict[tuple[int, int], CardRecord] = {}
+        self.reviews: list[tuple[int, int, int, str]] = []  # (learner id, item id, rating, source_ref)
+
+    def get(self, learner_id: int, item_id: int) -> CardRecord | None:
+        return self.by_key.get((learner_id, item_id))
+
+    def due(self, learner_id: int, now: datetime, *, limit: int = 20) -> list[CardRecord]:
+        due = [c for c in self.by_key.values() if c.learner_id == learner_id and c.due_at <= now]
+        return sorted(due, key=lambda c: c.due_at)[:limit]
+
+    def review(
+        self,
+        learner_id: int,
+        item_id: int,
+        rating: int,
+        at: datetime,
+        *,
+        source: str,
+        source_ref: str,
+        payload: dict[str, Any] | None = None,
+    ) -> CardRecord:
+        if any(ref == source_ref for *_, ref in self.reviews):
+            return self.by_key[(learner_id, item_id)]
+        card = self.by_key.get((learner_id, item_id)) or CardRecord(
+            id=len(self.by_key) + 1,
+            learner_id=learner_id,
+            item_id=item_id,
+            fsrs_state={},
+            due_at=at,
+            last_reviewed_at=None,
+            reviews=0,
+            created_at=at,
+        )
+        card = card.model_copy(
+            update={"due_at": at + timedelta(days=1), "last_reviewed_at": at, "reviews": card.reviews + 1}
+        )
+        self.by_key[(learner_id, item_id)] = card
+        self.reviews.append((learner_id, item_id, rating, source_ref))
+        return card
+
+
+class FakeProfiles:
+    def __init__(self, learners: FakeLearners) -> None:
+        self._learners = learners
+        self.versions: dict[int, list[LearnerProfileRecord]] = {}
+        self.next_inputs: ProfileInputs | None = None  # what `inputs` returns next, when a test sets it
+
+    def latest(self, learner_id: int) -> LearnerProfileRecord | None:
+        versions = self.versions.get(learner_id)
+        return versions[-1] if versions else None
+
+    def append(self, learner_id: int, profile: LearnerProfile) -> LearnerProfileRecord:
+        versions = self.versions.setdefault(learner_id, [])
+        record = LearnerProfileRecord(
+            id=sum(len(v) for v in self.versions.values()) + 1,
+            learner_id=learner_id,
+            version=len(versions) + 1,
+            schema_version=SCHEMA_VERSIONS["learner_profile"],
+            profile=profile,
+            created_at=datetime.now(UTC),
+        )
+        versions.append(record)
+        return record
+
+    def inputs(self, learner_id: int, now: datetime, *, window_days: int) -> ProfileInputs:
+        if self.next_inputs is not None:
+            return self.next_inputs
+        learner = next(record for record in self._learners.by_chat.values() if record.id == learner_id)
+        return ProfileInputs(cefr=learner.cefr, window_days=window_days)
 
 
 class FakePractice:
@@ -161,6 +271,7 @@ class FakePractice:
         position: int,
         telegram_poll_id: str,
         telegram_message_id: int,
+        item_id: int | None,
         question: QuizQuestion,
     ) -> QuizPollRecord:
         record = QuizPollRecord(
@@ -169,6 +280,7 @@ class FakePractice:
             position=position,
             telegram_poll_id=telegram_poll_id,
             telegram_message_id=telegram_message_id,
+            item_id=item_id,
             question=question,
             created_at=datetime.now(UTC),
         )
@@ -179,7 +291,8 @@ class FakePractice:
         self, telegram_poll_id: str, telegram_chat_id: str, option_ids: list[int]
     ) -> QuizResult | None:
         poll = self.polls.get(telegram_poll_id)
-        if poll is None or self._learners.get(telegram_chat_id) is None:
+        learner = self._learners.get(telegram_chat_id)
+        if poll is None or learner is None:
             return None
         if (poll.id, telegram_chat_id) in self.poll_answers:
             return None
@@ -199,9 +312,10 @@ class FakePractice:
             key=lambda p: p.position,
         )
         if delivery.completed_at is not None or len(answered) < delivery.item_count:
-            return QuizResult(is_correct=is_correct, completed=False)
+            return QuizResult(learner_id=learner.id, is_correct=is_correct, completed=False)
         self.deliveries[delivery.id] = delivery.model_copy(update={"completed_at": datetime.now(UTC)})
         return QuizResult(
+            learner_id=learner.id,
             is_correct=is_correct,
             completed=True,
             results=[(p.question, self.poll_answers[(p.id, telegram_chat_id)]) for p in answered],
@@ -274,9 +388,27 @@ class FakePractice:
 
 def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
     learners, lessons = FakeLearners(), FakeLessons()
-    return Stores(learners=learners, lessons=lessons, practice=FakePractice(learners, lessons)), learners, lessons
+    stores = Stores(
+        learners=learners,
+        lessons=lessons,
+        practice=FakePractice(learners, lessons),
+        items=FakeItems(),
+        cards=FakeCards(),
+        profiles=FakeProfiles(learners),
+    )
+    return stores, learners, lessons
 
 
 def fake_practice(stores: Stores) -> FakePractice:
     assert isinstance(stores.practice, FakePractice)
     return stores.practice
+
+
+def fake_items(stores: Stores) -> FakeItems:
+    assert isinstance(stores.items, FakeItems)
+    return stores.items
+
+
+def fake_profiles(stores: Stores) -> FakeProfiles:
+    assert isinstance(stores.profiles, FakeProfiles)
+    return stores.profiles

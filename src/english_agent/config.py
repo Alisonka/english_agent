@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     practice_gap_minutes: int = Field(default=60, ge=0)
     practice_cutoff_time: time = time(22, 0)
 
+    # Spaced repetition (FSRS): the recall probability reviews aim for, and the longest gap between them.
+    fsrs_desired_retention: float = Field(default=0.9, gt=0.5, lt=1.0)
+    fsrs_maximum_interval_days: int = Field(default=180, ge=1)
+
     # Grades the learner's translation; effort is the Claude API `output_config.effort`.
     grader_model: str = "claude-haiku-5-5"
     grader_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"

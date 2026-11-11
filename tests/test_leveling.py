@@ -15,7 +15,7 @@ from english_agent.paths import available_cefr_levels
 from english_agent.pipeline import resolve_cefr
 from english_agent.telegram import TelegramClient
 from english_agent.telegram.leveling import Grader, PracticeHandlers, process_updates
-from fakes import FakeLearners, FakePractice, fake_practice, fake_stores
+from fakes import FakeLearners, FakePractice, FakeProfiles, fake_practice, fake_profiles, fake_stores
 from samples import QUIZ
 
 TOKEN = "123:TOKEN"
@@ -168,13 +168,18 @@ def _practice_setup(grade: Grader | None = None) -> tuple[RecordingTelegram, Fak
             position=position,
             telegram_poll_id=f"p{position}",
             telegram_message_id=10 + position,
+            item_id=1,
             question=QuizQuestion.model_validate(item),
         )
     practice.mark_sent(quiz.id, [10, 11, 12])
     task = practice.claim_delivery(record.id, "translation", 3)
     assert task is not None
     practice.mark_sent(task.id, [20])
-    handlers = PracticeHandlers(practice, grade or (lambda lesson, text: TranslationGrade.model_validate(GRADE)))
+    handlers = PracticeHandlers(
+        practice,
+        grade or (lambda lesson, text: TranslationGrade.model_validate(GRADE)),
+        profiles=fake_profiles(stores),
+    )
     return RecordingTelegram(), practice, handlers
 
 
@@ -223,6 +228,27 @@ def test_quiz_summary_comes_after_the_last_answer() -> None:
     assert method == "sendMessage"
     assert "Итог: 2/3" in payload["text"]
     assert ("quiz", "It is milk in the fridge.", "There is milk in the fridge.") in store.errors
+
+
+def test_profile_is_refreshed_once_the_quiz_is_complete() -> None:
+    fake, _, practice = _practice_setup()
+    assert isinstance(practice.profiles, FakeProfiles)
+
+    _run(fake, [_poll_answer(1, "p0", 1), _poll_answer(2, "p1", 0)], practice)
+    assert practice.profiles.versions == {}
+
+    _run(fake, [_poll_answer(3, "p2", 1)], practice)
+    [record] = practice.profiles.versions[1]
+    assert record.version == 1 and record.profile.cefr == "A2"
+
+
+def test_profile_is_refreshed_after_a_graded_translation() -> None:
+    fake, _, practice = _practice_setup()
+    assert isinstance(practice.profiles, FakeProfiles)
+
+    _run(fake, [_update(1, message={"chat": {"id": 42}, "text": "There is a window in my room."})], practice)
+
+    assert [record.version for record in practice.profiles.versions[1]] == [1]
 
 
 def test_retracted_vote_is_ignored() -> None:

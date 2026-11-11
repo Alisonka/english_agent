@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent import pipeline
 from english_agent.config import Settings
@@ -14,7 +15,7 @@ from english_agent.models.lesson import Lesson
 from english_agent.research.models import ResearchResult
 from english_agent.storage import Stores, open_stores
 from english_agent.telegram import TelegramError
-from fakes import fake_stores
+from fakes import fake_items, fake_stores
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -341,6 +342,21 @@ def test_run_daily_sends_and_records_once_per_day(
     assert learner is not None
     record = lessons.rows[(learner.id, START)]
     assert (record.status, record.lesson, record.telegram_message_ids) == ("sent", lesson, [1])
+    item = fake_items(stores).get_by_key(f"{lesson.topic_id}:core")
+    assert item is not None and item.source_lesson_id == record.id
+
+
+def test_run_daily_item_failure_does_not_fail_a_sent_lesson(
+    lesson: Lesson, generated: list[str], fake_telegram: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stores, learners, lessons = fake_stores()
+    fake_items(stores).failure = SQLAlchemyError("connection refused")
+
+    assert pipeline.run_daily(daily_settings(), stores, START) == 0
+    learner = learners.get("42")
+    assert learner is not None
+    assert lessons.rows[(learner.id, START)].status == "sent"
+    assert "could not record the item" in capsys.readouterr().err
 
 
 def test_run_daily_retries_a_failed_day(

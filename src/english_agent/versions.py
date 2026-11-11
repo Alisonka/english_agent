@@ -35,12 +35,13 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "lesson_record": 1,
     "item_record": 1,
     "error_record": 1,
-    "card_record": 1,
-    "review_log_record": 1,
+    "card_record": 2,  # v2: last_reviewed_at, reviews
+    "review_log_record": 2,  # v2: source_ref
     "practice_delivery_record": 1,
-    "quiz_poll_record": 1,
+    "quiz_poll_record": 2,  # v2: item_id
     "translation_answer_record": 1,
     "translation_grade": 1,
+    "learner_profile": 1,
 }
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"

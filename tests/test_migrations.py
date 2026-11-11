@@ -11,6 +11,7 @@ TABLES = {
     "errors",
     "cards",
     "review_logs",
+    "learner_profiles",
     "practice_deliveries",
     "quiz_polls",
     "quiz_answers",

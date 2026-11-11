@@ -17,6 +17,7 @@ import httpx
 from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent.config import Settings
+from english_agent.items import core_item_from_lesson
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion
 from english_agent.models.storage import LessonRecord, PracticeDeliveryRecord, PracticeKind
@@ -69,6 +70,7 @@ def _send_quiz(
     delivery_id: int,
     chat_id: str,
     lesson: Lesson,
+    item_id: int,
     rng: random.Random,
 ) -> list[int]:
     message_ids = [client.send_message(chat_id, render_quiz_intro(lesson))]
@@ -87,6 +89,7 @@ def _send_quiz(
             position=position,
             telegram_poll_id=poll_id,
             telegram_message_id=message_id,
+            item_id=item_id,
             question=question,
         )
         message_ids.append(message_id)
@@ -116,6 +119,9 @@ def deliver_due_practice(
         return None
 
     lesson = record.lesson
+    # The quiz rates the lesson's core item; created here too, so a lesson stored before items
+    # existed (or a failed write at send time) still gets its reviews.
+    item, _ = stores.items.get_or_create(core_item_from_lesson(lesson), source_lesson_id=record.id)
     item_count = len(lesson.quiz) if kind == "quiz" else len(lesson.translation)
     delivery = stores.practice.claim_delivery(record.id, kind, item_count)
     if delivery is None:
@@ -124,8 +130,11 @@ def deliver_due_practice(
     with get_tracer().start_as_current_span("practice.deliver") as span:
         span.set_attribute("practice.kind", kind)
         span.set_attribute("topic.id", lesson.topic_id)
+        span.set_attribute("item.key", item.key)
         if kind == "quiz":
-            message_ids = _send_quiz(client, stores.practice, delivery.id, chat_id, lesson, rng or random.Random())
+            message_ids = _send_quiz(
+                client, stores.practice, delivery.id, chat_id, lesson, item.id, rng or random.Random()
+            )
         else:
             reply_markup = {"force_reply": True, "input_field_placeholder": TRANSLATION_PLACEHOLDER}
             message_ids = [client.send_message(chat_id, render_translation_task(lesson), reply_markup=reply_markup)]
