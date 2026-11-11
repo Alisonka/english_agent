@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "last-release-sha": "6024f10de9b3c3338893319f5fe02f903e9e5193",
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "english-agent",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": false,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "extra-files": [
+        "src/english_agent/__init__.py"
+      ],
+      "changelog-sections": [
+        { "type": "feat", "section": "Added" },
+        { "type": "fix", "section": "Fixed" },
+        { "type": "refactor", "section": "Changed" },
+        { "type": "perf", "section": "Changed" },
+        { "type": "docs", "section": "Changed", "hidden": true },
+        { "type": "chore", "section": "Changed", "hidden": true },
+        { "type": "test", "section": "Changed", "hidden": true }
+      ]
+    }
+  }
+}

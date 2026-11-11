@@ -91,29 +91,23 @@ Examples:
 - `fix(writer): retry once on validation error`
 - `docs: document environment variables`
 
-## Changelog
+## Changelog and releases
 
-Record user-facing changes in [CHANGELOG.md](CHANGELOG.md) under the
-`[Unreleased]` section, following the
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+The changelog and releases are automated by
+[release-please](https://github.com/googleapis/release-please) from the commit
+history, so **do not edit [CHANGELOG.md](CHANGELOG.md) or the version by hand**.
+This is why [Conventional Commits](#commit-messages) matter: `feat:` bumps the
+minor version, `fix:` the patch, and `feat!:` / `BREAKING CHANGE:` the major
+(while the project stays pre-1.0, breaking changes bump the minor).
 
-## Versioning and releases
+The project follows [Semantic Versioning](https://semver.org/). The version
+lives in `version` in [pyproject.toml](pyproject.toml) and `__version__` in
+`src/english_agent/__init__.py`; release-please keeps both in sync.
 
-This project follows [Semantic Versioning](https://semver.org/). The single
-source of truth for the version is `version` in
-[pyproject.toml](pyproject.toml) (mirrored by `__version__` in
-`src/english_agent/__init__.py`).
+How a release happens:
 
-To cut a release:
-
-1. Move the `[Unreleased]` entries into a new `[X.Y.Z]` section in the changelog
-   with today's date.
-2. Bump `version` in `pyproject.toml` (and `__version__`).
-3. Commit, then tag and push:
-
-   ```bash
-   git tag vX.Y.Z
-   git push origin vX.Y.Z
-   ```
-
-4. Create a GitHub release for the tag.
+1. On every push to `main`, the `release-please` workflow opens (or updates) a
+   "release PR" that collects the pending changes into CHANGELOG.md and bumps the
+   version.
+2. Merge that PR when you want to cut the release. release-please then creates the
+   `vX.Y.Z` tag and the GitHub release automatically.
