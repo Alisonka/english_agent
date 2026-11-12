@@ -23,11 +23,13 @@ from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import (
     CORE_SLUG,
     CardRecord,
+    ClaimOutcome,
     ErrorRecord,
     ItemDraft,
     ItemRecord,
     LearnerProfileRecord,
     LearnerRecord,
+    LessonContentRecord,
     LessonRecord,
     LessonStatus,
     OpenTranslationTask,
@@ -47,6 +49,7 @@ from english_agent.storage.orm import (
     ItemRow,
     LearnerProfileRow,
     LearnerRow,
+    LessonContentRow,
     LessonRow,
     PracticeDeliveryRow,
     QuizAnswerRow,
@@ -89,7 +92,14 @@ class LessonStore(Protocol):
     def sent_on(self, learner_id: int, day: date) -> bool: ...
 
     def record_sent(
-        self, learner_id: int, day: date, lesson: Lesson, message_ids: list[int], *, curriculum_version: int | None
+        self,
+        learner_id: int,
+        day: date,
+        lesson: Lesson,
+        message_ids: list[int],
+        *,
+        curriculum_version: int | None,
+        content_id: int | None = None,
     ) -> LessonRecord: ...
 
     def record_failed(
@@ -101,6 +111,29 @@ class LessonStore(Protocol):
     def statuses(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonStatus]: ...
 
     def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]: ...
+
+
+class LessonContentStore(Protocol):
+    def claim(
+        self,
+        topic_id: str,
+        cefr: Cefr,
+        curriculum_version: int,
+        content_key: str,
+        *,
+        owner: str,
+        now: datetime,
+        stale_after: timedelta,
+        max_attempts: int,
+    ) -> tuple[ClaimOutcome, LessonContentRecord]: ...
+
+    def finish(self, content_id: int, lesson: Lesson) -> LessonContentRecord: ...
+
+    def fail(self, content_id: int, reason: str) -> LessonContentRecord: ...
+
+    def unavailable_topics(
+        self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
+    ) -> set[str]: ...
 
 
 class ItemStore(Protocol):
@@ -180,6 +213,7 @@ class Stores:
     items: ItemStore
     cards: CardStore
     profiles: ProfileStore
+    contents: LessonContentStore
 
 
 def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = None) -> Stores:
@@ -191,6 +225,7 @@ def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = Non
         items=ItemRepo(sessions),
         cards=CardRepo(sessions, scheduler),
         profiles=ProfileRepo(sessions),
+        contents=LessonContentRepo(sessions),
     )
 
 
@@ -368,8 +403,17 @@ class LessonRepo:
             return row is not None and row.status == "sent"
 
     def record_sent(
-        self, learner_id: int, day: date, lesson: Lesson, message_ids: list[int], *, curriculum_version: int | None
+        self,
+        learner_id: int,
+        day: date,
+        lesson: Lesson,
+        message_ids: list[int],
+        *,
+        curriculum_version: int | None,
+        content_id: int | None = None,
     ) -> LessonRecord:
+        # The payload is still written next to content_id, so code that predates shared content
+        # (and a rollback to it) keeps reading lessons.payload.
         return self._save(
             learner_id,
             day,
@@ -381,6 +425,7 @@ class LessonRepo:
             error=None,
             telegram_message_ids=message_ids,
             sent_at=datetime.now(UTC),
+            content_id=content_id,
         )
 
     def record_failed(
@@ -444,6 +489,119 @@ class LessonRepo:
                     setattr(row, name, value)
             session.flush()
             return LessonRecord.model_validate(row)
+
+
+class LessonContentRepo:
+    """Shared lesson content and the claim that makes sure one worker at a time writes it."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    def claim(
+        self,
+        topic_id: str,
+        cefr: Cefr,
+        curriculum_version: int,
+        content_key: str,
+        *,
+        owner: str,
+        now: datetime,
+        stale_after: timedelta,
+        max_attempts: int,
+    ) -> tuple[ClaimOutcome, LessonContentRecord]:
+        """Get the content, or the right to write it, in one transaction.
+
+        - "ready": written already, send it;
+        - "claimed": the caller writes it now and then calls `finish` or `fail`;
+        - "busy": someone else is writing it, or its last attempt failed less than `stale_after`
+          ago (a cool-down, so an outage does not burn every attempt in a minute): try later;
+        - "exhausted": `max_attempts` attempts failed; the topic is skipped.
+
+        A "generating" claim older than `stale_after` belongs to a dead worker and is taken over.
+        """
+        new = (
+            insert(LessonContentRow)
+            .values(
+                topic_id=topic_id,
+                cefr=cefr,
+                curriculum_version=curriculum_version,
+                content_key=content_key,
+                status="generating",
+                schema_version=SCHEMA_VERSIONS["lesson"],
+                attempts=1,
+                claimed_at=now,
+                claimed_by=owner,
+            )
+            .on_conflict_do_nothing(index_elements=["topic_id", "cefr", "curriculum_version", "content_key"])
+            .returning(LessonContentRow.id)
+        )
+        with session_scope(self._sessions) as session:
+            created_id = session.execute(new).scalar_one_or_none()
+            row = session.scalar(
+                select(LessonContentRow)
+                .where(
+                    LessonContentRow.topic_id == topic_id,
+                    LessonContentRow.cefr == cefr,
+                    LessonContentRow.curriculum_version == curriculum_version,
+                    LessonContentRow.content_key == content_key,
+                )
+                .with_for_update()
+            )
+            assert row is not None
+            outcome = self._decide(row, created=created_id is not None, now=now, stale_after=stale_after)
+            if outcome == "claimed" and created_id is None:
+                if row.attempts >= max_attempts:
+                    row.status, row.error = "failed", row.error or "abandoned on its last attempt"
+                    outcome = "exhausted"
+                else:
+                    row.status, row.error = "generating", None
+                    row.attempts, row.claimed_at, row.claimed_by = row.attempts + 1, now, owner
+            elif outcome == "busy" and row.status == "failed" and row.attempts >= max_attempts:
+                outcome = "exhausted"
+            session.flush()
+            return outcome, LessonContentRecord.model_validate(row)
+
+    @staticmethod
+    def _decide(row: LessonContentRow, *, created: bool, now: datetime, stale_after: timedelta) -> ClaimOutcome:
+        if created:
+            return "claimed"
+        if row.status == "ready":
+            return "ready"
+        if row.claimed_at is not None and row.claimed_at > now - stale_after:
+            return "busy"
+        return "claimed"
+
+    def finish(self, content_id: int, lesson: Lesson) -> LessonContentRecord:
+        with session_scope(self._sessions) as session:
+            row = session.get_one(LessonContentRow, content_id, with_for_update=True)
+            row.status, row.lesson, row.error = "ready", lesson.model_dump(mode="json"), None
+            row.schema_version, row.generated_at = SCHEMA_VERSIONS["lesson"], datetime.now(UTC)
+            session.flush()
+            return LessonContentRecord.model_validate(row)
+
+    def fail(self, content_id: int, reason: str) -> LessonContentRecord:
+        with session_scope(self._sessions) as session:
+            row = session.get_one(LessonContentRow, content_id, with_for_update=True)
+            if row.status != "ready":  # a late failure never overwrites content another worker finished
+                row.status, row.error = "failed", reason
+            session.flush()
+            return LessonContentRecord.model_validate(row)
+
+    def unavailable_topics(
+        self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
+    ) -> set[str]:
+        """Topics of this level and recipe whose every attempt failed: skipped by `next_topic`."""
+        with session_scope(self._sessions) as session:
+            rows = session.scalars(
+                select(LessonContentRow.topic_id).where(
+                    LessonContentRow.cefr == cefr,
+                    LessonContentRow.curriculum_version == curriculum_version,
+                    LessonContentRow.content_key == content_key,
+                    LessonContentRow.status == "failed",
+                    LessonContentRow.attempts >= max_attempts,
+                )
+            )
+            return set(rows)
 
 
 class ItemRepo:

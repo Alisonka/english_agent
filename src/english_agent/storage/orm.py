@@ -93,6 +93,33 @@ class LessonRow(Base):
     telegram_message_ids: Mapped[list[int]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
     created_at: Mapped[datetime] = _created_at()
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    content_id: Mapped[int | None] = mapped_column(ForeignKey("lesson_contents.id", ondelete="RESTRICT"), index=True)
+
+
+class LessonContentRow(Base):
+    """A lesson written once and sent to every learner of the topic and level (see `models.storage`)."""
+
+    __tablename__ = "lesson_contents"
+    __table_args__ = (
+        # One piece of content per recipe: the claim that prevents two workers writing it at once.
+        UniqueConstraint("topic_id", "cefr", "curriculum_version", "content_key"),
+        CheckConstraint("status IN ('generating', 'ready', 'failed')", name="status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    topic_id: Mapped[str] = mapped_column(String(100))
+    cefr: Mapped[str] = mapped_column(String(2))
+    curriculum_version: Mapped[int] = mapped_column(Integer)
+    content_key: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(16))
+    schema_version: Mapped[int] = mapped_column(Integer)
+    lesson: Mapped[dict[str, Any] | None] = mapped_column("payload", JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_by: Mapped[str | None] = mapped_column(String(64))
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created_at()
 
 
 class ItemRow(Base):

@@ -18,6 +18,7 @@ from english_agent.storage import (
     ItemRepo,
     LearnerRepo,
     LessonAlreadySentError,
+    LessonContentRepo,
     LessonRepo,
     MaintenanceRepo,
     PracticeRepo,
@@ -382,3 +383,62 @@ def test_lesson_statuses_and_sent_topics(sessions: SessionFactory, lesson: Lesso
     assert lessons.statuses([]) == {}
     assert lessons.sent_topic_ids(learner.id, "A2") == {lesson.topic_id}
     assert lessons.sent_topic_ids(learner.id, "B1") == set()
+
+
+# --- shared lesson content -----------------------------------------------------------
+
+STALE = timedelta(minutes=20)
+AT = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+
+
+def claim(contents: LessonContentRepo, owner: str, now: datetime, max_attempts: int = 3) -> tuple[str, int, int]:
+    outcome, record = contents.claim(
+        "there_is_are", "A2", 1, "key", owner=owner, now=now, stale_after=STALE, max_attempts=max_attempts
+    )
+    return outcome, record.id, record.attempts
+
+
+def test_content_is_written_by_one_claimant_and_then_reused(sessions: SessionFactory, lesson: Lesson) -> None:
+    contents = LessonContentRepo(sessions)
+    outcome, content_id, attempts = claim(contents, "a", AT)
+    assert (outcome, attempts) == ("claimed", 1)
+    assert claim(contents, "b", AT + timedelta(minutes=1))[0] == "busy"
+
+    ready = contents.finish(content_id, lesson)
+    assert (ready.status, ready.lesson, ready.generated_at is not None) == ("ready", lesson, True)
+    assert claim(contents, "b", AT + timedelta(minutes=2))[:2] == ("ready", content_id)
+
+
+def test_a_dead_claimants_content_is_taken_over(sessions: SessionFactory) -> None:
+    contents = LessonContentRepo(sessions)
+    claim(contents, "dead", AT)
+    outcome, _, attempts = claim(contents, "alive", AT + STALE + timedelta(seconds=1))
+    assert (outcome, attempts) == ("claimed", 2)
+
+
+def test_failed_content_cools_down_then_retries_until_exhausted(sessions: SessionFactory) -> None:
+    contents = LessonContentRepo(sessions)
+    _, content_id, _ = claim(contents, "a", AT, max_attempts=2)
+    failed = contents.fail(content_id, "API down")
+    assert (failed.status, failed.error) == ("failed", "API down")
+
+    assert claim(contents, "b", AT + timedelta(minutes=5), max_attempts=2)[0] == "busy"  # cool-down
+    assert claim(contents, "b", AT + STALE + timedelta(minutes=1), max_attempts=2)[0] == "claimed"
+    contents.fail(content_id, "API down again")
+    assert claim(contents, "c", AT + 3 * STALE, max_attempts=2)[0] == "exhausted"
+    assert contents.unavailable_topics("A2", 1, "key", max_attempts=2) == {"there_is_are"}
+    assert contents.unavailable_topics("A2", 1, "other-key", max_attempts=2) == set()
+
+
+def test_a_late_failure_does_not_undo_finished_content(sessions: SessionFactory, lesson: Lesson) -> None:
+    contents = LessonContentRepo(sessions)
+    _, content_id, _ = claim(contents, "a", AT)
+    contents.finish(content_id, lesson)
+    assert contents.fail(content_id, "timeout").status == "ready"
+
+
+def test_sent_lesson_points_at_its_content(sessions: SessionFactory, lesson: Lesson) -> None:
+    learner = LearnerRepo(sessions).get_or_create("42", "A2")
+    _, content_id, _ = claim(LessonContentRepo(sessions), "a", AT)
+    record = LessonRepo(sessions).record_sent(learner.id, DAY, lesson, [1], curriculum_version=1, content_id=content_id)
+    assert (record.content_id, record.lesson) == (content_id, lesson)

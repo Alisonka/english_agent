@@ -16,6 +16,8 @@ from english_agent.models.profile import LearnerProfile
 from english_agent.models.schedule import LearnerSchedule
 
 LessonStatus = Literal["sent", "failed"]
+ContentStatus = Literal["generating", "ready", "failed"]
+ClaimOutcome = Literal["ready", "claimed", "busy", "exhausted"]
 ErrorKind = Literal["quiz", "text"]
 PracticeKind = Literal["quiz", "translation"]
 TranslationAnswerStatus = Literal["pending", "graded", "failed"]
@@ -72,6 +74,32 @@ class LessonRecord(BaseModel):
     telegram_message_ids: list[int]
     created_at: datetime
     sent_at: datetime | None
+    content_id: int | None = None  # the shared `LessonContentRecord` that was sent; None for older lessons
+
+
+class LessonContentRecord(BaseModel):
+    """A lesson written once for every learner of a topic and level, by one generation recipe.
+
+    `content_key` names the recipe (schema version, prompt fingerprints, models): changing any of
+    them makes new content instead of reusing lessons an older recipe wrote.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    topic_id: str
+    cefr: Cefr
+    curriculum_version: int  # 0 for lessons backfilled from before shared content
+    content_key: str
+    status: ContentStatus
+    schema_version: int
+    lesson: Lesson | None
+    error: str | None
+    attempts: int
+    claimed_at: datetime | None
+    claimed_by: str | None
+    generated_at: datetime | None
+    created_at: datetime
 
 
 CORE_SLUG = "core"

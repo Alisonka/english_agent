@@ -16,14 +16,16 @@ from __future__ import annotations
 import argparse
 import html
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import cast
 from zoneinfo import ZoneInfo
 
 import httpx
+from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
 from english_agent.config import Settings, get_settings
+from english_agent.content import content_key, worker_id
 from english_agent.items import record_core_item
 from english_agent.llm import AnthropicLLM
 from english_agent.logs import bind, configure_logging
@@ -31,7 +33,7 @@ from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
 from english_agent.models.lesson import Lesson
 from english_agent.models.schedule import in_daily_window, local_now
-from english_agent.models.storage import LearnerRecord, LessonStatus
+from english_agent.models.storage import LearnerRecord, LessonContentRecord, LessonStatus
 from english_agent.research.agent import ResearchAgent
 from english_agent.research.models import ResearchResult
 from english_agent.research.sitemaps import SitemapIndex
@@ -43,6 +45,9 @@ from english_agent.writer import write_lesson
 
 COURSE_FINISHED = "Курс завершён: все темы пройдены."
 LESSON_FAILED = "Урок «{title}» сегодня не получился. Пришлю его завтра."
+
+# Exit codes of one lesson run.
+OK, FAILED, USAGE, RETRY_LATER = 0, 1, 2, 75  # 75: EX_TEMPFAIL, the content is being written elsewhere
 
 log = logging.getLogger(__name__)
 
@@ -159,10 +164,52 @@ def run_lesson_tick(settings: Settings, stores: Stores, now: datetime) -> int:
             continue
         with bind(chat_id=learner.telegram_chat_id):
             try:
-                succeeded += run_lesson_for_learner(settings, stores, learner, day) == 0
+                succeeded += run_lesson_for_learner(settings, stores, learner, day, now=now) == OK
             except Exception:  # one learner's failure must not stop the others
                 log.exception("lesson run failed")
     return succeeded
+
+
+def ensure_content(
+    settings: Settings,
+    stores: Stores,
+    topic: CurriculumTopic,
+    cefr: Cefr,
+    curriculum_version: int,
+    *,
+    now: datetime | None = None,
+) -> LessonContentRecord | None:
+    """The shared lesson for the topic and level: reused if written, else written now by this caller.
+
+    Returns a "ready" record, a "failed" one (this attempt failed, or every attempt did), or None
+    when another worker is writing it or the last attempt failed only moments ago: try again later.
+    """
+    outcome, record = stores.contents.claim(
+        topic.id,
+        cefr,
+        curriculum_version,
+        content_key(settings),
+        owner=worker_id(),
+        now=now or datetime.now(UTC),
+        stale_after=timedelta(minutes=settings.content_generation_stale_minutes),
+        max_attempts=settings.job_max_attempts,
+    )
+    span = trace.get_current_span()
+    span.set_attribute("content.id", record.id)
+    span.set_attribute("content.outcome", outcome)
+    if outcome in ("ready", "exhausted"):
+        return record
+    if outcome == "busy":
+        return None
+    log.info("writing the lesson for %s (%s), attempt %d", topic.id, cefr, record.attempts)
+    try:
+        research, lesson = generate_lesson(topic, settings, cefr=cefr, curriculum_version=curriculum_version)
+        reason = research.message
+    except Exception as error:  # unattended run: every failure is recorded, not just logged
+        lesson, reason = None, f"{type(error).__name__}: {error}"
+    if lesson is None:
+        return stores.contents.fail(record.id, reason)
+    return stores.contents.finish(record.id, lesson)
 
 
 def run_lesson_for_learner(
@@ -174,8 +221,13 @@ def run_lesson_for_learner(
     topic_id: str | None = None,
     cefr: Cefr | None = None,
     send: bool = True,
+    now: datetime | None = None,
 ) -> int:
-    """Write the learner's next lesson (or `topic_id`), send it and record it; returns an exit code."""
+    """Send the learner's next lesson (or `topic_id`) and record it; returns an exit code.
+
+    The lesson itself is shared content (see `ensure_content`): written by the first learner's run
+    to reach the topic at this level, reused by everyone after.
+    """
     with get_tracer().start_as_current_span("pipeline.run") as span:
         span.set_attribute("pipeline.send", send)
         level = cefr or learner.cefr
@@ -185,42 +237,46 @@ def run_lesson_for_learner(
             topic = next((item for item in curriculum.topics if item.id == topic_id), None)
             if topic is None:
                 log.error("unknown topic %r", topic_id)
-                return 2
+                return USAGE
         else:
-            topic = next_topic(curriculum, stores.lessons.sent_topic_ids(learner.id, level))
+            done = stores.lessons.sent_topic_ids(learner.id, level)
+            skipped = stores.contents.unavailable_topics(
+                level, curriculum.version, content_key(settings), max_attempts=settings.job_max_attempts
+            )
+            topic = next_topic(curriculum, done | skipped)
             if topic is None:
                 log.info("course finished at level %s", level)
                 if send:
                     stores.learners.deactivate(learner.telegram_chat_id, "course_finished")
                     notify(settings, learner.telegram_chat_id, COURSE_FINISHED)
-                return 0
+                return OK
         span.set_attribute("topic.id", topic.id)
 
         if stores.lessons.sent_on(learner.id, today):
             log.info("lesson for %s is already sent", today.isoformat())
-            return 0
+            return OK
 
         def record_failed(reason: str) -> None:
             stores.lessons.record_failed(
                 learner.id, today, topic_id=topic.id, cefr=level, reason=reason, curriculum_version=curriculum.version
             )
 
-        lesson: Lesson | None = None
-        try:
-            research, lesson = generate_lesson(topic, settings, cefr=level, curriculum_version=curriculum.version)
-            reason = research.message
-        except Exception as error:  # unattended run: every failure is recorded, not just logged
-            reason = f"{type(error).__name__}: {error}"
-        if lesson is None:
+        content = ensure_content(settings, stores, topic, level, curriculum.version, now=now)
+        if content is None:
+            log.info("the lesson for %s is being written elsewhere; next tick", topic.id)
+            return RETRY_LATER
+        lesson = content.lesson
+        if content.status != "ready" or lesson is None:
+            reason = content.error or "the lesson could not be written"
             log.error("lesson for %s failed: %s", topic.id, reason)
             span.set_status(Status(StatusCode.ERROR, reason))
             record_failed(reason)
             if send:
                 notify(settings, learner.telegram_chat_id, LESSON_FAILED.format(title=topic.title_ru))
-            return 1
+            return FAILED
         if not send:
             print(lesson.model_dump_json(indent=2, ensure_ascii=False))
-            return 0
+            return OK
 
         try:
             message_ids = deliver_lesson(lesson, settings, learner.telegram_chat_id)
@@ -230,13 +286,13 @@ def run_lesson_for_learner(
             record_failed(f"telegram: {error}")
             if isinstance(error, TelegramForbiddenError):
                 stores.learners.deactivate(learner.telegram_chat_id, "blocked")
-            return 1
+            return FAILED
         log.info("sent %d message(s) to Telegram chat %s", len(message_ids), learner.telegram_chat_id)
         record = stores.lessons.record_sent(
-            learner.id, today, lesson, message_ids, curriculum_version=curriculum.version
+            learner.id, today, lesson, message_ids, curriculum_version=curriculum.version, content_id=content.id
         )
         record_core_item(stores.items, lesson, record.id)
-        return 0
+        return OK
 
 
 def preview_lesson(

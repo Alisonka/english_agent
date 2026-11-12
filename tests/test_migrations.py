@@ -14,6 +14,7 @@ TABLES = {
     "cards",
     "review_logs",
     "learner_profiles",
+    "lesson_contents",
     "practice_deliveries",
     "quiz_polls",
     "quiz_answers",
@@ -59,3 +60,35 @@ def test_existing_learners_count_as_started_after_0004(database_url: str) -> Non
         with engine.connect() as connection:
             rows = dict(connection.execute(text("SELECT id, curriculum_started_on FROM learners")).tuples())
         assert rows == {with_lesson: date(2026, 10, 27), without: date(2026, 11, 3)}
+
+
+def test_sent_lessons_become_legacy_content_in_0005(database_url: str) -> None:
+    payload = '{"topic_id": "there_is_are"}'
+    with schema_engine(database_url) as engine:
+        run_alembic(engine, "upgrade", "0004")
+        with engine.begin() as connection:
+            learner = connection.execute(
+                text("INSERT INTO learners (telegram_chat_id, cefr) VALUES ('1', 'A2') RETURNING id")
+            ).scalar_one()
+            for day, status, body in (("2026-11-01", "sent", payload), ("2026-11-02", "failed", None)):
+                connection.execute(
+                    text(
+                        "INSERT INTO lessons (learner_id, lesson_date, topic_id, cefr, curriculum_version,"
+                        " schema_version, status, payload, sent_at)"
+                        " VALUES (:learner, :day, 'there_is_are', 'A2', 1, 3, :status, CAST(:body AS jsonb), now())"
+                    ),
+                    {"learner": learner, "day": day, "status": status, "body": body},
+                )
+
+        run_alembic(engine, "upgrade", "0005")
+        with engine.connect() as connection:
+            contents = connection.execute(
+                text("SELECT id, topic_id, content_key, status, payload FROM lesson_contents")
+            ).all()
+            links = dict(connection.execute(text("SELECT status, content_id FROM lessons")).tuples())
+        [(content_id, topic_id, key, status, body)] = contents
+        assert (topic_id, key, status, body) == ("there_is_are", "legacy", "ready", {"topic_id": "there_is_are"})
+        assert links == {"sent": content_id, "failed": None}
+
+        run_alembic(engine, "downgrade", "0004")  # lessons.payload is untouched, so nothing is lost
+        assert "lesson_contents" not in inspect(engine).get_table_names()

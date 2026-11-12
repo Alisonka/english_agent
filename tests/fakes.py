@@ -12,10 +12,12 @@ from english_agent.models.profile import LearnerProfile
 from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import (
     CardRecord,
+    ClaimOutcome,
     ItemDraft,
     ItemRecord,
     LearnerProfileRecord,
     LearnerRecord,
+    LessonContentRecord,
     LessonRecord,
     LessonStatus,
     OpenTranslationTask,
@@ -106,7 +108,14 @@ class FakeLessons:
         return row is not None and row.status == "sent"
 
     def record_sent(
-        self, learner_id: int, day: date, lesson: Lesson, message_ids: list[int], *, curriculum_version: int | None
+        self,
+        learner_id: int,
+        day: date,
+        lesson: Lesson,
+        message_ids: list[int],
+        *,
+        curriculum_version: int | None,
+        content_id: int | None = None,
     ) -> LessonRecord:
         return self._save(
             learner_id,
@@ -117,6 +126,7 @@ class FakeLessons:
             lesson=lesson,
             error=None,
             message_ids=message_ids,
+            content_id=content_id,
         )
 
     def record_failed(
@@ -158,6 +168,7 @@ class FakeLessons:
         lesson: Lesson | None,
         error: str | None,
         message_ids: list[int],
+        content_id: int | None = None,
     ) -> LessonRecord:
         if self.sent_on(learner_id, day):
             raise LessonAlreadySentError(f"{learner_id} {day}")
@@ -176,9 +187,84 @@ class FakeLessons:
             telegram_message_ids=message_ids,
             created_at=now,
             sent_at=now if lesson is not None else None,
+            content_id=content_id,
         )
         self.rows[(learner_id, day)] = record
         return record
+
+
+class FakeContents:
+    """Shared lesson content with the same claim rules as `LessonContentRepo`."""
+
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, str, int, str], LessonContentRecord] = {}
+
+    def claim(
+        self,
+        topic_id: str,
+        cefr: Cefr,
+        curriculum_version: int,
+        content_key: str,
+        *,
+        owner: str,
+        now: datetime,
+        stale_after: timedelta,
+        max_attempts: int,
+    ) -> tuple[ClaimOutcome, LessonContentRecord]:
+        key = (topic_id, cefr, curriculum_version, content_key)
+        row = self.rows.get(key)
+        if row is None:
+            row = LessonContentRecord(
+                id=len(self.rows) + 1,
+                topic_id=topic_id,
+                cefr=cefr,
+                curriculum_version=curriculum_version,
+                content_key=content_key,
+                status="generating",
+                schema_version=SCHEMA_VERSIONS["lesson"],
+                lesson=None,
+                error=None,
+                attempts=1,
+                claimed_at=now,
+                claimed_by=owner,
+                generated_at=None,
+                created_at=now,
+            )
+            self.rows[key] = row
+            return "claimed", row
+        if row.status == "ready":
+            return "ready", row
+        fresh = row.claimed_at is not None and row.claimed_at > now - stale_after
+        if row.attempts >= max_attempts and (row.status == "failed" or not fresh):
+            self.rows[key] = row.model_copy(update={"status": "failed"})
+            return "exhausted", self.rows[key]
+        if fresh:
+            return "busy", row
+        changes = {"status": "generating", "error": None, "attempts": row.attempts + 1, "claimed_at": now}
+        self.rows[key] = row.model_copy(update=changes | {"claimed_by": owner})
+        return "claimed", self.rows[key]
+
+    def _update(self, content_id: int, **changes: Any) -> LessonContentRecord:
+        key, row = next((k, r) for k, r in self.rows.items() if r.id == content_id)
+        self.rows[key] = row.model_copy(update=changes)
+        return self.rows[key]
+
+    def finish(self, content_id: int, lesson: Lesson) -> LessonContentRecord:
+        return self._update(content_id, status="ready", lesson=lesson, error=None, generated_at=datetime.now(UTC))
+
+    def fail(self, content_id: int, reason: str) -> LessonContentRecord:
+        return self._update(content_id, status="failed", error=reason)
+
+    def unavailable_topics(
+        self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
+    ) -> set[str]:
+        return {
+            topic_id
+            for (topic_id, level, version, key), row in self.rows.items()
+            if (level, version, key) == (cefr, curriculum_version, content_key)
+            and row.status == "failed"
+            and row.attempts >= max_attempts
+        }
 
 
 class FakeItems:
@@ -446,6 +532,7 @@ def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
         items=FakeItems(),
         cards=FakeCards(),
         profiles=FakeProfiles(learners),
+        contents=FakeContents(),
     )
     return stores, learners, lessons
 
@@ -458,6 +545,11 @@ def fake_practice(stores: Stores) -> FakePractice:
 def fake_items(stores: Stores) -> FakeItems:
     assert isinstance(stores.items, FakeItems)
     return stores.items
+
+
+def fake_contents(stores: Stores) -> FakeContents:
+    assert isinstance(stores.contents, FakeContents)
+    return stores.contents
 
 
 def fake_profiles(stores: Stores) -> FakeProfiles:

@@ -275,8 +275,21 @@ psql postgresql://english_agent:<pw>@localhost:5432/english_agent
 Storage is PostgreSQL through SQLAlchemy 2.0 (sync, psycopg 3), see
 [src/english_agent/storage/](src/english_agent/storage/). Repositories return the
 pydantic records from [models/storage.py](src/english_agent/models/storage.py);
-ORM objects stay inside the package. Tables: `learners`, `lessons` (the lesson
-JSON, status and Telegram message ids), the practice tables, and the learner model:
+ORM objects stay inside the package. Tables: `learners` (with each learner's
+schedule), `lesson_contents`, `lessons`, the practice tables, and the learner model:
+
+- `lesson_contents` — a lesson written once per topic, level and *recipe* and sent
+  to every learner who reaches that topic ([content.py](src/english_agent/content.py)):
+  research and writing cost up to ~14 Claude calls, so they run once per topic and
+  level, not once per learner. The recipe key combines the lesson schema version,
+  the research and writer prompt fingerprints and both models; changing any of them
+  makes new content. A claim row makes sure one worker writes it while the others
+  wait; a dead worker's claim is taken over after `CONTENT_GENERATION_STALE_MINUTES`,
+  a failed attempt is retried after the same cool-down, and a topic whose
+  `JOB_MAX_ATTEMPTS` attempts all failed is skipped. Lessons sent before this
+  became content keyed `legacy` (migration 0005).
+- `lessons` — one per learner and day: status, Telegram message ids and the
+  `content_id` that was sent (the lesson JSON is still copied into `payload` too).
 
 - `items` — one core item per taught topic, `<topic_id>:core`, created when the
   lesson is sent ([items.py](src/english_agent/items.py)); the unit that reviews

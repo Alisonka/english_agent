@@ -33,7 +33,8 @@ SCHEMA_VERSIONS: dict[str, int] = {
     # Storage records (models/storage.py); the table shapes themselves are versioned by Alembic.
     "learner_record": 2,  # v2: schedule (timezone, send times, quiz delay), started_on, is_active, paused_at
     "learner_schedule": 1,
-    "lesson_record": 1,
+    "lesson_record": 2,  # v2: content_id (the shared lesson content that was sent)
+    "lesson_content_record": 1,
     "item_record": 1,
     "error_record": 1,
     "card_record": 2,  # v2: last_reviewed_at, reviews

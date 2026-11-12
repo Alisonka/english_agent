@@ -11,13 +11,14 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent import pipeline
 from english_agent.config import Settings
+from english_agent.content import content_key
 from english_agent.models.curriculum import load_curriculum
 from english_agent.models.lesson import Lesson
 from english_agent.models.storage import LearnerRecord
 from english_agent.research.models import ResearchResult
 from english_agent.storage import Stores, open_stores
 from english_agent.telegram import TelegramError
-from fakes import FakeLearners, FakeLessons, fake_items, fake_stores
+from fakes import FakeLearners, FakeLessons, fake_contents, fake_items, fake_stores
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -526,3 +527,74 @@ def test_main_send_requires_database_url(monkeypatch: pytest.MonkeyPatch, caplog
     monkeypatch.setattr(pipeline, "get_settings", lambda: settings)
     assert pipeline.main(["--topic", "there_is_are"]) == 2
     assert "DATABASE_URL" in caplog.text
+
+
+# --- shared lesson content -------------------------------------------------------
+
+
+def test_learners_on_the_same_topic_share_one_written_lesson(
+    generated: list[str], fake_telegram: None, sent: list[dict[str, Any]]
+) -> None:
+    stores, learners, lessons = fake_stores()
+    first, second = started(learners, "42"), started(learners, "43", lesson_send_time=time(11, 0))
+
+    pipeline.run_lesson_tick(tick_settings(), stores, msk(9, 0))
+    pipeline.run_lesson_tick(tick_settings(), stores, msk(11, 0))
+
+    assert len(generated) == 1  # research and writing ran once
+    assert [message["chat_id"] for message in sent] == ["42", "43"]
+    content_ids = {lessons.rows[(learner.id, START)].content_id for learner in (first, second)}
+    assert len(content_ids) == 1 and None not in content_ids
+
+
+def test_content_being_written_elsewhere_is_retried_on_the_next_tick(
+    lesson: Lesson, generated: list[str], fake_telegram: None, sent: list[dict[str, Any]]
+) -> None:
+    stores, learners, lessons = fake_stores()
+    learner = started(learners)
+    topic = load_curriculum().topic_ids()[0]
+    settings = tick_settings()
+    version = load_curriculum().version
+    outcome, record = fake_contents(stores).claim(
+        topic,
+        "A2",
+        version,
+        content_key(settings),
+        owner="other",
+        now=msk(8, 59),
+        stale_after=timedelta(minutes=20),
+        max_attempts=5,
+    )
+    assert outcome == "claimed"
+
+    assert pipeline.run_lesson_tick(settings, stores, msk(9, 0)) == 0
+    assert (learner.id, START) not in lessons.rows and sent == []  # nothing recorded: retried next tick
+
+    fake_contents(stores).finish(record.id, lesson)
+    assert pipeline.run_lesson_tick(settings, stores, msk(9, 1)) == 1
+    assert generated == [] and len(sent) == 1
+
+
+def test_a_topic_whose_every_attempt_failed_is_skipped(
+    generated: list[str], fake_telegram: None, sent: list[dict[str, Any]]
+) -> None:
+    stores, learners, lessons = fake_stores()
+    learner = started(learners)
+    ordered = load_curriculum().topic_ids()
+    settings = make_settings(telegram_bot_token="123:TOKEN", job_max_attempts=1)
+    version = load_curriculum().version
+    _, record = fake_contents(stores).claim(
+        ordered[0],
+        "A2",
+        version,
+        content_key(settings),
+        owner="other",
+        now=msk(7),
+        stale_after=timedelta(minutes=20),
+        max_attempts=1,
+    )
+    fake_contents(stores).fail(record.id, "нет на сайте")
+
+    pipeline.run_lesson_tick(settings, stores, msk(9, 0))
+    assert generated == [ordered[1]]
+    assert lessons.rows[(learner.id, START)].topic_id == ordered[1]
