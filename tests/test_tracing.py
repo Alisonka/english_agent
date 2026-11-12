@@ -76,7 +76,7 @@ def test_configure_tracing_enabled_with_endpoint() -> None:
 # -- spans from the research loop ----------------------------------------------------
 
 
-def test_research_run_produces_nested_spans(spans: InMemorySpanExporter) -> None:
+async def test_research_run_produces_nested_spans(spans: InMemorySpanExporter) -> None:
     tools = all_sites_tools()
     agent, _ = make_agent(
         [
@@ -86,7 +86,7 @@ def test_research_run_produces_nested_spans(spans: InMemorySpanExporter) -> None
         ],
         tools,
     )
-    agent.run(TOPIC)
+    await agent.run(TOPIC)
 
     finished = _by_name(spans)
     assert "research.run" in finished
@@ -112,7 +112,7 @@ def test_research_run_produces_nested_spans(spans: InMemorySpanExporter) -> None
     assert search_span.attributes["search.hits"] == 1
 
 
-def test_tool_error_is_recorded_on_span(spans: InMemorySpanExporter) -> None:
+async def test_tool_error_is_recorded_on_span(spans: InMemorySpanExporter) -> None:
     tools = all_sites_tools()
     # Searching skysmart first violates site order -> ToolError on tool.search_site.
     agent, _ = make_agent(
@@ -124,7 +124,7 @@ def test_tool_error_is_recorded_on_span(spans: InMemorySpanExporter) -> None:
         ],
         tools,
     )
-    agent.run(TOPIC)
+    await agent.run(TOPIC)
 
     search_spans = [s for s in spans.get_finished_spans() if s.name == "tool.search_site"]
     errored = [s for s in search_spans if s.status.status_code is StatusCode.ERROR]

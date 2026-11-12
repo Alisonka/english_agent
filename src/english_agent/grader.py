@@ -58,7 +58,7 @@ def _task_message(lesson: Lesson, answer_text: str) -> str:
     )
 
 
-def grade_translation(llm: ChatLLM, lesson: Lesson, answer_text: str, *, attempts: int = 2) -> TranslationGrade:
+async def grade_translation(llm: ChatLLM, lesson: Lesson, answer_text: str, *, attempts: int = 2) -> TranslationGrade:
     if not lesson.translation:
         raise GradeError("the lesson has no translation task")
     tool = _submit_tool()
@@ -78,7 +78,7 @@ def grade_translation(llm: ChatLLM, lesson: Lesson, answer_text: str, *, attempt
         span.set_attribute("topic.id", lesson.topic_id)
         last_error = "model did not call submit_grade"
         for attempt in range(1, attempts + 1):
-            turn = llm.chat(messages, [tool], tool_choice=tool_choice)
+            turn = await llm.chat(messages, [tool], tool_choice=tool_choice)
             messages.append(turn.to_message())
             call = next((c for c in turn.tool_calls if c.name == "submit_grade"), None)
             if call is None:

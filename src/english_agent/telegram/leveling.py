@@ -14,6 +14,7 @@ must stay the only `getUpdates` consumer of the bot.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -27,7 +28,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent.config import Settings
 from english_agent.grader import grade_translation
-from english_agent.llm.anthropic_client import AnthropicLLM
+from english_agent.llm.anthropic_client import AnthropicLLM, make_client
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import TranslationGrade
@@ -357,14 +358,18 @@ def process_updates(
 
 
 def make_grader(settings: Settings) -> Grader:
-    """Grade with GRADER_MODEL at GRADER_EFFORT; the client is created on first use."""
-    llm: AnthropicLLM | None = None
+    """Grade with GRADER_MODEL at GRADER_EFFORT.
+
+    The grader thread has no event loop, so each grade runs its own (bridge until the bot is async).
+    """
+
+    async def grade_async(lesson: Lesson, text: str) -> TranslationGrade:
+        async with make_client(settings) as client:
+            llm = AnthropicLLM(settings, model=settings.grader_model, effort=settings.grader_effort, client=client)
+            return await grade_translation(llm, lesson, text)
 
     def grade(lesson: Lesson, text: str) -> TranslationGrade:
-        nonlocal llm
-        if llm is None:
-            llm = AnthropicLLM(settings, model=settings.grader_model, effort=settings.grader_effort)
-        return grade_translation(llm, lesson, text)
+        return asyncio.run(grade_async(lesson, text))
 
     return grade
 

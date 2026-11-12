@@ -1,10 +1,11 @@
-"""In-memory stand-ins for the storage repositories, for tests that need no database."""
+"""In-memory stand-ins for the storage repositories, the model and the research tools: no database, no network."""
 
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from english_agent.llm import AssistantTurn
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
@@ -28,6 +29,9 @@ from english_agent.models.storage import (
     QuizResult,
     TranslationAnswerRecord,
 )
+from english_agent.research.models import PageContent, SearchHit
+from english_agent.research.sites import Site
+from english_agent.research.tools import rank_urls
 from english_agent.storage.repositories import LessonAlreadySentError, Stores
 from english_agent.versions import SCHEMA_VERSIONS
 
@@ -555,3 +559,41 @@ def fake_contents(stores: Stores) -> FakeContents:
 def fake_profiles(stores: Stores) -> FakeProfiles:
     assert isinstance(stores.profiles, FakeProfiles)
     return stores.profiles
+
+
+class ScriptedLLM:
+    """A `ChatLLM` that answers with the scripted turns in order and records every request."""
+
+    model = "claude-haiku-5-5"
+
+    def __init__(self, turns: list[AssistantTurn]) -> None:
+        self.turns = list(turns)
+        self.calls: list[dict[str, Any]] = []  # {"messages", "tools", "tool_choice"} per request
+
+    @property
+    def transcripts(self) -> list[list[dict[str, Any]]]:
+        return [call["messages"] for call in self.calls]
+
+    async def chat(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], tool_choice: Any = "auto"
+    ) -> AssistantTurn:
+        self.calls.append({"messages": list(messages), "tools": tools, "tool_choice": tool_choice})
+        if not self.turns:
+            raise AssertionError("LLM asked for more turns than scripted")
+        return self.turns.pop(0)
+
+
+class FakeTools:
+    """`ResearchTools` over in-memory sitemaps and pages."""
+
+    def __init__(self, urls: dict[str, list[str]], pages: dict[str, str]) -> None:
+        self.urls = urls
+        self.pages = pages
+        self.fetched: list[str] = []
+
+    async def search_site(self, site: Site, keywords: list[str], limit: int = 5) -> list[SearchHit]:
+        return rank_urls(self.urls.get(site.name, []), keywords, limit)
+
+    async def fetch_page(self, url: str) -> PageContent:
+        self.fetched.append(url)
+        return PageContent(url=url, title=f"Title of {url}", text=self.pages[url], truncated=False)

@@ -14,20 +14,23 @@ day that already has a sent lesson does nothing. `--no-send` never touches the d
 from __future__ import annotations
 
 import argparse
+import asyncio
 import html
 import logging
+from contextlib import AsyncExitStack
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
 from zoneinfo import ZoneInfo
 
 import httpx
+from anthropic import AsyncAnthropic
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
 from english_agent.config import Settings, get_settings
 from english_agent.content import content_key, worker_id
 from english_agent.items import record_core_item
-from english_agent.llm import AnthropicLLM
+from english_agent.llm import AnthropicLLM, make_client
 from english_agent.logs import bind, configure_logging
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
@@ -36,7 +39,7 @@ from english_agent.models.schedule import in_daily_window, local_now
 from english_agent.models.storage import LearnerRecord, LessonContentRecord, LessonStatus
 from english_agent.research.agent import ResearchAgent
 from english_agent.research.models import ResearchResult
-from english_agent.research.sitemaps import SitemapIndex
+from english_agent.research.sitemaps import FileSitemapCache, SitemapCache, SitemapIndex
 from english_agent.research.tools import LiveResearchTools
 from english_agent.storage.repositories import Stores, open_stores
 from english_agent.telegram import TelegramClient, TelegramError, TelegramForbiddenError
@@ -60,33 +63,53 @@ def _http_client(settings: Settings) -> httpx.Client:
     )
 
 
-def generate_lesson(
-    topic: CurriculumTopic, settings: Settings, *, cefr: Cefr = "A2", curriculum_version: int | None = None
+def _research_http(settings: Settings) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=settings.http_timeout_seconds,
+        headers={"User-Agent": settings.http_user_agent},
+        follow_redirects=True,
+    )
+
+
+async def generate_lesson(
+    topic: CurriculumTopic,
+    settings: Settings,
+    *,
+    cefr: Cefr = "A2",
+    curriculum_version: int | None = None,
+    client: AsyncAnthropic | None = None,
+    sitemaps: SitemapCache | None = None,
 ) -> tuple[ResearchResult, Lesson | None]:
-    """Returns the research result and, if a page was found, the lesson built from it."""
-    with _http_client(settings) as http:
-        index = SitemapIndex(http, settings.cache_dir, ttl_days=settings.sitemap_ttl_days)
-        tools = LiveResearchTools(http, index, page_char_limit=settings.research_page_char_limit)
+    """Returns the research result and, if a page was found, the lesson built from it.
+
+    `client` and `sitemaps` are the process's shared Claude client and sitemap cache; without
+    them a client is opened (and closed) for this call and sitemaps are cached on disk.
+    """
+    async with AsyncExitStack() as stack:
+        http = await stack.enter_async_context(_research_http(settings))
+        if client is None:
+            client = await stack.enter_async_context(make_client(settings))
+        cache = sitemaps or FileSitemapCache(settings.cache_dir, ttl_days=settings.sitemap_ttl_days)
+        tools = LiveResearchTools(http, SitemapIndex(http, cache), page_char_limit=settings.research_page_char_limit)
         researcher = ResearchAgent(
-            AnthropicLLM(settings, model=settings.research_model),
+            AnthropicLLM(settings, model=settings.research_model, client=client),
             tools,
             max_steps=settings.research_max_steps,
             max_fetches_per_site=settings.research_max_fetches_per_site,
             curriculum_version=curriculum_version,
             cefr=cefr,
         )
-        research = researcher.run(topic)
-
-    if research.notes is None:
-        return research, None
-    lesson = write_lesson(
-        AnthropicLLM(settings, model=settings.writer_model),
-        topic,
-        research.notes,
-        cefr=cefr,
-        curriculum_version=curriculum_version,
-    )
-    return research, lesson
+        research = await researcher.run(topic)
+        if research.notes is None:
+            return research, None
+        lesson = await write_lesson(
+            AnthropicLLM(settings, model=settings.writer_model, client=client),
+            topic,
+            research.notes,
+            cefr=cefr,
+            curriculum_version=curriculum_version,
+        )
+        return research, lesson
 
 
 def resolve_cefr(explicit: str | None, learner: LearnerRecord | None, default: Cefr) -> Cefr:
@@ -203,7 +226,10 @@ def ensure_content(
         return None
     log.info("writing the lesson for %s (%s), attempt %d", topic.id, cefr, record.attempts)
     try:
-        research, lesson = generate_lesson(topic, settings, cefr=cefr, curriculum_version=curriculum_version)
+        # Bridge until the stores are async: one event loop for this lesson's research and writing.
+        research, lesson = asyncio.run(
+            generate_lesson(topic, settings, cefr=cefr, curriculum_version=curriculum_version)
+        )
         reason = research.message
     except Exception as error:  # unattended run: every failure is recorded, not just logged
         lesson, reason = None, f"{type(error).__name__}: {error}"
@@ -324,7 +350,9 @@ def preview_lesson(
             print(COURSE_FINISHED)
             return 0
     try:
-        research, lesson = generate_lesson(topic, settings, cefr=level, curriculum_version=curriculum.version)
+        research, lesson = asyncio.run(
+            generate_lesson(topic, settings, cefr=level, curriculum_version=curriculum.version)
+        )
         reason = research.message
     except Exception as error:
         lesson, reason = None, f"{type(error).__name__}: {error}"

@@ -6,19 +6,42 @@ uv run python -m english_agent.research --topic present_perfect_vs_past_simple
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 
 import httpx
 
-from english_agent.config import get_settings
-from english_agent.llm import AnthropicLLM
+from english_agent.config import Settings, get_settings
+from english_agent.llm import AnthropicLLM, make_client
 from english_agent.logs import configure_logging
-from english_agent.models.curriculum import load_curriculum
+from english_agent.models.curriculum import CurriculumTopic, load_curriculum
 from english_agent.research.agent import ResearchAgent
-from english_agent.research.sitemaps import SitemapIndex
+from english_agent.research.models import ResearchResult
+from english_agent.research.sitemaps import FileSitemapCache, SitemapIndex
 from english_agent.research.tools import LiveResearchTools
 
 log = logging.getLogger(__name__)
+
+
+async def _research(settings: Settings, topic: CurriculumTopic, model: str | None, version: int) -> ResearchResult:
+    async with (
+        httpx.AsyncClient(
+            timeout=settings.http_timeout_seconds,
+            headers={"User-Agent": settings.http_user_agent},
+            follow_redirects=True,
+        ) as http,
+        make_client(settings) as client,
+    ):
+        index = SitemapIndex(http, FileSitemapCache(settings.cache_dir, ttl_days=settings.sitemap_ttl_days))
+        tools = LiveResearchTools(http, index, page_char_limit=settings.research_page_char_limit)
+        agent = ResearchAgent(
+            AnthropicLLM(settings, model=model, client=client),
+            tools,
+            max_steps=settings.research_max_steps,
+            max_fetches_per_site=settings.research_max_fetches_per_site,
+            curriculum_version=version,
+        )
+        return await agent.run(topic)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,22 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         log.error("unknown topic %r", args.topic)
         return 2
 
-    with httpx.Client(
-        timeout=settings.http_timeout_seconds,
-        headers={"User-Agent": settings.http_user_agent},
-        follow_redirects=True,
-    ) as http:
-        index = SitemapIndex(http, settings.cache_dir, ttl_days=settings.sitemap_ttl_days)
-        tools = LiveResearchTools(http, index, page_char_limit=settings.research_page_char_limit)
-        agent = ResearchAgent(
-            AnthropicLLM(settings, model=args.model),
-            tools,
-            max_steps=settings.research_max_steps,
-            max_fetches_per_site=settings.research_max_fetches_per_site,
-            curriculum_version=curriculum.version,
-        )
-        result = agent.run(topic)
-
+    result = asyncio.run(_research(settings, topic, args.model, curriculum.version))
     print(result.model_dump_json(indent=2, ensure_ascii=False))
     return 0 if result.status != "failed" else 1
 

@@ -39,7 +39,7 @@ from english_agent.research.tools import ResearchTools, tool_specs
 from english_agent.tracing import get_tracer
 from english_agent.versions import SCHEMA_VERSIONS, Provenance, build_provenance
 
-_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "research_system.md"
+_PROMPT = (Path(__file__).resolve().parents[1] / "prompts" / "research_system.md").read_text(encoding="utf-8")
 
 
 class ToolError(Exception):
@@ -83,7 +83,7 @@ class ResearchAgent:
         self._today = today or date.today()
         self._curriculum_version = curriculum_version
         self._cefr = cefr
-        self._system_prompt = _PROMPT_PATH.read_text(encoding="utf-8")
+        self._system_prompt = _PROMPT
         self._tool_specs = tool_specs()
 
     def _provenance(self) -> Provenance:
@@ -97,10 +97,10 @@ class ResearchAgent:
 
     # -- public ------------------------------------------------------------------
 
-    def run(self, topic: CurriculumTopic) -> ResearchResult:
+    async def run(self, topic: CurriculumTopic) -> ResearchResult:
         with get_tracer().start_as_current_span("research.run") as span:
             span.set_attribute("topic.id", topic.id)
-            result = self._run_loop(topic)
+            result = await self._run_loop(topic)
             span.set_attribute("research.status", result.status)
             span.set_attribute("research.steps", result.steps)
             span.set_attribute("research.sites_checked", result.sites_checked)
@@ -108,7 +108,7 @@ class ResearchAgent:
                 span.set_status(Status(StatusCode.ERROR, result.message))
             return result
 
-    def _run_loop(self, topic: CurriculumTopic) -> ResearchResult:
+    async def _run_loop(self, topic: CurriculumTopic) -> ResearchResult:
         state = _State()
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt},
@@ -116,7 +116,7 @@ class ResearchAgent:
         ]
 
         for step in range(1, self._max_steps + 1):
-            turn = self._llm.chat(messages, self._tool_specs)
+            turn = await self._llm.chat(messages, self._tool_specs)
             messages.append(turn.to_message())
 
             if not turn.tool_calls:
@@ -142,7 +142,7 @@ class ResearchAgent:
                             tool_span.set_status(Status(StatusCode.ERROR, str(error)))
                             continue
                     try:
-                        payload = self._dispatch(call, state)
+                        payload = await self._dispatch(call, state)
                         self._record(
                             state,
                             step,
@@ -170,14 +170,14 @@ class ResearchAgent:
 
     # -- tool dispatch -------------------------------------------------------------
 
-    def _dispatch(self, call: ToolCall, state: _State) -> Any:
+    async def _dispatch(self, call: ToolCall, state: _State) -> Any:
         if call.name == "search_site":
-            return self._search_site(call.arguments, state)
+            return await self._search_site(call.arguments, state)
         if call.name == "fetch_page":
-            return self._fetch_page(call.arguments, state)
+            return await self._fetch_page(call.arguments, state)
         raise ToolError(f"unknown tool {call.name!r}")
 
-    def _search_site(self, arguments: dict[str, Any], state: _State) -> list[dict[str, Any]]:
+    async def _search_site(self, arguments: dict[str, Any], state: _State) -> list[dict[str, Any]]:
         site_name = arguments.get("site")
         keywords = arguments.get("keywords")
         if site_name not in SITE_BY_NAME:
@@ -193,11 +193,11 @@ class ResearchAgent:
             raise ToolError(f"search limit reached for {site_name}; move to the next site or finish")
 
         state.searches[site_name] = state.searches.get(site_name, 0) + 1
-        hits = self._tools.search_site(SITE_BY_NAME[site_name], [str(keyword) for keyword in keywords])
+        hits = await self._tools.search_site(SITE_BY_NAME[site_name], [str(keyword) for keyword in keywords])
         state.offered_urls.update(hit.url for hit in hits)
         return [hit.model_dump() for hit in hits]
 
-    def _fetch_page(self, arguments: dict[str, Any], state: _State) -> dict[str, Any]:
+    async def _fetch_page(self, arguments: dict[str, Any], state: _State) -> dict[str, Any]:
         url = str(arguments.get("url", "")).strip()
         site = site_for_url(url)
         if site is None or not site.is_article(url):
@@ -211,7 +211,7 @@ class ResearchAgent:
             page = state.fetched[url]
         else:
             try:
-                page = self._tools.fetch_page(url)
+                page = await self._tools.fetch_page(url)
             except (httpx.HTTPError, ValueError) as error:
                 raise ToolError(f"fetch failed: {error}") from error
             state.fetches[site.name] = state.fetches.get(site.name, 0) + 1

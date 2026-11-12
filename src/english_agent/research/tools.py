@@ -7,6 +7,7 @@ sees) live here too, next to the implementation they describe.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -51,30 +52,36 @@ def rank_urls(urls: list[str], keywords: list[str], limit: int) -> list[SearchHi
 
 
 class ResearchTools(Protocol):  # утиная типизация (duck typing)
-    def search_site(self, site: Site, keywords: list[str], limit: int = 5) -> list[SearchHit]: ...
+    async def search_site(self, site: Site, keywords: list[str], limit: int = 5) -> list[SearchHit]: ...
 
-    def fetch_page(self, url: str) -> PageContent: ...
+    async def fetch_page(self, url: str) -> PageContent: ...
+
+
+def _extract(html: str, url: str) -> tuple[str, str]:
+    """Main text and title of an article page. CPU-bound (lxml), so callers run it in a thread."""
+    text = trafilatura.extract(html, include_comments=False, include_tables=True, favor_recall=True) or ""
+    metadata = trafilatura.extract_metadata(html)
+    title = (metadata.title if metadata and metadata.title else "").strip() or _slug_of(url)
+    return text, title
 
 
 class LiveResearchTools:
-    def __init__(self, http: httpx.Client, index: SitemapIndex, page_char_limit: int) -> None:
+    def __init__(self, http: httpx.AsyncClient, index: SitemapIndex, page_char_limit: int) -> None:
         self._http = http
         self._index = index
         self._page_char_limit = page_char_limit
 
-    def search_site(self, site: Site, keywords: list[str], limit: int = 5) -> list[SearchHit]:
-        return rank_urls(self._index.urls_for(site), keywords, limit)
+    async def search_site(self, site: Site, keywords: list[str], limit: int = 5) -> list[SearchHit]:
+        return rank_urls(await self._index.urls_for(site), keywords, limit)
 
-    def fetch_page(self, url: str) -> PageContent:
+    async def fetch_page(self, url: str) -> PageContent:
         site = site_for_url(url)
         if site is None or not site.is_article(url):  # allowlist - ограничиваем агента
             raise ValueError(f"URL is outside the allowed sites: {url}")
-        response = self._http.get(url, follow_redirects=True)
+        response = await self._http.get(url, follow_redirects=True)
         response.raise_for_status()
-        html = response.text
-        text = trafilatura.extract(html, include_comments=False, include_tables=True, favor_recall=True) or ""
-        metadata = trafilatura.extract_metadata(html)
-        title = (metadata.title if metadata and metadata.title else "").strip() or _slug_of(url)
+        # Parsing a 40k-char page takes tens of milliseconds: off the event loop, so other learners wait for nothing.
+        text, title = await asyncio.to_thread(_extract, response.text, url)
         truncated = len(text) > self._page_char_limit
         return PageContent(url=url, title=title, text=text[: self._page_char_limit], truncated=truncated)
 

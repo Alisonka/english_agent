@@ -62,6 +62,24 @@ def research_result(topic_id: str, status: str = "failed", message: str = "boom"
     )
 
 
+def returns(value: Any) -> Any:
+    """An async stand-in for `generate_lesson` that always returns `value`."""
+
+    async def stub(*args: Any, **kwargs: Any) -> Any:
+        return value
+
+    return stub
+
+
+def echo_topic(lesson: Lesson) -> Any:
+    """An async stand-in for `generate_lesson` that writes `lesson` for whatever topic it is asked."""
+
+    async def stub(topic: Any, *args: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
+        return research_result(topic.id), lesson
+
+    return stub
+
+
 def test_deliver_lesson_sends_to_the_chat(lesson: Lesson, fake_telegram: None, sent: list[dict[str, Any]]) -> None:
     assert pipeline.deliver_lesson(lesson, make_settings(telegram_bot_token="123:TOKEN"), "42") == [1]
     assert sent[0]["chat_id"] == "42"
@@ -86,7 +104,7 @@ def test_main_refuses_to_run_unconfigured_before_calling_llm(
 ) -> None:
     monkeypatch.setattr(pipeline, "get_settings", make_settings)
 
-    def must_not_run(*args: Any, **kwargs: Any) -> None:
+    async def must_not_run(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("generate_lesson must not be called")
 
     monkeypatch.setattr(pipeline, "generate_lesson", must_not_run)
@@ -102,7 +120,7 @@ def test_main_no_send_prints_lesson_without_telegram(
     sent: list[dict[str, Any]],
 ) -> None:
     monkeypatch.setattr(pipeline, "get_settings", make_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (research_result(lesson.topic_id), lesson))
+    monkeypatch.setattr(pipeline, "generate_lesson", returns((research_result(lesson.topic_id), lesson)))
 
     assert pipeline.main(["--topic", "there_is_are", "--no-send"]) == 0
     assert json.loads(capsys.readouterr().out)["topic_id"] == "there_is_are"
@@ -118,7 +136,7 @@ def test_main_sends_lesson_and_reports(
     sent: list[dict[str, Any]],
 ) -> None:
     monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (research_result(lesson.topic_id), lesson))
+    monkeypatch.setattr(pipeline, "generate_lesson", returns((research_result(lesson.topic_id), lesson)))
 
     assert pipeline.main(["--topic", "there_is_are"]) == 0
     assert "sent 1 message(s) to Telegram chat 42" in caplog.text
@@ -137,7 +155,7 @@ def test_main_reports_telegram_failure_and_stops_writing_to_a_blocked_chat(
 
     monkeypatch.setattr(pipeline, "_http_client", lambda s: httpx.Client(transport=httpx.MockTransport(handler)))
     monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (research_result(lesson.topic_id), lesson))
+    monkeypatch.setattr(pipeline, "generate_lesson", returns((research_result(lesson.topic_id), lesson)))
 
     assert pipeline.main(["--topic", "there_is_are"]) == 1
     assert "bot was blocked" in caplog.text
@@ -148,7 +166,7 @@ def test_main_reports_telegram_failure_and_stops_writing_to_a_blocked_chat(
 def test_main_when_research_finds_nothing(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     monkeypatch.setattr(pipeline, "get_settings", make_settings)
     result = research_result("there_is_are", status="not_found", message="нет на сайте")
-    monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (result, None))
+    monkeypatch.setattr(pipeline, "generate_lesson", returns((result, None)))
 
     assert pipeline.main(["--topic", "there_is_are", "--no-send"]) == 1
     assert "нет на сайте" in caplog.text
@@ -159,7 +177,7 @@ def test_main_tells_the_learner_when_research_finds_nothing(
 ) -> None:
     monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
     result = research_result("there_is_are", status="not_found", message="нет на сайте")
-    monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (result, None))
+    monkeypatch.setattr(pipeline, "generate_lesson", returns((result, None)))
 
     assert pipeline.main(["--topic", "there_is_are"]) == 1
     [notice] = sent
@@ -173,7 +191,7 @@ def test_main_keeps_error_details_out_of_the_chat(
     fake_telegram: None,
     sent: list[dict[str, Any]],
 ) -> None:
-    def boom(*args: Any, **kwargs: Any) -> None:
+    async def boom(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("API <down> & out")
 
     monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
@@ -192,7 +210,7 @@ def test_main_failure_notice_that_cannot_be_delivered_is_logged(
 
     monkeypatch.setattr(pipeline, "_http_client", lambda s: httpx.Client(transport=httpx.MockTransport(handler)))
     monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (research_result("there_is_are"), None))
+    monkeypatch.setattr(pipeline, "generate_lesson", returns((research_result("there_is_are"), None)))
 
     assert pipeline.main(["--topic", "there_is_are"]) == 1
     assert "lesson for there_is_are failed" in caplog.text
@@ -231,7 +249,7 @@ def generated(lesson: Lesson, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Stub generate_lesson; collects the topic ids it was asked for. The lesson keeps the asked topic id."""
     topics: list[str] = []
 
-    def fake_generate(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
+    async def fake_generate(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
         topics.append(topic.id)
         return research_result(topic.id), lesson.model_copy(update={"topic_id": topic.id})
 
@@ -433,7 +451,7 @@ def test_failed_day_keeps_its_topic_for_the_next_day(
     asked: list[str] = []
     outcomes = iter([None, lesson])
 
-    def fake_generate(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson | None]:
+    async def fake_generate(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson | None]:
         asked.append(topic.id)
         return research_result(topic.id), next(outcomes)
 
@@ -458,7 +476,7 @@ def test_one_learners_failure_does_not_stop_the_others(
     started(learners, "42", cefr="B1")
     started(learners, "43")
 
-    monkeypatch.setattr(pipeline, "generate_lesson", lambda topic, *a, **k: (research_result(topic.id), lesson))
+    monkeypatch.setattr(pipeline, "generate_lesson", echo_topic(lesson))
     monkeypatch.setattr(pipeline, "load_curriculum", unreadable_for_b1(pipeline.load_curriculum))
     pipeline.run_lesson_tick(tick_settings(), stores, msk(9, 0))
     assert [message["chat_id"] for message in sent] == ["43"]
@@ -499,7 +517,7 @@ def test_tick_teaches_the_learners_saved_level(
 ) -> None:
     levels: list[str] = []
 
-    def fake_generate(topic: Any, settings: Any, *, cefr: str, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
+    async def fake_generate(topic: Any, settings: Any, *, cefr: str, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
         levels.append(cefr)
         return research_result(topic.id), lesson
 
@@ -517,7 +535,7 @@ def test_main_no_send_does_not_open_the_database(lesson: Lesson, monkeypatch: py
 
     monkeypatch.setattr(pipeline, "open_stores", must_not_open)
     monkeypatch.setattr(pipeline, "get_settings", make_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (research_result(lesson.topic_id), lesson))
+    monkeypatch.setattr(pipeline, "generate_lesson", returns((research_result(lesson.topic_id), lesson)))
     assert pipeline.main(["--topic", "there_is_are", "--no-send"]) == 0
 
 
