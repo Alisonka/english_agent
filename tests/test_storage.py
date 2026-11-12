@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from english_agent.items import core_item_from_lesson
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import TranslationGrade
+from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import ItemDraft, LessonRecord
 from english_agent.profile import build_profile
 from english_agent.srs import AGAIN, GOOD, ReviewScheduler
@@ -332,3 +333,52 @@ def test_translation_answer_lifecycle(sessions: SessionFactory, lesson: Lesson) 
         ]
     card = CardRepo(sessions, SCHEDULER).get(learner.id, item_id)
     assert card is not None and card.reviews == 2
+
+
+def test_new_learner_gets_the_given_schedule(sessions: SessionFactory) -> None:
+    learners = LearnerRepo(sessions)
+    schedule = LearnerSchedule(timezone="Asia/Vladivostok", lesson_send_time=time(7, 30), quiz_delay_minutes=30)
+
+    created = learners.get_or_create("42", "A2", schedule)
+    assert created.schedule == schedule
+    assert (created.is_active, created.paused_at, created.curriculum_started_on) == (True, None, None)
+    assert learners.get_by_id(created.id) == created
+
+
+def test_only_started_unpaused_active_learners_are_listed(sessions: SessionFactory) -> None:
+    learners = LearnerRepo(sessions)
+    for chat_id in ("1", "2", "3", "4"):
+        learners.get_or_create(chat_id, "A2")
+    for chat_id in ("2", "3", "4"):
+        learners.start_course(chat_id, DAY)
+    learners.set_paused("3", True)
+    learners.deactivate("4", "blocked")
+
+    assert [learner.telegram_chat_id for learner in learners.list_active()] == ["2"]
+
+    learners.set_paused("3", False)
+    restarted = learners.start_course("4", DAY + timedelta(days=5))
+    assert restarted is not None and restarted.curriculum_started_on == DAY  # the first start is kept
+    assert restarted.deactivated_reason is None
+    assert [learner.telegram_chat_id for learner in learners.list_active()] == ["2", "3", "4"]
+
+
+def test_set_schedule_and_pause_of_an_unknown_chat_return_none(sessions: SessionFactory) -> None:
+    learners = LearnerRepo(sessions)
+    assert learners.set_schedule("404", LearnerSchedule()) is None
+    assert learners.set_paused("404", True) is None
+
+
+def test_lesson_statuses_and_sent_topics(sessions: SessionFactory, lesson: Lesson) -> None:
+    learner = LearnerRepo(sessions).get_or_create("42", "A2")
+    lessons = LessonRepo(sessions)
+    lessons.record_sent(learner.id, DAY, lesson, [1], curriculum_version=1)
+    lessons.record_failed(
+        learner.id, DAY + timedelta(days=1), topic_id="articles", cefr="A2", reason="x", curriculum_version=1
+    )
+
+    keys = [(learner.id, DAY), (learner.id, DAY + timedelta(days=1)), (learner.id, DAY + timedelta(days=2))]
+    assert lessons.statuses(keys) == {keys[0]: "sent", keys[1]: "failed"}
+    assert lessons.statuses([]) == {}
+    assert lessons.sent_topic_ids(learner.id, "A2") == {lesson.topic_id}
+    assert lessons.sent_topic_ids(learner.id, "B1") == set()

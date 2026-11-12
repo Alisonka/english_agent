@@ -1,10 +1,11 @@
-"""The bot's interactive side: the CEFR level, quiz answers and the translation task.
+"""The bot's interactive side: the CEFR level, the learner's schedule, quiz answers and the translation task.
 
     uv run python -m english_agent.telegram level
 
 A small long-polling loop over the sync `TelegramClient` (no aiogram yet). It answers
 /level and /start with an inline keyboard of the levels that actually have a curriculum
-and stores the choice in the `learners` table the daily pipeline reads; records answers to
+and stores the choice in the `learners` table the daily pipeline reads; /time, /translation,
+/timezone, /pause, /resume and /status manage the learner's own schedule; records answers to
 the quiz polls (and sends the result after the last one); and takes a plain-text message
 as the answer to an open translation task, graded in a background thread so polling never
 waits for the model. On the server the same loop runs inside `english_agent.app`, which
@@ -30,6 +31,8 @@ from english_agent.llm.anthropic_client import AnthropicLLM
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import TranslationGrade
+from english_agent.models.schedule import LearnerSchedule, local_today, parse_clock, valid_timezone
+from english_agent.models.storage import LearnerRecord
 from english_agent.paths import available_cefr_levels
 from english_agent.profile import refresh_profile
 from english_agent.storage.repositories import LearnerStore, PracticeStore, ProfileStore, Stores, open_stores
@@ -44,8 +47,17 @@ _PROMPT = "Выбери свой уровень английского. Поме
 _HELP = (
     "Я присылаю ежедневные уроки по твоему уровню.\n"
     "• /level — выбрать или сменить уровень\n"
-    "• /mylevel — какой уровень сейчас стоит"
+    "• /mylevel — какой уровень сейчас стоит\n"
+    "• /time 09:00 — во сколько присылать урок\n"
+    "• /translation 18:00 — во сколько присылать задание на перевод\n"
+    "• /timezone Europe/Moscow — твой часовой пояс\n"
+    "• /pause и /resume — приостановить и продолжить уроки\n"
+    "• /status — текущие настройки"
 )
+_BAD_TIME = "Напиши время в формате ЧЧ:ММ, например: {command} 09:30"
+_BAD_TIMEZONE = "Не знаю такой часовой пояс. Пример: /timezone Europe/Moscow или /timezone Asia/Vladivostok"
+_PAUSED = "Уроки на паузе. Продолжить — /resume."
+_RESUMED = "Уроки продолжаются с той темы, на которой остановились."
 _GRADING = "⏳ Проверяю…"
 _GRADE_FAILED = "Не получилось проверить перевод. Пришли ответ ещё раз чуть позже."
 _DISPUTE_PREFIX = "dispute:"
@@ -85,7 +97,71 @@ def _refresh_profile(practice: PracticeHandlers, learner_id: int) -> None:
 _COMMANDS: list[tuple[str, str]] = [
     ("level", "Выбрать или сменить уровень"),
     ("mylevel", "Показать текущий уровень"),
+    ("time", "Во сколько присылать урок"),
+    ("translation", "Во сколько присылать задание на перевод"),
+    ("timezone", "Часовой пояс"),
+    ("pause", "Приостановить уроки"),
+    ("resume", "Продолжить уроки"),
+    ("status", "Текущие настройки"),
 ]
+
+
+def render_status(learner: LearnerRecord) -> str:
+    state = "на паузе" if learner.paused_at is not None else "идут" if learner.is_active else "остановлены (/start)"
+    return (
+        f"Уровень: <b>{learner.cefr}</b>\n"
+        f"Часовой пояс: {learner.timezone}\n"
+        f"Урок: {learner.lesson_send_time:%H:%M}, перевод: {learner.translation_send_time:%H:%M}\n"
+        f"Уроки: {state}"
+    )
+
+
+def _change_schedule(
+    learners: LearnerStore, chat_id: str, default_cefr: Cefr, default_schedule: LearnerSchedule, **changes: object
+) -> LearnerRecord:
+    learner = learners.get_or_create(chat_id, default_cefr, default_schedule)
+    schedule = LearnerSchedule.model_validate({**learner.schedule.model_dump(), **changes})
+    updated = learners.set_schedule(chat_id, schedule)
+    assert updated is not None
+    return updated
+
+
+def _handle_schedule_command(
+    client: TelegramClient,
+    chat_id: str,
+    command: str,
+    argument: str,
+    *,
+    learners: LearnerStore,
+    default_cefr: Cefr,
+    default_schedule: LearnerSchedule,
+) -> None:
+    if command in {"/time", "/translation"}:
+        clock = parse_clock(argument)
+        if clock is None:
+            client.send_message(chat_id, _BAD_TIME.format(command=command))
+            return
+        field = "lesson_send_time" if command == "/time" else "translation_send_time"
+        learner = _change_schedule(learners, chat_id, default_cefr, default_schedule, **{field: clock})
+    elif command == "/timezone":
+        try:
+            zone = valid_timezone(argument.strip())
+        except ValueError:
+            client.send_message(chat_id, _BAD_TIMEZONE)
+            return
+        learner = _change_schedule(learners, chat_id, default_cefr, default_schedule, timezone=zone)
+    elif command in {"/pause", "/resume"}:
+        learners.get_or_create(chat_id, default_cefr, default_schedule)
+        changed = learners.set_paused(chat_id, command == "/pause")
+        assert changed is not None
+        client.send_message(chat_id, _PAUSED if command == "/pause" else _RESUMED)
+        return
+    else:  # /status
+        learner = learners.get_or_create(chat_id, default_cefr, default_schedule)
+    client.send_message(chat_id, render_status(learner))
+
+
+_SCHEDULE_COMMANDS = {"/time", "/translation", "/timezone", "/pause", "/resume", "/status"}
 
 
 def _keyboard(available: list[str]) -> dict[str, Any]:
@@ -162,16 +238,29 @@ def _handle_message(
     learners: LearnerStore,
     available: list[str],
     default_cefr: Cefr,
+    default_schedule: LearnerSchedule,
     practice: PracticeHandlers | None = None,
 ) -> None:
     chat_id = str(message["chat"]["id"])
     text = (message.get("text") or "").strip()
-    command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+    head, _, argument = text.partition(" ")
+    command = head.split("@", 1)[0].lower() if text else ""
 
     if command in {"/start", "/level"}:
         if command == "/start":
-            learners.get_or_create(chat_id, default_cefr)
+            learner = learners.get_or_create(chat_id, default_cefr, default_schedule)
+            learners.start_course(chat_id, local_today(learner.timezone, datetime.now(UTC)))
         client.send_message(chat_id, _PROMPT, reply_markup=_keyboard(available))
+    elif command in _SCHEDULE_COMMANDS:
+        _handle_schedule_command(
+            client,
+            chat_id,
+            command,
+            argument,
+            learners=learners,
+            default_cefr=default_cefr,
+            default_schedule=default_schedule,
+        )
     elif command == "/mylevel":
         learner = learners.get(chat_id)
         current = learner.cefr if learner is not None else default_cefr
@@ -219,7 +308,9 @@ def _handle_callback(
         client.answer_callback_query(callback_id)
         return
 
-    learners.set_cefr(str(chat_id), cast(Cefr, chosen))
+    learner = learners.set_cefr(str(chat_id), cast(Cefr, chosen))
+    # Picking a level also starts the course, or restarts it after the previous level was finished.
+    learners.start_course(learner.telegram_chat_id, local_today(learner.timezone, datetime.now(UTC)))
     client.answer_callback_query(callback_id, text=f"Уровень обновлён: {chosen}")
 
     if chat.get("id") is not None and message.get("message_id") is not None:
@@ -237,9 +328,11 @@ def process_updates(
     learners: LearnerStore,
     available: list[str],
     default_cefr: Cefr,
+    default_schedule: LearnerSchedule | None = None,
     practice: PracticeHandlers | None = None,
 ) -> int | None:
     """Handle a batch of updates; returns the next getUpdates offset (or None if empty)."""
+    schedule = default_schedule or LearnerSchedule()
     last_update_id: int | None = None
     for update in updates:
         last_update_id = int(update["update_id"])
@@ -257,6 +350,7 @@ def process_updates(
                 learners=learners,
                 available=available,
                 default_cefr=default_cefr,
+                default_schedule=schedule,
                 practice=practice,
             )
     return None if last_update_id is None else last_update_id + 1
@@ -305,6 +399,7 @@ def serve_leveling(settings: Settings, stores: Stores) -> int:
                         learners=stores.learners,
                         available=available,
                         default_cefr=settings.learner_cefr,
+                        default_schedule=settings.default_schedule(),
                         practice=practice,
                     )
                 except (TelegramError, SQLAlchemyError) as error:

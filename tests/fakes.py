@@ -9,6 +9,7 @@ from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
+from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import (
     CardRecord,
     ItemDraft,
@@ -16,6 +17,7 @@ from english_agent.models.storage import (
     LearnerProfileRecord,
     LearnerRecord,
     LessonRecord,
+    LessonStatus,
     OpenTranslationTask,
     PracticeDeliveryRecord,
     PracticeKind,
@@ -35,7 +37,12 @@ class FakeLearners:
     def get(self, telegram_chat_id: str) -> LearnerRecord | None:
         return self.by_chat.get(telegram_chat_id)
 
-    def get_or_create(self, telegram_chat_id: str, default_cefr: Cefr) -> LearnerRecord:
+    def get_by_id(self, learner_id: int) -> LearnerRecord | None:
+        return next((learner for learner in self.by_chat.values() if learner.id == learner_id), None)
+
+    def get_or_create(
+        self, telegram_chat_id: str, default_cefr: Cefr, schedule: LearnerSchedule | None = None
+    ) -> LearnerRecord:
         if telegram_chat_id not in self.by_chat:
             now = datetime.now(UTC)
             self.by_chat[telegram_chat_id] = LearnerRecord(
@@ -44,12 +51,46 @@ class FakeLearners:
                 cefr=default_cefr,
                 created_at=now,
                 updated_at=now,
+                **(schedule or LearnerSchedule()).model_dump(),
             )
         return self.by_chat[telegram_chat_id]
 
     def set_cefr(self, telegram_chat_id: str, cefr: Cefr) -> LearnerRecord:
         learner = self.get_or_create(telegram_chat_id, cefr).model_copy(update={"cefr": cefr})
         self.by_chat[telegram_chat_id] = learner
+        return learner
+
+    def list_active(self) -> list[LearnerRecord]:
+        return sorted((r for r in self.by_chat.values() if r.receives_lessons), key=lambda r: r.id)
+
+    def _change(self, telegram_chat_id: str, **changes: Any) -> LearnerRecord | None:
+        learner = self.by_chat.get(telegram_chat_id)
+        if learner is None:
+            return None
+        self.by_chat[telegram_chat_id] = learner.model_copy(update=changes)
+        return self.by_chat[telegram_chat_id]
+
+    def set_schedule(self, telegram_chat_id: str, schedule: LearnerSchedule) -> LearnerRecord | None:
+        return self._change(telegram_chat_id, **schedule.model_dump())
+
+    def start_course(self, telegram_chat_id: str, on: date) -> LearnerRecord | None:
+        learner = self.by_chat.get(telegram_chat_id)
+        started = on if learner is None or learner.curriculum_started_on is None else learner.curriculum_started_on
+        return self._change(telegram_chat_id, curriculum_started_on=started, is_active=True, deactivated_reason=None)
+
+    def set_paused(self, telegram_chat_id: str, paused: bool) -> LearnerRecord | None:
+        learner = self.by_chat.get(telegram_chat_id)
+        paused_at = (learner.paused_at if learner else None) or datetime.now(UTC) if paused else None
+        return self._change(telegram_chat_id, paused_at=paused_at)
+
+    def deactivate(self, telegram_chat_id: str, reason: str) -> None:
+        self._change(telegram_chat_id, is_active=False, deactivated_reason=reason)
+
+    def started(self, telegram_chat_id: str, on: date, cefr: Cefr = "A2", **changes: Any) -> LearnerRecord:
+        """Test helper: a learner whose course started on `on`."""
+        self.get_or_create(telegram_chat_id, cefr)
+        learner = self._change(telegram_chat_id, curriculum_started_on=on, **changes)
+        assert learner is not None
         return learner
 
 
@@ -95,6 +136,16 @@ class FakeLessons:
     def list_sent(self) -> list[LessonRecord]:
         sent = (record for record in self.rows.values() if record.status == "sent")
         return sorted(sent, key=lambda record: (record.lesson_date, record.id))
+
+    def statuses(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonStatus]:
+        return {key: self.rows[key].status for key in keys if key in self.rows}
+
+    def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]:
+        return {
+            r.topic_id
+            for (lid, _), r in self.rows.items()
+            if lid == learner_id and r.cefr == cefr and r.status == "sent"
+        }
 
     def _save(
         self,

@@ -4,7 +4,7 @@ Repositories build these with `Record.model_validate(orm_row)` (`from_attributes
 so SQLAlchemy objects never leave `english_agent.storage`.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,6 +13,7 @@ from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson, Source
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
+from english_agent.models.schedule import LearnerSchedule
 
 LessonStatus = Literal["sent", "failed"]
 ErrorKind = Literal["quiz", "text"]
@@ -21,6 +22,8 @@ TranslationAnswerStatus = Literal["pending", "graded", "failed"]
 
 
 class LearnerRecord(BaseModel):
+    """A learner and their schedule. Defaults mirror the column defaults of the `learners` table."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -28,6 +31,27 @@ class LearnerRecord(BaseModel):
     cefr: Cefr
     created_at: datetime
     updated_at: datetime
+    timezone: str = "Europe/Moscow"
+    lesson_send_time: time = time(9, 0)
+    translation_send_time: time = time(18, 0)
+    quiz_delay_minutes: int = 60
+    curriculum_started_on: date | None = None  # None until /start: no lessons before that
+    is_active: bool = True  # False once the learner blocked the bot or finished the course
+    paused_at: datetime | None = None  # /pause: no lessons and no practice until /resume
+    deactivated_reason: str | None = None  # "blocked" | "course_finished"
+
+    @property
+    def schedule(self) -> LearnerSchedule:
+        return LearnerSchedule(
+            timezone=self.timezone,
+            lesson_send_time=self.lesson_send_time,
+            translation_send_time=self.translation_send_time,
+            quiz_delay_minutes=self.quiz_delay_minutes,
+        )
+
+    @property
+    def receives_lessons(self) -> bool:
+        return self.is_active and self.paused_at is None and self.curriculum_started_on is not None
 
 
 class LessonRecord(BaseModel):

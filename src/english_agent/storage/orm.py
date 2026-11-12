@@ -5,7 +5,7 @@ Keep in sync with the Alembic migrations in `migrations/versions/`.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from typing import Any
 
 from sqlalchemy import (
@@ -20,6 +20,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    Time,
     UniqueConstraint,
     func,
     text,
@@ -50,6 +51,7 @@ class Base(DeclarativeBase):
 
 class LearnerRow(Base):
     __tablename__ = "learners"
+    __table_args__ = (CheckConstraint("quiz_delay_minutes >= 0", name="quiz_delay_minutes"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_chat_id: Mapped[str] = mapped_column(String(64), unique=True)
@@ -58,6 +60,15 @@ class LearnerRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, server_default=func.now()
     )
+    # The learner's own schedule (see `models.schedule`); new learners get the settings' defaults.
+    timezone: Mapped[str] = mapped_column(String(64), server_default=text("'Europe/Moscow'"))
+    lesson_send_time: Mapped[time] = mapped_column(Time, server_default=text("'09:00'"))
+    translation_send_time: Mapped[time] = mapped_column(Time, server_default=text("'18:00'"))
+    quiz_delay_minutes: Mapped[int] = mapped_column(Integer, server_default=text("60"))
+    curriculum_started_on: Mapped[date | None] = mapped_column(Date)
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deactivated_reason: Mapped[str | None] = mapped_column(String(64))
 
 
 class LessonRow(Base):

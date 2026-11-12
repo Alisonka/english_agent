@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,7 @@ from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
+from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import (
     CORE_SLUG,
     CardRecord,
@@ -28,6 +29,7 @@ from english_agent.models.storage import (
     LearnerProfileRecord,
     LearnerRecord,
     LessonRecord,
+    LessonStatus,
     OpenTranslationTask,
     PracticeDeliveryRecord,
     PracticeKind,
@@ -62,9 +64,23 @@ class LessonAlreadySentError(Exception):
 class LearnerStore(Protocol):
     def get(self, telegram_chat_id: str) -> LearnerRecord | None: ...
 
-    def get_or_create(self, telegram_chat_id: str, default_cefr: Cefr) -> LearnerRecord: ...
+    def get_by_id(self, learner_id: int) -> LearnerRecord | None: ...
+
+    def get_or_create(
+        self, telegram_chat_id: str, default_cefr: Cefr, schedule: LearnerSchedule | None = None
+    ) -> LearnerRecord: ...
 
     def set_cefr(self, telegram_chat_id: str, cefr: Cefr) -> LearnerRecord: ...
+
+    def list_active(self) -> list[LearnerRecord]: ...
+
+    def set_schedule(self, telegram_chat_id: str, schedule: LearnerSchedule) -> LearnerRecord | None: ...
+
+    def start_course(self, telegram_chat_id: str, on: date) -> LearnerRecord | None: ...
+
+    def set_paused(self, telegram_chat_id: str, paused: bool) -> LearnerRecord | None: ...
+
+    def deactivate(self, telegram_chat_id: str, reason: str) -> None: ...
 
 
 class LessonStore(Protocol):
@@ -81,6 +97,10 @@ class LessonStore(Protocol):
     ) -> LessonRecord: ...
 
     def list_sent(self) -> list[LessonRecord]: ...
+
+    def statuses(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonStatus]: ...
+
+    def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]: ...
 
 
 class ItemStore(Protocol):
@@ -246,12 +266,21 @@ class LearnerRepo:
             row = self._find(session, telegram_chat_id)
             return None if row is None else LearnerRecord.model_validate(row)
 
-    def get_or_create(self, telegram_chat_id: str, default_cefr: Cefr) -> LearnerRecord:
+    def get_by_id(self, learner_id: int) -> LearnerRecord | None:
+        with session_scope(self._sessions) as session:
+            row = session.get(LearnerRow, learner_id)
+            return None if row is None else LearnerRecord.model_validate(row)
+
+    def get_or_create(
+        self, telegram_chat_id: str, default_cefr: Cefr, schedule: LearnerSchedule | None = None
+    ) -> LearnerRecord:
+        """The learner, created with `default_cefr` and `schedule` (else the column defaults) if new."""
+        values: dict[str, Any] = {"telegram_chat_id": telegram_chat_id, "cefr": default_cefr}
+        if schedule is not None:
+            values.update(schedule.model_dump())
         # ON CONFLICT: the polling and scheduler threads may both create the same learner.
         statement = (
-            insert(LearnerRow)
-            .values(telegram_chat_id=telegram_chat_id, cefr=default_cefr)
-            .on_conflict_do_nothing(index_elements=[LearnerRow.telegram_chat_id])
+            insert(LearnerRow).values(**values).on_conflict_do_nothing(index_elements=[LearnerRow.telegram_chat_id])
         )
         with session_scope(self._sessions) as session:
             session.execute(statement)
@@ -271,6 +300,53 @@ class LearnerRepo:
             row = self._find(session, telegram_chat_id)
             assert row is not None
             return LearnerRecord.model_validate(row)
+
+    def list_active(self) -> list[LearnerRecord]:
+        """Learners who may get lessons: started, not paused, not deactivated. Oldest first."""
+        with session_scope(self._sessions) as session:
+            rows = session.scalars(
+                select(LearnerRow)
+                .where(
+                    LearnerRow.is_active.is_(True),
+                    LearnerRow.paused_at.is_(None),
+                    LearnerRow.curriculum_started_on.is_not(None),
+                )
+                .order_by(LearnerRow.id)
+            )
+            return [LearnerRecord.model_validate(row) for row in rows]
+
+    def _change(self, telegram_chat_id: str, **values: Any) -> LearnerRecord | None:
+        statement = (
+            update(LearnerRow)
+            .where(LearnerRow.telegram_chat_id == telegram_chat_id)
+            .values(**values, updated_at=func.now())
+            .returning(LearnerRow)
+        )
+        with session_scope(self._sessions) as session:
+            row = session.scalar(statement)
+            return None if row is None else LearnerRecord.model_validate(row)
+
+    def set_schedule(self, telegram_chat_id: str, schedule: LearnerSchedule) -> LearnerRecord | None:
+        """Replace the learner's schedule; None for an unknown chat."""
+        return self._change(telegram_chat_id, **schedule.model_dump())
+
+    def start_course(self, telegram_chat_id: str, on: date) -> LearnerRecord | None:
+        """/start: (re)activate the learner; the course start is set once and then kept."""
+        return self._change(
+            telegram_chat_id,
+            curriculum_started_on=func.coalesce(LearnerRow.curriculum_started_on, on),
+            is_active=True,
+            deactivated_reason=None,
+        )
+
+    def set_paused(self, telegram_chat_id: str, paused: bool) -> LearnerRecord | None:
+        # COALESCE: pausing twice keeps the original pause time.
+        paused_at = func.coalesce(LearnerRow.paused_at, func.now()) if paused else None
+        return self._change(telegram_chat_id, paused_at=paused_at)
+
+    def deactivate(self, telegram_chat_id: str, reason: str) -> None:
+        """Stop all sending to the chat (the bot was blocked, the course is over) until /start."""
+        self._change(telegram_chat_id, is_active=False, deactivated_reason=reason)
 
 
 class LessonRepo:
@@ -330,6 +406,28 @@ class LessonRepo:
                 select(LessonRow).where(LessonRow.status == "sent").order_by(LessonRow.lesson_date, LessonRow.id)
             )
             return [LessonRecord.model_validate(row) for row in rows]
+
+    def statuses(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonStatus]:
+        """The status of each (learner id, day) that has a row; one query, no payloads."""
+        if not keys:
+            return {}
+        with session_scope(self._sessions) as session:
+            rows = session.execute(
+                select(LessonRow.learner_id, LessonRow.lesson_date, LessonRow.status).where(
+                    tuple_(LessonRow.learner_id, LessonRow.lesson_date).in_(keys)
+                )
+            )
+            return {(learner_id, day): status for learner_id, day, status in rows}
+
+    def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]:
+        """Topics of this level the learner already got: the next lesson is the first topic not in here."""
+        with session_scope(self._sessions) as session:
+            rows = session.scalars(
+                select(LessonRow.topic_id).where(
+                    LessonRow.learner_id == learner_id, LessonRow.cefr == cefr, LessonRow.status == "sent"
+                )
+            )
+            return set(rows)
 
     def _save(self, learner_id: int, day: date, **values: Any) -> LessonRecord:
         """Insert the day's row, or overwrite an earlier failed attempt; a sent lesson is final."""

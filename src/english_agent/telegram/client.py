@@ -20,6 +20,10 @@ class TelegramError(Exception):
     """Telegram rejected a request or could not be reached."""
 
 
+class TelegramForbiddenError(TelegramError):
+    """HTTP 403: the user blocked the bot (or never started it); retrying will not help."""
+
+
 class TelegramClient:
     def __init__(self, http: httpx.Client, token: str, *, api_base: str = TELEGRAM_API_BASE) -> None:
         if not token:
@@ -38,7 +42,8 @@ class TelegramClient:
             body = {}
         if response.status_code != 200 or not body.get("ok"):
             description = body.get("description") or f"HTTP {response.status_code}"
-            raise TelegramError(f"{method} failed: {description}")
+            error = TelegramForbiddenError if response.status_code == 403 else TelegramError
+            raise error(f"{method} failed: {description}")
         return body["result"]
 
     def send_message(

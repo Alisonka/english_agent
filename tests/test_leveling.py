@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from typing import Any
 
 import httpx
@@ -10,6 +10,7 @@ from conftest import lesson_payload
 from english_agent.models.curriculum import load_curriculum
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
+from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import LearnerRecord
 from english_agent.paths import available_cefr_levels
 from english_agent.pipeline import resolve_cefr
@@ -87,6 +88,7 @@ def test_start_creates_learner_with_default_level() -> None:
     created = learners.get("42")
     assert created is not None
     assert created.cefr == "A2"
+    assert created.curriculum_started_on is not None  # /start starts the course
 
 
 def test_mylevel_reports_saved_level() -> None:
@@ -303,3 +305,84 @@ def test_dispute_flags_the_grade() -> None:
     method, payload = fake.requests[-1]
     assert method == "answerCallbackQuery"
     assert payload["text"] == "Спасибо, оценка отмечена как спорная."
+
+
+# --- the learner's schedule ---------------------------------------------------
+
+
+def _command(learners: FakeLearners, text: str) -> list[tuple[str, dict[str, Any]]]:
+    fake = RecordingTelegram()
+    updates = [_update(1, message={"chat": {"id": 42}, "text": text})]
+    schedule = LearnerSchedule(timezone="Europe/Moscow")
+    process_updates(
+        fake.client(), updates, learners=learners, available=["A2"], default_cefr="A2", default_schedule=schedule
+    )
+    return fake.requests
+
+
+def test_time_sets_when_the_lesson_comes() -> None:
+    learners = FakeLearners()
+    [(_, reply)] = _command(learners, "/time 8:30")
+    saved = learners.get("42")
+    assert saved is not None and saved.lesson_send_time == time(8, 30)
+    assert "Урок: 08:30" in reply["text"]
+
+
+def test_translation_sets_when_the_task_comes() -> None:
+    learners = FakeLearners()
+    _command(learners, "/translation 20.15")
+    saved = learners.get("42")
+    assert saved is not None and saved.translation_send_time == time(20, 15)
+
+
+def test_time_rejects_a_bad_value_and_changes_nothing() -> None:
+    learners = FakeLearners()
+    learners.get_or_create("42", "A2")
+    [(_, reply)] = _command(learners, "/time 25:00")
+    assert "ЧЧ:ММ" in reply["text"]
+    saved = learners.get("42")
+    assert saved is not None and saved.lesson_send_time == time(9, 0)
+
+
+def test_timezone_is_validated_and_saved() -> None:
+    learners = FakeLearners()
+    [(_, bad)] = _command(learners, "/timezone Mars/Olympus")
+    assert "часовой пояс" in bad["text"]
+    _command(learners, "/timezone Asia/Vladivostok")
+    saved = learners.get("42")
+    assert saved is not None and saved.timezone == "Asia/Vladivostok"
+
+
+def test_pause_and_resume() -> None:
+    learners = FakeLearners()
+    learners.started("42", date(2026, 11, 1))
+    _command(learners, "/pause")
+    paused = learners.get("42")
+    assert paused is not None and paused.paused_at is not None and not paused.receives_lessons
+    _command(learners, "/resume")
+    resumed = learners.get("42")
+    assert resumed is not None and resumed.paused_at is None and resumed.receives_lessons
+
+
+def test_status_shows_the_settings() -> None:
+    learners = FakeLearners()
+    learners.set_cefr("42", "B1")
+    [(_, reply)] = _command(learners, "/status")
+    assert "<b>B1</b>" in reply["text"] and "Europe/Moscow" in reply["text"] and "18:00" in reply["text"]
+
+
+def test_picking_a_level_restarts_a_finished_course() -> None:
+    learners = FakeLearners()
+    learners.started("42", date(2026, 11, 1))
+    learners.deactivate("42", "course_finished")
+    callback = {"id": "cq1", "data": "level:B1", "message": {"chat": {"id": 42}, "message_id": 7}}
+
+    process_updates(
+        RecordingTelegram().client(),
+        [_update(1, callback_query=callback)],
+        learners=learners,
+        available=["A2", "B1"],
+        default_cefr="A2",
+    )
+    saved = learners.get("42")
+    assert saved is not None and (saved.cefr, saved.is_active) == ("B1", True)

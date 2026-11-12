@@ -143,15 +143,15 @@ Configuration is read from environment variables or a local `.env` file (see
 | --- | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | yes | – | Anthropic (Claude) API key |
 | `TELEGRAM_BOT_TOKEN` | for sending | – | Bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | for sending | – | Chat that receives the lessons (`python -m english_agent.telegram chats`) |
-| `CURRICULUM_START_DATE` | without `--topic` | – | Day topic 1 is sent (`YYYY-MM-DD`); one topic per day after that |
+| `TELEGRAM_CHAT_ID` | for CLI runs | – | The chat command-line runs act on (`pipeline`, `telegram ping`, `storage set-schedule`); learners register with /start |
+| `CURRICULUM_START_DATE` | for `--no-send` previews | – | Course day 1 (`YYYY-MM-DD`) when previewing the topic of a day |
 | `DATABASE_URL` | for sending | – | PostgreSQL URL, `postgresql+psycopg://english_agent:<pw>@localhost:5432/english_agent` (compose sets it for its services) |
 | `POSTGRES_PASSWORD` | for compose | – | Password of the compose `postgres` service; use a URL-safe one (`openssl rand -hex 24`) |
-| `LESSON_SEND_TIME` | no | `09:00` | When the server app sends the daily lesson |
-| `TIMEZONE` | no | `Europe/Moscow` | Time zone for `LESSON_SEND_TIME` and for "today" |
+| `LESSON_SEND_TIME` | no | `09:00` | A new learner's lesson time (each learner then sets their own with /time) |
+| `TIMEZONE` | no | `Europe/Moscow` | A new learner's time zone (/timezone), and "today" for CLI previews |
 | `LEARNER_CEFR` | no | `A2` | Level of a new learner; the level chosen with /level wins |
-| `QUIZ_DELAY_MINUTES` | no | `60` | Quiz polls are sent this long after the lesson |
-| `TRANSLATION_SEND_TIME` | no | `18:00` | When the translation task is sent (at least `PRACTICE_GAP_MINUTES` after the quiz) |
+| `QUIZ_DELAY_MINUTES` | no | `60` | A new learner's delay of the quiz polls after the lesson |
+| `TRANSLATION_SEND_TIME` | no | `18:00` | A new learner's translation task time (/translation) |
 | `PRACTICE_GAP_MINUTES` | no | `60` | Minimum gap between the quiz and the translation task |
 | `PRACTICE_CUTOFF_TIME` | no | `22:00` | No practice is sent after this local time |
 | `GRADER_MODEL` | no | `claude-haiku-5-5` | Model that grades the learner's translation |
@@ -199,14 +199,45 @@ uv run python -m english_agent.pipeline --topic there_is_are
 ```
 
 Add `--no-send` to only print the lesson without sending it. Without `--topic`
-the pipeline sends the topic of the day (counted from `CURRICULUM_START_DATE`;
-`--date YYYY-MM-DD` checks another day). After the last topic it announces
-"курс завершён" once and exits with 0; a failed lesson is reported to the chat.
+the pipeline sends the learner's next topic: the first topic of their level, by
+order, they have not had yet, so a failed day, a pause or a missed day never loses
+a topic. The learner is `TELEGRAM_CHAT_ID` unless `--chat` names another one.
+`--no-send` without `--topic` previews the topic of a course day instead, counted
+from `CURRICULUM_START_DATE` (`--date YYYY-MM-DD` picks the day). After the last
+topic the learner hears "курс завершён" once and stops getting lessons until they
+pick another level; a failed lesson is reported to the chat without error details
+(those go to the log).
 
 Sending needs PostgreSQL (`DATABASE_URL`): every sent lesson is recorded in the
 `lessons` table, one per learner per day, and a run for a day whose lesson is
-already sent does nothing. A failed run is recorded too and is retried by the next
-run that day. `--no-send` never touches the database; `--no-store` sends without it.
+already sent does nothing. `--no-send` never touches the database; `--no-store`
+sends without it.
+
+### Learners and their schedule
+
+Anyone who sends the bot /start becomes a learner and starts the course. Each
+learner keeps their own schedule; `LESSON_SEND_TIME`, `TRANSLATION_SEND_TIME`,
+`QUIZ_DELAY_MINUTES` and `TIMEZONE` are only what a new learner starts with:
+
+| Command | What it does |
+| --- | --- |
+| `/start` | Register and start the course (again, after blocking the bot) |
+| `/level`, `/mylevel` | Pick or show the CEFR level; progress is kept per level |
+| `/time 09:00` | When the daily lesson comes, in the learner's time zone |
+| `/translation 18:00` | When the translation task comes (at least `PRACTICE_GAP_MINUTES` after the quiz) |
+| `/timezone Europe/Moscow` | The learner's IANA time zone |
+| `/pause`, `/resume` | Stop and resume lessons and practice |
+| `/status` | The current settings |
+
+A lesson is due from the learner's send time for `LESSON_CATCH_UP_HOURS`
+(a restart or a deploy inside that window still sends it); a failed day is not
+retried that day, and its topic comes the next day. A learner who blocks the
+bot is deactivated until they send /start again. To give an existing learner a
+schedule other than the defaults, e.g. the values of an older `.env`:
+
+```bash
+uv run python -m english_agent.storage set-schedule --chat 42 --lesson-time 08:30 --timezone Asia/Vladivostok
+```
 
 ### Running on the server
 
@@ -216,11 +247,10 @@ Everything runs on the server (`ssh vpn`) as one docker compose stack, see
 - `postgres` — PostgreSQL 17, data in the `pgdata` volume, published on `127.0.0.1:5432` only;
 - `migrate` — runs `alembic upgrade head` once, before the app starts;
 - `app` — `python -m english_agent.app`: one long-running process that answers
-  /level and /mylevel, quiz answers and translation answers (long polling) and
-  sends the daily lesson at `LESSON_SEND_TIME` in `TIMEZONE`. Started after that
-  time (a restart, a deploy), it sends today's lesson right away unless it is
-  already sent. Every 5 minutes it sends the practice that is due; that state is
-  in the database, so a restart neither loses nor repeats it;
+  the bot's commands, quiz answers and translation answers (long polling), checks
+  every minute whose lesson is due on their own schedule and every 5 minutes whose
+  practice is due; that state is in the database, so a restart neither loses nor
+  repeats it;
 - `jaeger` — traces from `app`.
 
 ```bash

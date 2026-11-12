@@ -8,6 +8,7 @@ from pydantic import Field, SecretStr, field_validator  # SecretStr прячет
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from english_agent.models.cefr import Cefr
+from english_agent.models.schedule import LearnerSchedule
 
 
 class Settings(BaseSettings):
@@ -30,8 +31,8 @@ class Settings(BaseSettings):
     research_max_fetches_per_site: int = 2
     research_page_char_limit: int = 40_000  # grammar articles on these sites run 15-35k chars
 
-    # Telegram delivery. Token from @BotFather; chat id of the user the bot should write to
-    # (`uv run python -m english_agent.telegram chats` lists the chats that have messaged the bot).
+    # Telegram delivery. Token from @BotFather. Learners register themselves with /start;
+    # TELEGRAM_CHAT_ID is only the chat command-line runs act on (`pipeline`, `telegram ping`, ...).
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
     telegram_chat_id: str = ""
     telegram_api_base: str = "https://api.telegram.org"  # a fake Bot API in load tests
@@ -43,7 +44,7 @@ class Settings(BaseSettings):
     telegram_chat_rate_per_second: float = Field(default=1.0, gt=0)
     admin_chat_id: str = ""  # where operational alerts go; empty = alerts are only logged
 
-    # Day the course starts: topic N (by `order`) is sent on start + N - 1 days.
+    # Command-line previews only (`pipeline --no-send --date`): course day 1 for picking a topic by date.
     curriculum_start_date: date | None = None
 
     # Learner's CEFR level: picks which curriculum/<level>_topics.yaml is taught.
@@ -61,7 +62,7 @@ class Settings(BaseSettings):
     # e.g. redis://localhost:6379/0. Holds no state that is not also in PostgreSQL.
     redis_url: SecretStr = Field(default=SecretStr(""))
 
-    # When the long-running app (`python -m english_agent.app`) sends the daily lesson.
+    # Defaults for a new learner, who then keeps their own (/time, /timezone).
     lesson_send_time: time = time(9, 0)
     timezone: str = "Europe/Moscow"
     # A lesson not sent within this many hours after its send time is not sent that day.
@@ -69,8 +70,9 @@ class Settings(BaseSettings):
 
     # Practice after the lesson: the quiz QUIZ_DELAY_MINUTES after the lesson, the translation
     # task at TRANSLATION_SEND_TIME but at least PRACTICE_GAP_MINUTES after the quiz; nothing
-    # is sent after PRACTICE_CUTOFF_TIME (local time).
-    quiz_delay_minutes: int = Field(default=60, ge=0)
+    # is sent after PRACTICE_CUTOFF_TIME (local time). QUIZ_DELAY_MINUTES and
+    # TRANSLATION_SEND_TIME are defaults for new learners; the gap and the cutoff apply to everyone.
+    quiz_delay_minutes: int = Field(default=60, ge=0, le=12 * 60)
     translation_send_time: time = time(18, 0)
     practice_gap_minutes: int = Field(default=60, ge=0)
     practice_cutoff_time: time = time(22, 0)
@@ -120,6 +122,15 @@ class Settings(BaseSettings):
 
     def telegram_configured(self) -> bool:
         return bool(self.telegram_bot_token.get_secret_value()) and bool(self.telegram_chat_id)
+
+    def default_schedule(self) -> LearnerSchedule:
+        """The schedule a new learner starts with."""
+        return LearnerSchedule(
+            timezone=self.timezone,
+            lesson_send_time=self.lesson_send_time,
+            translation_send_time=self.translation_send_time,
+            quiz_delay_minutes=self.quiz_delay_minutes,
+        )
 
 
 @lru_cache(maxsize=2)  # кэширует (запоминает) результаты вызова функции
