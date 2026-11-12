@@ -8,7 +8,7 @@ again keeps the original, so cards and errors never lose their anchor.
 
 from __future__ import annotations
 
-import sys
+import logging
 from dataclasses import dataclass
 
 from opentelemetry import trace
@@ -19,6 +19,8 @@ from english_agent.models.storage import ItemDraft, ItemRecord, core_item_key
 from english_agent.storage.repositories import ItemStore, Stores
 
 __all__ = ["backfill_core_items", "core_item_from_lesson", "core_item_key", "record_core_item"]
+
+log = logging.getLogger(__name__)
 
 
 def core_item_from_lesson(lesson: Lesson) -> ItemDraft:
@@ -45,7 +47,7 @@ def record_core_item(items: ItemStore, lesson: Lesson, lesson_id: int) -> ItemRe
         item, created = items.get_or_create(core_item_from_lesson(lesson), source_lesson_id=lesson_id)
     except SQLAlchemyError as error:
         span.record_exception(error)
-        print(f"could not record the item for {lesson.topic_id}: {error}", file=sys.stderr)
+        log.warning("could not record the item for %s: %s", lesson.topic_id, error)
         return None
     span.set_attribute("item.key", item.key)
     span.set_attribute("item.created", created)

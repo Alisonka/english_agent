@@ -8,8 +8,8 @@ stays claimed and is not retried (a duplicate quiz is worse than a missing one).
 
 from __future__ import annotations
 
+import logging
 import random
-import sys
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -27,6 +27,8 @@ from english_agent.telegram.render import render_quiz_intro, render_translation_
 from english_agent.tracing import get_tracer
 
 TRANSLATION_PLACEHOLDER = "1. … 2. … 3. …"
+
+log = logging.getLogger(__name__)
 
 
 def due_practice(
@@ -149,7 +151,7 @@ def run_practice_tick(settings: Settings, stores: Stores) -> None:
             client = TelegramClient(http, settings.telegram_bot_token.get_secret_value())
             kind = deliver_due_practice(client, settings, stores, datetime.now(UTC))
     except (TelegramError, SQLAlchemyError) as error:
-        print(f"practice tick failed: {error}", file=sys.stderr)
+        log.warning("practice tick failed: %s", error)
         return
     if kind is not None:
-        print(f"practice sent: {kind}", file=sys.stderr)
+        log.info("practice sent: %s", kind)

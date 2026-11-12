@@ -9,6 +9,7 @@ uv run python -m english_agent.storage backfill-reviews                       # 
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -17,10 +18,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent.config import get_settings
 from english_agent.items import backfill_core_items
+from english_agent.logs import configure_logging
 from english_agent.models.cefr import Cefr
 from english_agent.srs import make_scheduler
 from english_agent.storage.db import make_engine, make_session_factory
 from english_agent.storage.repositories import MaintenanceRepo, open_stores
+
+log = logging.getLogger(__name__)
 
 
 class _LegacyLearnerState(BaseModel):
@@ -32,18 +36,18 @@ class _LegacyLearnerState(BaseModel):
 def _import_learner_json(path: str) -> int:
     settings = get_settings()
     if not settings.telegram_chat_id:
-        print("TELEGRAM_CHAT_ID must be set: the learner is stored under that chat", file=sys.stderr)
+        log.error("TELEGRAM_CHAT_ID must be set: the learner is stored under that chat")
         return 2
     stores = open_stores(settings)
     if stores is None:
-        print("DATABASE_URL must be set", file=sys.stderr)
+        log.error("DATABASE_URL must be set")
         return 2
 
     try:
         text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
         state = _LegacyLearnerState.model_validate_json(text)
     except (OSError, ValidationError) as error:
-        print(f"cannot read learner state from {path}: {error}", file=sys.stderr)
+        log.error("cannot read learner state from %s: %s", path, error)
         return 1
 
     record = stores.learners.set_cefr(settings.telegram_chat_id, state.cefr)
@@ -54,12 +58,12 @@ def _import_learner_json(path: str) -> int:
 def _backfill_items() -> int:
     stores = open_stores(get_settings())
     if stores is None:
-        print("DATABASE_URL must be set", file=sys.stderr)
+        log.error("DATABASE_URL must be set")
         return 2
     try:
         result = backfill_core_items(stores)
     except SQLAlchemyError as error:
-        print(f"backfill failed: {error}", file=sys.stderr)
+        log.error("backfill failed: %s", error)
         return 1
     print(f"items: {result.created} created, {result.existing} already present, {result.skipped} lessons skipped")
     return 0
@@ -69,14 +73,14 @@ def _backfill_reviews() -> int:
     """Run after `backfill-items`: links old polls to items, then rates every stored answer once."""
     settings = get_settings()
     if not settings.database_url.get_secret_value():
-        print("DATABASE_URL must be set", file=sys.stderr)
+        log.error("DATABASE_URL must be set")
         return 2
     maintenance = MaintenanceRepo(make_session_factory(make_engine(settings)), make_scheduler(settings))
     try:
         linked = maintenance.link_polls_to_items()
         applied = maintenance.replay_reviews()
     except SQLAlchemyError as error:
-        print(f"backfill failed: {error}", file=sys.stderr)
+        log.error("backfill failed: %s", error)
         return 1
     print(f"reviews: {linked} polls linked to items, {applied} ratings applied")
     return 0
@@ -92,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("backfill-items", help="create the core item of every sent lesson that has none")
     commands.add_parser("backfill-reviews", help="rate stored quiz and translation answers that have no review yet")
     args = parser.parse_args(argv)
+    configure_logging(get_settings())
 
     if args.command == "import-learner-json":
         return _import_learner_json(args.path)

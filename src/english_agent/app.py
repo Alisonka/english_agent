@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import signal
-import sys
 from datetime import datetime
 from types import FrameType
 from typing import Any
@@ -28,6 +27,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import text
 
 from english_agent.config import Settings, get_settings
+from english_agent.logs import configure_logging
 from english_agent.pipeline import local_today, run_daily
 from english_agent.practice import run_practice_tick
 from english_agent.srs import make_scheduler
@@ -41,11 +41,13 @@ PRACTICE_JOB_ID = "practice"
 _MISFIRE_GRACE_SECONDS = 6 * 3600
 _PRACTICE_TICK_MINUTES = 5
 
+log = logging.getLogger(__name__)
+
 
 def run_scheduled_lesson(settings: Settings, stores: Stores) -> None:
     today = local_today(settings)
     code = run_daily(settings, stores, today)
-    print(f"daily lesson for {today.isoformat()}: exit code {code}", file=sys.stderr)
+    log.info("daily lesson for %s: exit code %s", today.isoformat(), code)
 
 
 def schedule_daily_lesson(scheduler: BaseScheduler, settings: Settings, stores: Stores, now: datetime) -> Job:
@@ -86,13 +88,13 @@ def _interrupt(signum: int, frame: FrameType | None) -> None:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = get_settings()
+    configure_logging(settings)
     if not settings.telegram_configured():
-        print("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set", file=sys.stderr)
+        log.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set")
         return 2
     if not settings.database_url.get_secret_value():
-        print("DATABASE_URL must be set", file=sys.stderr)
+        log.error("DATABASE_URL must be set")
         return 2
 
     # Docker stops the container with SIGTERM; turn it into the same path as Ctrl+C.
@@ -109,7 +111,7 @@ def main() -> int:
         job = schedule_daily_lesson(scheduler, settings, stores, datetime.now(timezone))
         schedule_practice(scheduler, settings, stores)
         scheduler.start()
-        print(f"daily lesson scheduled, next run {job.next_run_time}", file=sys.stderr)
+        log.info("daily lesson scheduled, next run %s", job.next_run_time)
         try:
             return serve_leveling(settings, stores)
         finally:

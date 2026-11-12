@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import html
-import sys
+import logging
 from datetime import date, datetime
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -23,6 +23,7 @@ from opentelemetry.trace import Span, Status, StatusCode
 from english_agent.config import Settings, get_settings
 from english_agent.items import record_core_item
 from english_agent.llm import AnthropicLLM
+from english_agent.logs import configure_logging
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
 from english_agent.models.lesson import Lesson
@@ -37,6 +38,8 @@ from english_agent.tracing import configure_tracing, get_tracer
 from english_agent.writer import write_lesson
 
 COURSE_FINISHED = "Курс завершён: все темы пройдены."
+
+log = logging.getLogger(__name__)
 
 
 def _http_client(settings: Settings) -> httpx.Client:
@@ -112,7 +115,7 @@ def notify(settings: Settings, text: str) -> None:
             client = TelegramClient(http, settings.telegram_bot_token.get_secret_value())
             client.send_message(settings.telegram_chat_id, html.escape(text, quote=False))
     except TelegramError as error:
-        print(f"telegram error: {error}", file=sys.stderr)
+        log.warning("telegram error: %s", error)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -133,12 +136,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     settings = get_settings()
+    configure_logging(settings)
     send = not args.no_send
     stores: Stores | None = None
     if send and not args.no_store:
         stores = open_stores(settings)
         if stores is None:
-            print("DATABASE_URL must be set (or pass --no-store)", file=sys.stderr)
+            log.error("DATABASE_URL must be set (or pass --no-store)")
             return 2
 
     # Tracing is a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set; shutdown() flushes
@@ -191,12 +195,12 @@ def _run(
     if topic_id:
         topic = next((item for item in curriculum.topics if item.id == topic_id), None)
         if topic is None:
-            print(f"unknown topic {topic_id!r}", file=sys.stderr)
+            log.error("unknown topic %r", topic_id)
             return 2
     else:
         start = settings.curriculum_start_date
         if start is None:
-            print("CURRICULUM_START_DATE must be set (or pass --topic)", file=sys.stderr)
+            log.error("CURRICULUM_START_DATE must be set (or pass --topic)")
             return 2
         day = (today - start).days
         if day < 0:
@@ -214,13 +218,13 @@ def _run(
 
     # Fail before spending LLM calls on a lesson we could not deliver.
     if send and not settings.telegram_configured():
-        print("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set (or pass --no-send)", file=sys.stderr)
+        log.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set (or pass --no-send)")
         return 2
 
     if stores is not None:
         learner = learner or stores.learners.get_or_create(settings.telegram_chat_id, settings.learner_cefr)
         if stores.lessons.sent_on(learner.id, today):
-            print(f"lesson for {today.isoformat()} is already sent", file=sys.stderr)
+            log.info("lesson for %s is already sent", today.isoformat())
             return 0
 
     def record_failed(reason: str) -> None:
@@ -236,7 +240,7 @@ def _run(
     except Exception as error:  # unattended run: every failure has to reach the chat, not just the log
         reason = f"{type(error).__name__}: {error}"
     if lesson is None:
-        print(f"lesson for {topic.id} failed: {reason}", file=sys.stderr)
+        log.error("lesson for %s failed: %s", topic.id, reason)
         span.set_status(Status(StatusCode.ERROR, reason))
         record_failed(reason)
         if send:
@@ -249,11 +253,11 @@ def _run(
     try:
         message_ids = deliver_lesson(lesson, settings)
     except TelegramError as error:
-        print(f"telegram error: {error}", file=sys.stderr)
+        log.error("telegram error: %s", error)
         span.set_status(Status(StatusCode.ERROR, str(error)))
         record_failed(f"telegram: {error}")
         return 1
-    print(f"sent {len(message_ids)} message(s) to Telegram chat {settings.telegram_chat_id}", file=sys.stderr)
+    log.info("sent %d message(s) to Telegram chat %s", len(message_ids), settings.telegram_chat_id)
     if stores is not None and learner is not None:
         record = stores.lessons.record_sent(
             learner.id, today, lesson, message_ids, curriculum_version=curriculum.version

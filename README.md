@@ -166,6 +166,25 @@ Configuration is read from environment variables or a local `.env` file (see
 | `RESEARCH_PAGE_CHAR_LIMIT` | no | `40000` | Max chars read per page |
 | `SITEMAP_TTL_DAYS` | no | `7` | Days a cached sitemap stays fresh |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | – | OTLP/HTTP endpoint for traces (e.g. `http://localhost:4318`); unset disables tracing |
+| `HTTP_TIMEOUT_SECONDS` | no | `20` | Timeout of research and Telegram HTTP requests |
+| `HTTP_USER_AGENT` | no | `english-agent/0.1` | User-Agent of research page fetches |
+| `CACHE_DIR` | no | `.cache` | Where sitemaps are cached on disk |
+| `LLM_TIMEOUT_SECONDS` | no | `120` | Timeout of one Claude API request |
+| `LLM_MAX_RETRIES` | no | `4` | Retries of a Claude API request on 429, 5xx and overloaded, with backoff |
+| `LLM_MAX_CONCURRENCY` | no | `3` | Claude API requests one process keeps in flight |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | no | `5` / `5` | PostgreSQL connections per process, kept open / extra under load |
+| `REDIS_URL` | for the worker | – | Redis for the job queue, de-duplication and rate limits, e.g. `redis://localhost:6379/0` |
+| `TELEGRAM_GLOBAL_RATE_PER_SECOND` | no | `25` | Outgoing Telegram messages per second, all chats together |
+| `TELEGRAM_CHAT_RATE_PER_SECOND` | no | `1` | Outgoing Telegram messages per second to one chat |
+| `TELEGRAM_API_BASE` | no | `https://api.telegram.org` | Bot API server (a fake one in load tests) |
+| `TELEGRAM_WEBHOOK_URL` / `TELEGRAM_WEBHOOK_SECRET` | no | – | Receive updates by webhook instead of long polling |
+| `ADMIN_CHAT_ID` | no | – | Chat that receives operational alerts |
+| `LESSON_CATCH_UP_HOURS` | no | `6` | A lesson not sent this long after its send time is not sent that day |
+| `JOB_MAX_ATTEMPTS` | no | `5` | Attempts of a failing background job |
+| `LESSON_CLAIM_STALE_MINUTES` | no | `10` | A lesson claimed this long ago by a dead worker is taken over |
+| `CONTENT_GENERATION_STALE_MINUTES` | no | `20` | A lesson being written this long ago by a dead worker is taken over |
+| `LOG_FORMAT` | no | `text` | `json` for one JSON object per line (the server) |
+| `LOG_LEVEL` | no | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 
 See [.env.example](.env.example) for the full template.
 

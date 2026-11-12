@@ -34,13 +34,13 @@ def test_record_core_item_creates_the_item_once(lesson: Lesson) -> None:
 
 
 def test_record_core_item_logs_a_storage_failure_instead_of_raising(
-    lesson: Lesson, capsys: pytest.CaptureFixture[str]
+    lesson: Lesson, caplog: pytest.LogCaptureFixture
 ) -> None:
     stores, _, _ = fake_stores()
     fake_items(stores).failure = SQLAlchemyError("connection refused")
 
     assert record_core_item(stores.items, lesson, lesson_id=1) is None
-    assert "there_is_are" in capsys.readouterr().err
+    assert "there_is_are" in caplog.text
 
 
 def test_backfill_creates_missing_core_items_and_is_idempotent(lesson: Lesson) -> None:

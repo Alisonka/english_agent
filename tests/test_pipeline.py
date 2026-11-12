@@ -72,13 +72,13 @@ def test_deliver_lesson_requires_configuration(lesson: Lesson) -> None:
         pipeline.deliver_lesson(lesson, make_settings(telegram_bot_token="123:TOKEN"))
 
 
-def test_main_unknown_topic(capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_unknown_topic(caplog: pytest.LogCaptureFixture) -> None:
     assert pipeline.main(["--topic", "no_such_topic"]) == 2
-    assert "unknown topic" in capsys.readouterr().err
+    assert "unknown topic" in caplog.text
 
 
 def test_main_refuses_to_run_unconfigured_before_calling_llm(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(pipeline, "get_settings", make_settings)
 
@@ -87,7 +87,7 @@ def test_main_refuses_to_run_unconfigured_before_calling_llm(
 
     monkeypatch.setattr(pipeline, "generate_lesson", must_not_run)
     assert pipeline.main(["--topic", "there_is_are"]) == 2
-    assert "--no-send" in capsys.readouterr().err
+    assert "--no-send" in caplog.text
 
 
 def test_main_no_send_prints_lesson_without_telegram(
@@ -110,6 +110,7 @@ def test_main_sends_lesson_and_reports(
     telegram_settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
     fake_telegram: None,
     sent: list[dict[str, Any]],
 ) -> None:
@@ -119,7 +120,7 @@ def test_main_sends_lesson_and_reports(
     assert pipeline.main(["--topic", "there_is_are"]) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out)["topic_id"] == "there_is_are"
-    assert "sent 1 message(s) to Telegram chat 42" in captured.err
+    assert "sent 1 message(s) to Telegram chat 42" in caplog.text
     assert len(sent) == 1
 
 
@@ -127,7 +128,7 @@ def test_main_reports_telegram_failure(
     lesson: Lesson,
     telegram_settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"ok": False, "description": "Forbidden: bot was blocked by the user"})
@@ -137,16 +138,16 @@ def test_main_reports_telegram_failure(
     monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (research_result(lesson.topic_id), lesson))
 
     assert pipeline.main(["--topic", "there_is_are"]) == 1
-    assert "bot was blocked" in capsys.readouterr().err
+    assert "bot was blocked" in caplog.text
 
 
-def test_main_when_research_finds_nothing(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_when_research_finds_nothing(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     monkeypatch.setattr(pipeline, "get_settings", make_settings)
     result = research_result("there_is_are", status="not_found", message="нет на сайте")
     monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (result, None))
 
     assert pipeline.main(["--topic", "there_is_are", "--no-send"]) == 1
-    assert "нет на сайте" in capsys.readouterr().err
+    assert "нет на сайте" in caplog.text
 
 
 def test_main_notifies_chat_when_research_finds_nothing(
@@ -164,7 +165,7 @@ def test_main_notifies_chat_when_research_finds_nothing(
 def test_main_notifies_chat_when_generation_raises(
     telegram_settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
     fake_telegram: None,
     sent: list[dict[str, Any]],
 ) -> None:
@@ -175,12 +176,12 @@ def test_main_notifies_chat_when_generation_raises(
     monkeypatch.setattr(pipeline, "generate_lesson", boom)
 
     assert pipeline.main(["--topic", "there_is_are"]) == 1
-    assert "RuntimeError: API <down> & out" in capsys.readouterr().err
+    assert "RuntimeError: API <down> & out" in caplog.text
     assert "RuntimeError: API &lt;down&gt; &amp; out" in sent[0]["text"]
 
 
 def test_main_failure_notice_that_cannot_be_delivered_is_logged(
-    telegram_settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    telegram_settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"ok": False, "description": "Forbidden: bot was blocked by the user"})
@@ -190,7 +191,7 @@ def test_main_failure_notice_that_cannot_be_delivered_is_logged(
     monkeypatch.setattr(pipeline, "generate_lesson", lambda *a, **k: (research_result("there_is_are"), None))
 
     assert pipeline.main(["--topic", "there_is_are"]) == 1
-    err = capsys.readouterr().err
+    err = caplog.text
     assert "lesson for there_is_are failed" in err
     assert "bot was blocked" in err
 
@@ -259,11 +260,11 @@ def test_main_explicit_topic_overrides_schedule(monkeypatch: pytest.MonkeyPatch,
 
 
 def test_main_requires_start_date_without_topic(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], generated: list[str]
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, generated: list[str]
 ) -> None:
     scheduled(monkeypatch, curriculum_start_date=None)
     assert pipeline.main(["--no-send"]) == 2
-    assert "CURRICULUM_START_DATE" in capsys.readouterr().err
+    assert "CURRICULUM_START_DATE" in caplog.text
     assert generated == []
 
 
@@ -347,7 +348,7 @@ def test_run_daily_sends_and_records_once_per_day(
 
 
 def test_run_daily_item_failure_does_not_fail_a_sent_lesson(
-    lesson: Lesson, generated: list[str], fake_telegram: None, capsys: pytest.CaptureFixture[str]
+    lesson: Lesson, generated: list[str], fake_telegram: None, caplog: pytest.LogCaptureFixture
 ) -> None:
     stores, learners, lessons = fake_stores()
     fake_items(stores).failure = SQLAlchemyError("connection refused")
@@ -356,7 +357,7 @@ def test_run_daily_item_failure_does_not_fail_a_sent_lesson(
     learner = learners.get("42")
     assert learner is not None
     assert lessons.rows[(learner.id, START)].status == "sent"
-    assert "could not record the item" in capsys.readouterr().err
+    assert "could not record the item" in caplog.text
 
 
 def test_run_daily_retries_a_failed_day(
@@ -420,9 +421,9 @@ def test_main_no_send_does_not_open_the_database(lesson: Lesson, monkeypatch: py
     assert pipeline.main(["--topic", "there_is_are", "--no-send"]) == 0
 
 
-def test_main_send_requires_database_url(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_send_requires_database_url(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     settings = make_settings(telegram_bot_token="123:TOKEN", telegram_chat_id="42", database_url="")
     monkeypatch.setattr(pipeline, "open_stores", open_stores)
     monkeypatch.setattr(pipeline, "get_settings", lambda: settings)
     assert pipeline.main(["--topic", "there_is_are"]) == 2
-    assert "DATABASE_URL" in capsys.readouterr().err
+    assert "DATABASE_URL" in caplog.text

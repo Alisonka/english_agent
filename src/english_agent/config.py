@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     # (`uv run python -m english_agent.telegram chats` lists the chats that have messaged the bot).
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
     telegram_chat_id: str = ""
+    telegram_api_base: str = "https://api.telegram.org"  # a fake Bot API in load tests
+    # Webhook mode (off when empty): the public HTTPS URL Telegram posts updates to.
+    telegram_webhook_url: str = ""
+    telegram_webhook_secret: SecretStr = Field(default=SecretStr(""))
+    # Outgoing rate limits, below Telegram's ~30 msg/s per bot and 1 msg/s per chat.
+    telegram_global_rate_per_second: float = Field(default=25.0, gt=0)
+    telegram_chat_rate_per_second: float = Field(default=1.0, gt=0)
+    admin_chat_id: str = ""  # where operational alerts go; empty = alerts are only logged
 
     # Day the course starts: topic N (by `order`) is sent on start + N - 1 days.
     curriculum_start_date: date | None = None
@@ -45,10 +53,19 @@ class Settings(BaseSettings):
 
     # PostgreSQL, e.g. postgresql+psycopg://english_agent:<pw>@localhost:5432/english_agent.
     database_url: SecretStr = Field(default=SecretStr(""))
+    # Connections per process (bot, worker): pool_size kept open, max_overflow more under load.
+    db_pool_size: int = Field(default=5, ge=1)
+    db_max_overflow: int = Field(default=5, ge=0)
+
+    # Redis: the job queue, de-duplication keys, the shared Telegram rate limit, the sitemap cache.
+    # e.g. redis://localhost:6379/0. Holds no state that is not also in PostgreSQL.
+    redis_url: SecretStr = Field(default=SecretStr(""))
 
     # When the long-running app (`python -m english_agent.app`) sends the daily lesson.
     lesson_send_time: time = time(9, 0)
     timezone: str = "Europe/Moscow"
+    # A lesson not sent within this many hours after its send time is not sent that day.
+    lesson_catch_up_hours: int = Field(default=6, ge=1, le=23)
 
     # Practice after the lesson: the quiz QUIZ_DELAY_MINUTES after the lesson, the translation
     # task at TRANSLATION_SEND_TIME but at least PRACTICE_GAP_MINUTES after the quiz; nothing
@@ -65,6 +82,21 @@ class Settings(BaseSettings):
     # Grades the learner's translation; effort is the Claude API `output_config.effort`.
     grader_model: str = "claude-haiku-5-5"
     grader_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+
+    # Claude API client: per-request timeout, SDK retries (429/5xx/overloaded, with backoff), and
+    # how many requests one process keeps in flight (the account's rate limit is shared by all).
+    llm_timeout_seconds: float = Field(default=120.0, gt=0)
+    llm_max_retries: int = Field(default=4, ge=0)
+    llm_max_concurrency: int = Field(default=3, ge=1)
+
+    # Background jobs: how often a failing job is retried, and when a claimed piece of work
+    # (a lesson being sent, a lesson being written) is considered abandoned by a dead worker.
+    job_max_attempts: int = Field(default=5, ge=1)
+    lesson_claim_stale_minutes: int = Field(default=10, ge=1)
+    content_generation_stale_minutes: int = Field(default=20, ge=1)
+
+    log_format: Literal["text", "json"] = "text"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     # OpenTelemetry: OTLP/HTTP base endpoint (e.g. http://localhost:4318 for local
     # Jaeger). Empty = tracing disabled; spans become no-ops. Uses the standard

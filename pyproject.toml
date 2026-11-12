@@ -19,6 +19,11 @@ dependencies = [
     "alembic>=1.14",
     "apscheduler>=3.11,<4",
     "fsrs>=6.3.2",
+    "aiogram>=3.22",
+    "taskiq>=0.11",
+    "taskiq-redis>=1.1",
+    "redis>=5.2",
+    "python-json-logger>=3.2",
 ]
 
 [dependency-groups]
@@ -28,6 +33,8 @@ dev = [
     "mypy>=1.14",
     "types-PyYAML>=6.0",
     "pre-commit>=4.0",
+    "pytest-asyncio>=1.1",
+    "fakeredis>=2.26",
 ]
 
 [build-system]
@@ -38,6 +45,11 @@ build-backend = "hatchling.build"
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
+# Async tests and fixtures share one session-wide event loop, so a session-scoped async engine
+# is never bound to a loop that a previous test already closed.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 
 [tool.ruff]
 target-version = "py312"

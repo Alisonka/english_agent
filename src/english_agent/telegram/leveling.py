@@ -13,7 +13,7 @@ must stay the only `getUpdates` consumer of the bot.
 
 from __future__ import annotations
 
-import sys
+import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -51,6 +51,8 @@ _GRADE_FAILED = "Не получилось проверить перевод. П
 _DISPUTE_PREFIX = "dispute:"
 _DISPUTED = "Спасибо, оценка отмечена как спорная."
 
+log = logging.getLogger(__name__)
+
 Grader = Callable[[Lesson, str], TranslationGrade]
 Background = Callable[[Callable[[], None]], object]
 
@@ -76,7 +78,7 @@ def _refresh_profile(practice: PracticeHandlers, learner_id: int) -> None:
     try:
         refresh_profile(practice.profiles, learner_id, datetime.now(UTC))
     except SQLAlchemyError as error:
-        print(f"profile refresh failed for learner {learner_id}: {error}", file=sys.stderr)
+        log.warning("profile refresh failed for learner %s: %s", learner_id, error)
 
 
 # Shown in Telegram's `/` command menu (registered via setMyCommands on startup).
@@ -109,14 +111,14 @@ def _grade_answer(
         try:
             grade = practice.grade(lesson, text)
         except Exception as error:  # the learner must hear back whatever went wrong
-            print(f"grading failed: {type(error).__name__}: {error}", file=sys.stderr)
+            log.exception("grading failed: %s: %s", type(error).__name__, error)
             practice.store.fail_translation_answer(answer_id, f"{type(error).__name__}: {error}")
             client.edit_message_text(chat_id, message_id, _GRADE_FAILED)
             return
         graded = practice.store.finish_translation_answer(answer_id, grade)
         client.edit_message_text(chat_id, message_id, render_grade(grade), reply_markup=_dispute_keyboard(answer_id))
     except (TelegramError, SQLAlchemyError) as error:
-        print(f"could not deliver the grade: {error}", file=sys.stderr)
+        log.warning("could not deliver the grade: %s", error)
         return
     _refresh_profile(practice, graded.learner_id)
 
@@ -277,7 +279,7 @@ def serve_leveling(settings: Settings, stores: Stores) -> int:
     """Long-poll the bot until Ctrl+C / SIGTERM (raised as KeyboardInterrupt); returns an exit code."""
     token = settings.telegram_bot_token.get_secret_value()
     if not token:
-        print("TELEGRAM_BOT_TOKEN is not set", file=sys.stderr)
+        log.error("TELEGRAM_BOT_TOKEN is not set")
         return 2
 
     available = available_cefr_levels()
@@ -291,11 +293,8 @@ def serve_leveling(settings: Settings, stores: Stores) -> int:
         try:
             client.set_my_commands(_COMMANDS)  # make /level and /mylevel show in the bot's menu
         except TelegramError as error:
-            print(f"could not register commands: {error}", file=sys.stderr)
-        print(
-            f"Listening for /level — available levels: {', '.join(available)}. Press Ctrl+C to stop.",
-            file=sys.stderr,
-        )
+            log.warning("could not register commands: %s", error)
+        log.info("listening for updates; available levels: %s", ", ".join(available))
         try:
             while True:
                 try:
@@ -310,13 +309,13 @@ def serve_leveling(settings: Settings, stores: Stores) -> int:
                     )
                 except (TelegramError, SQLAlchemyError) as error:
                     # A long-running process must outlive network blips and database restarts.
-                    print(f"polling error, retrying in {_RETRY_SECONDS}s: {error}", file=sys.stderr)
+                    log.warning("polling error, retrying in %ss: %s", _RETRY_SECONDS, error)
                     time.sleep(_RETRY_SECONDS)
                     continue
                 if next_offset is not None:
                     offset = next_offset
         except KeyboardInterrupt:
-            print("stopped", file=sys.stderr)
+            log.info("stopped")
             return 0
 
 
@@ -324,6 +323,6 @@ def run_leveling(settings: Settings) -> int:
     """Only the /level bot, without the daily scheduler (local debugging)."""
     stores = open_stores(settings)
     if stores is None:
-        print("DATABASE_URL is not set", file=sys.stderr)
+        log.error("DATABASE_URL is not set")
         return 2
     return serve_leveling(settings, stores)

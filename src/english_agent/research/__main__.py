@@ -6,16 +6,19 @@ uv run python -m english_agent.research --topic present_perfect_vs_past_simple
 from __future__ import annotations
 
 import argparse
-import sys
+import logging
 
 import httpx
 
 from english_agent.config import get_settings
 from english_agent.llm import AnthropicLLM
+from english_agent.logs import configure_logging
 from english_agent.models.curriculum import load_curriculum
 from english_agent.research.agent import ResearchAgent
 from english_agent.research.sitemaps import SitemapIndex
 from english_agent.research.tools import LiveResearchTools
+
+log = logging.getLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,10 +28,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     settings = get_settings()
+    configure_logging(settings)
     curriculum = load_curriculum()
     topic = next((item for item in curriculum.topics if item.id == args.topic), None)
     if topic is None:
-        print(f"unknown topic {args.topic!r}", file=sys.stderr)
+        log.error("unknown topic %r", args.topic)
         return 2
 
     with httpx.Client(
