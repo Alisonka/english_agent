@@ -62,3 +62,18 @@ async def test_backfill_creates_missing_core_items_and_is_idempotent(lesson: Les
     items = fake_items(stores)
     assert sorted(items.by_key) == ["have_got:core", "there_is_are:core"]
     assert items.by_key["there_is_are:core"].source_lesson_id == 1  # the first lesson stays the source
+
+
+async def test_backfill_creates_step_items_for_step_rows(lesson: Lesson) -> None:
+    from conftest import topic_content_payload
+    from english_agent.models.topic import TopicContent
+
+    stores, learners, lessons = fake_stores()
+    learner = await learners.get_or_create("42", "A2")
+    content = TopicContent.model_validate(topic_content_payload())
+    await lessons.record_sent(learner.id, DAY, content.step(1), [1], curriculum_version=1)
+    await lessons.record_sent(learner.id, DAY + timedelta(days=1), content.step(2), [2], curriculum_version=1)
+
+    result = await backfill_core_items(stores)
+    assert result.created == 2
+    assert sorted(fake_items(stores).by_key) == ["there_is_are:plural", "there_is_are:singular"]

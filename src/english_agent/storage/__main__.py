@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         "import-learner-json", help="copy the level from the old .state/learner.json into the learners table"
     )
     learner_json.add_argument("path", nargs="?", default=".state/learner.json", help="state file, or - for stdin")
-    commands.add_parser("backfill-items", help="create the core item of every sent lesson that has none")
+    commands.add_parser("backfill-items", help="create the item of every sent day (step or core) that has none")
     commands.add_parser("backfill-reviews", help="rate stored quiz and translation answers that have no review yet")
     schedule = commands.add_parser(
         "set-schedule", help="set a learner's schedule; options left out take the values from the settings"
