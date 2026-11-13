@@ -16,9 +16,16 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent.models.lesson import Lesson
 from english_agent.models.storage import ItemDraft, ItemRecord, core_item_key
+from english_agent.models.topic import LessonStep
 from english_agent.storage.repositories import ItemStore, Stores
 
-__all__ = ["backfill_core_items", "core_item_from_lesson", "core_item_key", "record_core_item"]
+__all__ = [
+    "backfill_core_items",
+    "core_item_from_lesson",
+    "core_item_key",
+    "record_core_item",
+    "step_item_from",
+]
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +39,19 @@ def core_item_from_lesson(lesson: Lesson) -> ItemDraft:
         function_ru=lesson.key_idea_ru,
         explanation_ru=lesson.rule_ru,
         sources=lesson.sources,
+    )
+
+
+def step_item_from(step: LessonStep, form: str | None) -> ItemDraft:
+    """The learnable item for a step: keyed `<topic>:<slug>`, with the form in force at this step."""
+    return ItemDraft(
+        key=step.item_key,
+        topic_id=step.topic_id,
+        cefr=step.cefr,
+        form=form or step.message.form or "—",
+        function_ru=step.message.key_idea_ru,
+        explanation_ru=step.message.key_idea_ru,
+        sources=step.sources,
     )
 
 

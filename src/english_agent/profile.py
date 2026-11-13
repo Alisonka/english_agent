@@ -17,9 +17,11 @@ from english_agent.models.profile import (
     ErrorPattern,
     LearnerProfile,
     ProfileStats,
+    TopicWeakPoint,
     WeakPoint,
 )
-from english_agent.models.storage import ErrorRecord, LearnerProfileRecord, ProfileInputs
+from english_agent.models.storage import ErrorRecord, ItemAccuracy, LearnerProfileRecord, ProfileInputs
+from english_agent.models.topic import LessonStep
 from english_agent.storage.repositories import ProfileStore
 from english_agent.versions import SCHEMA_VERSIONS, build_provenance
 
@@ -82,6 +84,36 @@ def build_profile(inputs: ProfileInputs) -> LearnerProfile:
         notes_ru=inputs.notes_ru,
         provenance=build_provenance(component="profile", schema_version=SCHEMA_VERSIONS["learner_profile"]),
     )
+
+
+def weak_points_for_topic(
+    steps: list[LessonStep],
+    accuracy: dict[str, ItemAccuracy],
+    errors: dict[str, list[ErrorRecord]],
+) -> list[TopicWeakPoint]:
+    """The steps of a finished topic the learner struggled with, weakest first (for the cheat sheet).
+
+    A step counts as weak if it has any error or any wrong review. `accuracy` and `errors` are keyed
+    by item key (`<topic>:<slug>`). An empty result means the topic went without a stumble.
+    """
+    points: list[TopicWeakPoint] = []
+    for step in steps:
+        measured = accuracy.get(step.item_key)
+        step_errors = errors.get(step.item_key, [])
+        ratio = measured.ratio if measured is not None else None
+        if not step_errors and not (ratio is not None and ratio < 1.0):
+            continue
+        example = None
+        if step_errors:
+            latest = max(step_errors, key=lambda error: error.created_at)
+            example = f"{latest.original} -> {latest.corrected}"
+        points.append(
+            TopicWeakPoint(
+                title_ru=step.title_ru, key_idea_ru=step.message.key_idea_ru, accuracy=ratio, example=example
+            )
+        )
+    points.sort(key=lambda point: (point.accuracy is None, point.accuracy if point.accuracy is not None else 0.0))
+    return points
 
 
 async def refresh_profile(profiles: ProfileStore, learner_id: int, now: datetime) -> LearnerProfileRecord | None:
