@@ -11,18 +11,23 @@ import pytest
 from aiogram.methods import SendMessage
 from sqlalchemy.exc import SQLAlchemyError
 
+from conftest import topic_content_payload
 from english_agent import pipeline
 from english_agent.config import Settings
 from english_agent.content import content_key
 from english_agent.models.curriculum import load_curriculum
 from english_agent.models.lesson import Lesson
 from english_agent.models.storage import LearnerRecord
+from english_agent.models.topic import TopicContent
 from english_agent.research.models import ResearchResult
 from english_agent.storage import Stores, open_stores
 from english_agent.telegram import Sender, make_bot
-from english_agent.telegram import sender as sender_module
 from fakes import FakeLearners, FakeLessons, fake_contents, fake_items, fake_stores
 from telegram_fake import FakeTelegram, blocked_by, fake_sender
+
+
+def topic_content(topic_id: str = "there_is_are") -> TopicContent:
+    return TopicContent.model_validate(topic_content_payload(topic_id))
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -121,11 +126,11 @@ def returns(value: Any) -> Any:
     return stub
 
 
-def echo_topic(lesson: Lesson) -> Any:
-    """An async stand-in for `generate_lesson` that writes `lesson` for whatever topic it is asked."""
+def echo_topic() -> Any:
+    """An async stand-in for `generate_topic` that writes content for whatever topic it is asked."""
 
-    async def stub(topic: Any, *args: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
-        return research_result(topic.id), lesson
+    async def stub(topic: Any, *args: Any, **kwargs: Any) -> tuple[ResearchResult, TopicContent]:
+        return research_result(topic.id), topic_content(topic.id)
 
     return stub
 
@@ -186,11 +191,11 @@ def test_main_sends_lesson_and_reports(
     sent: Sent,
 ) -> None:
     monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", returns((research_result(lesson.topic_id), lesson)))
+    monkeypatch.setattr(pipeline, "generate_topic", returns((research_result("there_is_are"), topic_content())))
 
     assert pipeline.main(["--topic", "there_is_are"]) == 0
-    assert "sent 1 message(s) to Telegram chat 42" in caplog.text
     assert len(sent) == 1
+    assert "there is" in sent[0]["text"]  # the step's title
 
 
 def test_main_reports_telegram_failure_and_stops_writing_to_a_blocked_chat(
@@ -204,7 +209,7 @@ def test_main_reports_telegram_failure_and_stops_writing_to_a_blocked_chat(
 ) -> None:
     telegram.fail = blocked_by("42")
     monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", returns((research_result(lesson.topic_id), lesson)))
+    monkeypatch.setattr(pipeline, "generate_topic", returns((research_result("there_is_are"), topic_content())))
 
     assert pipeline.main(["--topic", "there_is_are"]) == 1
     assert "bot was blocked" in caplog.text
@@ -226,7 +231,7 @@ def test_main_tells_the_learner_when_research_finds_nothing(
 ) -> None:
     monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
     result = research_result("there_is_are", status="not_found", message="нет на сайте")
-    monkeypatch.setattr(pipeline, "generate_lesson", returns((result, None)))
+    monkeypatch.setattr(pipeline, "generate_topic", returns((result, None)))
 
     assert pipeline.main(["--topic", "there_is_are"]) == 1
     [notice] = sent
@@ -244,7 +249,7 @@ def test_main_keeps_error_details_out_of_the_chat(
         raise RuntimeError("API <down> & out")
 
     monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", boom)
+    monkeypatch.setattr(pipeline, "generate_topic", boom)
 
     assert pipeline.main(["--topic", "there_is_are"]) == 1
     assert "RuntimeError: API <down> & out" in caplog.text
@@ -260,10 +265,10 @@ def test_main_failure_notice_that_cannot_be_delivered_is_logged(
 ) -> None:
     telegram.fail = blocked_by("42")
     monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", returns((research_result("there_is_are"), None)))
+    monkeypatch.setattr(pipeline, "generate_topic", returns((research_result("there_is_are"), None)))
 
     assert pipeline.main(["--topic", "there_is_are"]) == 1
-    assert "lesson for there_is_are failed" in caplog.text
+    assert "topic there_is_are failed" in caplog.text
     assert "bot was blocked" in caplog.text
 
 
@@ -296,14 +301,23 @@ def test_next_topic_is_the_first_one_not_sent_yet() -> None:
 
 @pytest.fixture
 def generated(lesson: Lesson, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Stub generate_lesson; collects the topic ids it was asked for. The lesson keeps the asked topic id."""
+    """Stub both generators, collecting the topic ids asked for.
+
+    Previews (--no-send, no database) still go through the legacy `generate_lesson`; the
+    database-backed path (the tick, a send) goes through `generate_topic`.
+    """
     topics: list[str] = []
 
-    async def fake_generate(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
+    async def fake_lesson(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
         topics.append(topic.id)
         return research_result(topic.id), lesson.model_copy(update={"topic_id": topic.id})
 
-    monkeypatch.setattr(pipeline, "generate_lesson", fake_generate)
+    async def fake_topic(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, TopicContent]:
+        topics.append(topic.id)
+        return research_result(topic.id), topic_content(topic.id)
+
+    monkeypatch.setattr(pipeline, "generate_lesson", fake_lesson)
+    monkeypatch.setattr(pipeline, "generate_topic", fake_topic)
     return topics
 
 
@@ -324,9 +338,9 @@ def test_main_sends_the_learners_next_topic(
     ordered = load_curriculum().topic_ids()
 
     assert pipeline.main(["--date", "2026-11-01"]) == 0
-    assert pipeline.main(["--date", "2026-11-03"]) == 0  # a day without a lesson in between loses no topic
-    assert generated == [ordered[0], ordered[1]]
-    assert len(sent) == 2
+    assert pipeline.main(["--date", "2026-11-03"]) == 0  # a day without a lesson in between loses no step
+    assert generated == [ordered[0]]  # the topic is written once; its steps are sent across days
+    assert len(sent) == 2  # step 1 on the first day, step 2 on the third
 
 
 def test_main_no_send_previews_the_topic_of_today(monkeypatch: pytest.MonkeyPatch, generated: list[str]) -> None:
@@ -416,7 +430,7 @@ async def test_tick_sends_and_records_once_per_day(
     assert len(sent) == 1
     record = lessons.rows[(learner.id, START)]
     assert (record.status, record.telegram_message_ids) == ("sent", [1])
-    item = await fake_items(stores).get_by_key(f"{generated[0]}:core")
+    item = await fake_items(stores).get_by_key(f"{generated[0]}:singular")  # the first step's item
     assert item is not None and item.source_lesson_id == record.id
 
 
@@ -450,13 +464,13 @@ async def test_failed_day_keeps_its_topic_for_the_next_day(
     stores, learners, lessons = fake_stores()
     learner = started(learners)
     asked: list[str] = []
-    outcomes = iter([None, lesson])
+    outcomes: Iterator[TopicContent | None] = iter([None, topic_content()])
 
-    async def fake_generate(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson | None]:
+    async def fake_generate(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, TopicContent | None]:
         asked.append(topic.id)
         return research_result(topic.id), next(outcomes)
 
-    monkeypatch.setattr(pipeline, "generate_lesson", fake_generate)
+    monkeypatch.setattr(pipeline, "generate_topic", fake_generate)
 
     await run_tick(stores, msk(9, 0))
     assert lessons.rows[(learner.id, START)].status == "skipped"  # the topic comes again tomorrow
@@ -477,7 +491,7 @@ async def test_one_learners_failure_does_not_stop_the_others(
     started(learners, "42", cefr="B1")
     started(learners, "43")
 
-    monkeypatch.setattr(pipeline, "generate_lesson", echo_topic(lesson))
+    monkeypatch.setattr(pipeline, "generate_topic", echo_topic())
     monkeypatch.setattr(pipeline, "load_curriculum", unreadable_for_b1(pipeline.load_curriculum))
     await run_tick(stores, msk(9, 0))
     assert [message["chat_id"] for message in sent] == ["43"]
@@ -518,11 +532,13 @@ async def test_tick_teaches_the_learners_saved_level(
 ) -> None:
     levels: list[str] = []
 
-    async def fake_generate(topic: Any, settings: Any, *, cefr: str, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
+    async def fake_generate(
+        topic: Any, settings: Any, *, cefr: str, **kwargs: Any
+    ) -> tuple[ResearchResult, TopicContent]:
         levels.append(cefr)
-        return research_result(topic.id), lesson
+        return research_result(topic.id), topic_content(topic.id)
 
-    monkeypatch.setattr(pipeline, "generate_lesson", fake_generate)
+    monkeypatch.setattr(pipeline, "generate_topic", fake_generate)
     stores, learners, _ = fake_stores()
     started(learners, cefr="B1")
 
@@ -590,7 +606,7 @@ async def test_content_being_written_elsewhere_is_retried_on_the_next_tick(
     released = lessons.rows[(learner.id, START)]
     assert (released.status, released.claimed_at, sent) == ("pending", None, [])  # let go: retried next tick
 
-    await fake_contents(stores).finish(record.id, lesson)
+    await fake_contents(stores).finish(record.id, topic_content(topic))
     assert await run_tick(stores, msk(9, 1), settings) == 1
     assert generated == [] and len(sent) == 1
 
@@ -623,31 +639,25 @@ async def test_a_topic_whose_every_attempt_failed_is_skipped(
 # --- interrupted deliveries ----------------------------------------------------------
 
 
-def three_messages(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every lesson renders as three messages, so a send can be cut short in the middle."""
-    monkeypatch.setattr(sender_module, "render_messages", lambda lesson: ["part 1", "part 2", "part 3"])
-
-
 async def test_a_send_cut_short_by_telegram_is_retried_after_a_backoff_without_repeats(
-    lesson: Lesson, monkeypatch: pytest.MonkeyPatch, telegram: FakeTelegram, run_tick: Tick, sent: Sent
+    monkeypatch: pytest.MonkeyPatch, telegram: FakeTelegram, run_tick: Tick, sent: Sent
 ) -> None:
     stores, learners, lessons = fake_stores()
     learner = started(learners)
-    three_messages(monkeypatch)
-    monkeypatch.setattr(pipeline, "generate_lesson", echo_topic(lesson))
+    monkeypatch.setattr(pipeline, "generate_topic", echo_topic())
     outage = {"calls": 0}
 
-    def second_message_fails(method: Any) -> tuple[int, dict[str, Any]] | None:
+    def first_message_fails(method: Any) -> tuple[int, dict[str, Any]] | None:
         if isinstance(method, SendMessage):
             outage["calls"] += 1
-            if outage["calls"] == 2:
+            if outage["calls"] == 1:
                 return 502, {"error_code": 502, "description": "Bad Gateway"}
         return None
 
-    telegram.fail = second_message_fails
+    telegram.fail = first_message_fails
     await run_tick(stores, msk(9, 0))
     row = lessons.rows[(learner.id, START)]
-    assert (row.status, len(row.telegram_message_ids)) == ("failed", 1)
+    assert (row.status, len(row.telegram_message_ids)) == ("failed", 0)  # the step never arrived
 
     await run_tick(stores, msk(9, 1))  # inside the backoff: nothing happens
     assert lessons.rows[(learner.id, START)].status == "failed"
@@ -655,33 +665,33 @@ async def test_a_send_cut_short_by_telegram_is_retried_after_a_backoff_without_r
     await run_tick(stores, msk(9, 10))
     row = lessons.rows[(learner.id, START)]
     assert row.status == "sent"
-    texts = [message["text"] for message in sent]
-    assert len(texts) == len(set(texts)) == len(row.telegram_message_ids)  # every chunk exactly once
+    assert len(sent) == 1 and len(row.telegram_message_ids) == 1  # the step, exactly once
 
 
 async def test_a_worker_that_died_mid_send_is_taken_over_and_resumed(
-    lesson: Lesson, monkeypatch: pytest.MonkeyPatch, run_tick: Tick, sent: Sent
+    monkeypatch: pytest.MonkeyPatch, run_tick: Tick, sent: Sent
 ) -> None:
-    three_messages(monkeypatch)
     stores, learners, lessons = fake_stores()
     learner = started(learners)
+    monkeypatch.setattr(pipeline, "generate_topic", echo_topic())
+    content = topic_content()
     version = load_curriculum().version
     _, row = await lessons.claim(
         learner.id,
         START,
-        topic_id=lesson.topic_id,
+        topic_id=content.topic_id,
         cefr="A2",
         curriculum_version=version,
         now=msk(9, 0),
         stale_after=timedelta(minutes=10),
         max_attempts=5,
     )
-    await lessons.start_sending(row.id, 1, lesson)
-    await lessons.add_message_id(row.id, 77)  # the first chunk went out, then the worker died
+    await lessons.start_sending(row.id, 1, content.step(1))
+    await lessons.add_message_id(row.id, 77)  # the step's message went out, then the worker died
 
     await run_tick(stores, msk(9, 5))  # the claim is still fresh: nobody takes over
     assert sent == []
     await run_tick(stores, msk(9, 11))
     done = lessons.rows[(learner.id, START)]
-    assert done.status == "sent" and done.telegram_message_ids[0] == 77
-    assert [message["text"] for message in sent] == ["part 2", "part 3"]  # only what had not arrived
+    assert done.status == "sent" and done.telegram_message_ids == [77]
+    assert sent == []  # the message had already arrived; it is not sent again

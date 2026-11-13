@@ -29,11 +29,12 @@ import httpx
 from anthropic import AsyncAnthropic
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
+from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent.alerts import Alerter
 from english_agent.config import Settings, get_settings
 from english_agent.content import content_key, worker_id
-from english_agent.items import record_core_item
+from english_agent.items import step_item_from
 from english_agent.llm import AnthropicLLM, make_client
 from english_agent.logs import bind, configure_logging
 from english_agent.metrics import LESSONS_FAILED, LESSONS_SENT
@@ -41,14 +42,18 @@ from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
 from english_agent.models.lesson import Lesson
 from english_agent.models.schedule import local_now
-from english_agent.models.storage import LearnerRecord, LessonContentRecord
+from english_agent.models.storage import ItemAccuracy, LearnerRecord, LessonContentRecord
 from english_agent.planning import lesson_due
+from english_agent.profile import weak_points_for_topic
+from english_agent.progression import NextStep, TopicProgress, is_done, next_step, reteach_candidate, topic_progress
 from english_agent.research.agent import ResearchAgent
 from english_agent.research.models import ResearchResult
 from english_agent.research.sitemaps import FileSitemapCache, SitemapCache, SitemapIndex
 from english_agent.research.tools import LiveResearchTools
 from english_agent.storage.repositories import Stores, open_stores
+from english_agent.telegram.render import render_cheat_sheet, render_step
 from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError, make_bot
+from english_agent.topic_writer import generate_topic
 from english_agent.tracing import configure_tracing, get_tracer
 from english_agent.writer import write_lesson
 
@@ -226,9 +231,9 @@ async def ensure_content(
         return record
     if outcome == "busy":
         return None
-    log.info("writing the lesson for %s (%s), attempt %d", topic.id, cefr, record.attempts)
+    log.info("writing the topic %s (%s), attempt %d", topic.id, cefr, record.attempts)
     try:
-        research, lesson = await generate_lesson(
+        research, content = await generate_topic(
             topic,
             settings,
             cefr=cefr,
@@ -238,10 +243,10 @@ async def ensure_content(
         )
         reason = research.message
     except Exception as error:  # unattended run: every failure is recorded, not just logged
-        lesson, reason = None, f"{type(error).__name__}: {error}"
-    if lesson is None:
+        content, reason = None, f"{type(error).__name__}: {error}"
+    if content is None:
         return await stores.contents.fail(record.id, reason)
-    return await stores.contents.finish(record.id, lesson)
+    return await stores.contents.finish(record.id, content)
 
 
 async def run_lesson_for_learner(
@@ -266,26 +271,34 @@ async def run_lesson_for_learner(
         level = cefr or learner.cefr
         span.set_attribute("lesson.cefr", level)
         curriculum = load_curriculum(level)
+        now = now or datetime.now(UTC)
+
+        sent = await stores.lessons.sent_steps(learner.id, level)
+        progress = topic_progress(sent)
+        accuracy = await _step_accuracy(stores, learner.id, [step.item_key for step in sent])
         if topic_id:
             topic = next((item for item in curriculum.topics if item.id == topic_id), None)
             if topic is None:
                 log.error("unknown topic %r", topic_id)
                 return USAGE
+            nxt = _next_in_topic(topic, progress.get(topic.id), accuracy)
         else:
-            done = await stores.lessons.sent_topic_ids(learner.id, level)
             skipped = await stores.contents.unavailable_topics(
                 level, curriculum.version, content_key(settings), max_attempts=settings.job_max_attempts
             )
-            topic = next_topic(curriculum, done | skipped)
-            if topic is None:
+            found = next_step(curriculum, progress, skipped, accuracy)
+            if found is None:
                 log.info("course finished at level %s", level)
                 if send:
+                    await _finish_course(runtime, learner, level, progress)
                     await stores.learners.deactivate(chat_id, "course_finished")
                     await notify(sender, chat_id, COURSE_FINISHED)
                 return OK
+            nxt, topic = found, found.topic
         span.set_attribute("topic.id", topic.id)
+        span.set_attribute("step.index", nxt.index)
+        span.set_attribute("step.variant", nxt.variant)
 
-        now = now or datetime.now(UTC)
         claim, row = await stores.lessons.claim(
             learner.id,
             today,
@@ -303,42 +316,42 @@ async def run_lesson_for_learner(
         if claim == "busy":
             return RETRY_LATER
 
-        # A send that was cut short (a crash, a Telegram outage) goes on with the same lesson
-        # after the messages that did arrive, so the learner never gets a chunk twice.
-        skip = len(row.telegram_message_ids) if row.lesson is not None else 0
-        if skip and row.lesson is not None and row.content_id is not None:
-            lesson, content_id = row.lesson, row.content_id
-            log.info("resuming the lesson after %d sent message(s)", skip)
+        if nxt.content_id is not None:
+            content = await stores.contents.get(nxt.content_id)
         else:
             content = await ensure_content(runtime, topic, level, curriculum.version, now=now)
-            if content is None:
-                log.info("the lesson for %s is being written elsewhere; next tick", topic.id)
-                await stores.lessons.release(row.id)
-                return RETRY_LATER
-            if content.status != "ready" or content.lesson is None:
-                reason = content.error or "the lesson could not be written"
-                log.error("lesson for %s failed: %s", topic.id, reason)
-                span.set_status(Status(StatusCode.ERROR, reason))
-                await stores.lessons.fail(row.id, reason, final=True)  # the topic comes again tomorrow
-                LESSONS_FAILED.labels("true").inc()
-                if runtime.alerts is not None:
-                    await runtime.alerts.alert("lesson not written", f"{topic.id} ({level}): {reason}")
-                if send:
-                    await notify(sender, chat_id, LESSON_FAILED.format(title=topic.title_ru))
-                return FAILED
-            lesson, content_id, skip = content.lesson, content.id, 0
+        if content is None:
+            log.info("the topic %s is being written elsewhere; next tick", topic.id)
+            await stores.lessons.release(row.id)
+            return RETRY_LATER
+        if content.status != "ready" or content.topic is None:
+            reason = content.error or "the topic could not be written"
+            log.error("topic %s failed: %s", topic.id, reason)
+            span.set_status(Status(StatusCode.ERROR, reason))
+            await stores.lessons.fail(row.id, reason, final=True)  # the topic comes again tomorrow
+            LESSONS_FAILED.labels("true").inc()
+            if runtime.alerts is not None:
+                await runtime.alerts.alert("topic not written", f"{topic.id} ({level}): {reason}")
+            if send:
+                await notify(sender, chat_id, LESSON_FAILED.format(title=topic.title_ru))
+            return FAILED
+
+        topic_content = content.topic
+        step = topic_content.step(nxt.index, nxt.variant)
         if not send:
-            print(lesson.model_dump_json(indent=2, ensure_ascii=False))
+            print(step.model_dump_json(indent=2, ensure_ascii=False))
             await stores.lessons.release(row.id)
             return OK
 
-        await stores.lessons.start_sending(row.id, content_id, lesson)
-
-        async def recorded(message_id: int) -> None:
-            await stores.lessons.add_message_id(row.id, message_id)
-
+        # A step is one message, so a cut-short send just leaves the row without a message id.
+        already_sent = bool(row.telegram_message_ids)
+        if nxt.leaving is not None and not already_sent:
+            await _send_cheat_sheet(runtime, learner, level, nxt.leaving)
+        await stores.lessons.start_sending(row.id, content.id, step)
         try:
-            message_ids = await sender.send_lesson(chat_id, lesson, skip=skip, on_sent=recorded)
+            if not already_sent:
+                message_id = await sender.send_text(chat_id, render_step(step))
+                await stores.lessons.add_message_id(row.id, message_id)
         except TelegramForbiddenError as error:
             log.info("chat blocked the bot, deactivating: %s", error)
             await stores.lessons.fail(row.id, f"telegram: {error}", final=True)
@@ -350,11 +363,74 @@ async def run_lesson_for_learner(
             await stores.lessons.fail(row.id, f"telegram: {error}", final=False)  # retried after a backoff
             LESSONS_FAILED.labels("false").inc()
             return FAILED
-        log.info("sent %d message(s) to Telegram chat %s", len(message_ids), chat_id)
         record = await stores.lessons.finish_sending(row.id)
         LESSONS_SENT.labels(level).inc()
-        await record_core_item(stores.items, lesson, record.id)
+        # The learner already has the step, so a failure recording its item is logged, never raised.
+        try:
+            await stores.items.get_or_create(
+                step_item_from(step, topic_content.form_for(nxt.index)), source_lesson_id=record.id
+            )
+        except SQLAlchemyError as error:
+            log.warning("could not record the item for %s: %s", step.item_key, error)
         return OK
+
+
+async def _step_accuracy(stores: Stores, learner_id: int, item_keys: list[str]) -> dict[str, ItemAccuracy]:
+    """Per-item accuracy keyed by item key, for the progression's re-teach decision."""
+    id_by_key = await stores.items.ids_for_keys(item_keys)
+    by_id = await stores.cards.item_accuracy(learner_id, list(id_by_key.values()))
+    return {key: by_id[item_id] for key, item_id in id_by_key.items() if item_id in by_id}
+
+
+def _next_in_topic(
+    topic: CurriculumTopic, progress: TopicProgress | None, accuracy: dict[str, ItemAccuracy]
+) -> NextStep:
+    """The next step within one explicitly chosen topic (the --topic command-line override)."""
+    if progress is None:
+        return NextStep(topic, 1, "main", None, None)
+    slug = reteach_candidate(progress, accuracy)
+    if slug is not None:
+        index = next(step.step_index for step in progress.sent if step.variant == "main" and step.step_slug == slug)
+        return NextStep(topic, index, "alt", progress.content_id, None)
+    sent_main = {step.step_index for step in progress.sent if step.variant == "main"}
+    index = next((i for i in range(1, progress.step_count + 1) if i not in sent_main), 1)
+    return NextStep(topic, index, "main", progress.content_id, None)
+
+
+async def _send_cheat_sheet(runtime: Runtime, learner: LearnerRecord, level: Cefr, topic_id: str) -> None:
+    """Send the finished topic's cheat sheet once, with the learner's weak points; failures are logged."""
+    stores = runtime.stores
+    try:
+        rows = [step for step in await stores.lessons.sent_steps(learner.id, level) if step.topic_id == topic_id]
+        if not rows or rows[0].content_id is None:
+            return
+        last = max(rows, key=lambda step: (step.lesson_date, step.lesson_id))
+        delivery = await stores.practice.claim_delivery(last.lesson_id, "summary", 0)
+        if delivery is None:  # already sent
+            return
+        content = await stores.contents.get(rows[0].content_id)
+        if content is None or content.topic is None:
+            return
+        topic_content = content.topic
+        accuracy = await _step_accuracy(stores, learner.id, topic_content.item_keys())
+        weak = weak_points_for_topic(topic_content.steps, accuracy, {})
+        message_ids = [
+            await runtime.sender.send_text(learner.telegram_chat_id, message)
+            for message in render_cheat_sheet(topic_content.summary, weak)
+        ]
+        await stores.practice.mark_sent(delivery.id, message_ids)
+    except (TelegramError, SQLAlchemyError) as error:
+        log.warning("could not send the cheat sheet for %s: %s", topic_id, error)
+
+
+async def _finish_course(
+    runtime: Runtime, learner: LearnerRecord, level: Cefr, progress: dict[str, TopicProgress]
+) -> None:
+    """At the end of the course, send the last finished topic's cheat sheet before deactivating."""
+    done = [topic_id for topic_id, prog in progress.items() if is_done(prog)]
+    if done:
+        last = max(done, key=lambda topic_id: max(step.lesson_date for step in progress[topic_id].sent))
+        await _send_cheat_sheet(runtime, learner, level, last)
 
 
 async def preview_lesson(

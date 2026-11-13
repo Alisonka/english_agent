@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -111,8 +112,8 @@ def lesson() -> Lesson:
     return Lesson.model_validate(lesson_payload())
 
 
-def topic_content_payload(**overrides: Any) -> dict[str, Any]:
-    """A valid two-step `TopicContent` payload for `there_is_are`; override individual fields."""
+def topic_content_payload(topic_id: str = "there_is_are", **overrides: Any) -> dict[str, Any]:
+    """A valid two-step `TopicContent` payload; `topic_id` stamps the topic, overrides tweak fields."""
     plan = {
         "topic_id": "there_is_are",
         "cefr": "A2",
@@ -202,6 +203,8 @@ def topic_content_payload(**overrides: Any) -> dict[str, Any]:
         "summary": summary,
         "sources": [SOURCE],
     }
+    if topic_id != "there_is_are":
+        payload = json.loads(json.dumps(payload).replace("there_is_are", topic_id))
     payload.update(overrides)
     return payload
 

@@ -14,6 +14,8 @@ from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import (
     CardRecord,
     ClaimOutcome,
+    GradingInput,
+    GradingSentence,
     GradingTask,
     ItemAccuracy,
     ItemDraft,
@@ -26,6 +28,7 @@ from english_agent.models.storage import (
     LessonState,
     LessonStatus,
     OpenTranslationTask,
+    PracticeBlock,
     PracticeDeliveryRecord,
     PracticeKind,
     ProfileInputs,
@@ -34,11 +37,55 @@ from english_agent.models.storage import (
     SentStep,
     TranslationAnswerRecord,
 )
+from english_agent.models.topic import LessonStep, TopicContent
 from english_agent.research.models import PageContent, SearchHit
 from english_agent.research.sites import Site
 from english_agent.research.tools import rank_urls
-from english_agent.storage.repositories import LessonAlreadySentError, Stores
+from english_agent.storage.repositories import LessonAlreadySentError, Stores, _taught_columns
 from english_agent.versions import SCHEMA_VERSIONS
+
+
+def _fake_grading_input(record: LessonRecord, delivery: PracticeDeliveryRecord) -> GradingInput | None:
+    block = PracticeBlock.model_validate(delivery.payload) if delivery.payload else None
+    if block is not None and block.sentences:
+        step = record.step
+        return GradingInput(
+            title_en=step.title_en if step is not None else record.topic_id,
+            title_ru=step.title_ru if step is not None else record.topic_id,
+            cefr=record.cefr,
+            topic_id=record.topic_id,
+            sentences=[
+                GradingSentence(
+                    n=index,
+                    ru=chosen.task.ru,
+                    reference_en=chosen.task.reference_en,
+                    focus_ru=chosen.task.focus_ru,
+                    key_idea_ru=chosen.key_idea_ru,
+                    form=chosen.form,
+                )
+                for index, chosen in enumerate(block.sentences, start=1)
+            ],
+        )
+    lesson = record.lesson
+    if lesson is None or not lesson.translation:
+        return None
+    return GradingInput(
+        title_en=lesson.title_en,
+        title_ru=lesson.title_ru,
+        cefr=lesson.cefr,
+        topic_id=lesson.topic_id,
+        sentences=[
+            GradingSentence(
+                n=index,
+                ru=task.ru,
+                reference_en=task.reference_en,
+                focus_ru=task.focus_ru,
+                key_idea_ru=lesson.key_idea_ru,
+                form=lesson.form,
+            )
+            for index, task in enumerate(lesson.translation, start=1)
+        ],
+    )
 
 
 class FakeLearners:
@@ -129,7 +176,7 @@ class FakeLessons:
         self,
         learner_id: int,
         day: date,
-        lesson: Lesson,
+        taught: Lesson | LessonStep,
         message_ids: list[int],
         *,
         curriculum_version: int | None,
@@ -138,13 +185,12 @@ class FakeLessons:
         return self._save(
             learner_id,
             day,
-            topic_id=lesson.topic_id,
-            cefr=lesson.cefr,
             curriculum_version=curriculum_version,
-            lesson=lesson,
+            status="sent",
             error=None,
             message_ids=message_ids,
             content_id=content_id,
+            **_taught_columns(taught),
         )
 
     async def record_failed(
@@ -156,7 +202,10 @@ class FakeLessons:
             topic_id=topic_id,
             cefr=cefr,
             curriculum_version=curriculum_version,
-            lesson=None,
+            status="failed",
+            payload=None,
+            payload_kind="lesson",
+            schema_version=SCHEMA_VERSIONS["lesson"],
             error=reason,
             message_ids=[],
         )
@@ -208,7 +257,7 @@ class FakeLessons:
                 curriculum_version=curriculum_version,
                 schema_version=SCHEMA_VERSIONS["lesson"],
                 status="pending",
-                lesson=None,
+                payload=None,
                 error=None,
                 telegram_message_ids=[],
                 created_at=now,
@@ -241,10 +290,8 @@ class FakeLessons:
         if row.status == "pending":
             self._set(lesson_id, claimed_at=None, attempts=max(row.attempts - 1, 0))
 
-    async def start_sending(self, lesson_id: int, content_id: int, lesson: Lesson) -> LessonRecord:
-        return self._set(
-            lesson_id, status="sending", content_id=content_id, lesson=lesson, topic_id=lesson.topic_id, error=None
-        )
+    async def start_sending(self, lesson_id: int, content_id: int, taught: Lesson | LessonStep) -> LessonRecord:
+        return self._set(lesson_id, status="sending", content_id=content_id, error=None, **_taught_columns(taught))
 
     async def add_message_id(self, lesson_id: int, message_id: int) -> None:
         _, row = self._by_id(lesson_id)
@@ -310,13 +357,12 @@ class FakeLessons:
         learner_id: int,
         day: date,
         *,
-        topic_id: str,
-        cefr: Cefr,
-        curriculum_version: int | None,
-        lesson: Lesson | None,
+        status: LessonStatus,
         error: str | None,
         message_ids: list[int],
+        curriculum_version: int | None,
         content_id: int | None = None,
+        **columns: Any,
     ) -> LessonRecord:
         if self.is_sent(learner_id, day):
             raise LessonAlreadySentError(f"{learner_id} {day}")
@@ -325,17 +371,14 @@ class FakeLessons:
             id=len(self.rows) + 1,
             learner_id=learner_id,
             lesson_date=day,
-            topic_id=topic_id,
-            cefr=cefr,
             curriculum_version=curriculum_version,
-            schema_version=SCHEMA_VERSIONS["lesson"],
-            status="sent" if lesson is not None else "failed",
-            lesson=lesson,
+            status=status,
             error=error,
             telegram_message_ids=message_ids,
             created_at=now,
-            sent_at=now if lesson is not None else None,
+            sent_at=now if status == "sent" else None,
             content_id=content_id,
+            **columns,
         )
         self.rows[(learner_id, day)] = record
         return record
@@ -397,8 +440,16 @@ class FakeContents:
         self.rows[key] = row.model_copy(update=changes)
         return self.rows[key]
 
-    async def finish(self, content_id: int, lesson: Lesson) -> LessonContentRecord:
-        return self._update(content_id, status="ready", lesson=lesson, error=None, generated_at=datetime.now(UTC))
+    async def finish(self, content_id: int, content: Lesson | TopicContent) -> LessonContentRecord:
+        kind = "topic" if isinstance(content, TopicContent) else "lesson"
+        return self._update(
+            content_id,
+            status="ready",
+            payload=content.model_dump(mode="json"),
+            payload_kind=kind,
+            error=None,
+            generated_at=datetime.now(UTC),
+        )
 
     async def fail(self, content_id: int, reason: str) -> LessonContentRecord:
         return self._update(content_id, status="failed", error=reason)
@@ -440,6 +491,9 @@ class FakeItems:
         )
         self.by_key[draft.key] = record
         return record, True
+
+    async def ids_for_keys(self, keys: list[str]) -> dict[str, int]:
+        return {key: self.by_key[key].id for key in keys if key in self.by_key}
 
 
 class FakeCards:
@@ -671,10 +725,9 @@ class FakePractice:
             return None
         delivery = max(sent, key=lambda d: d.sent_at or d.claimed_at)
         answer = next((a for a in self.translation_answers.values() if a.delivery_id == delivery.id), None)
-        lesson = lessons[delivery.lesson_id].lesson
-        if (answer is not None and answer.status != "failed") or lesson is None:
+        if (answer is not None and answer.status != "failed") or lessons[delivery.lesson_id].payload is None:
             return None
-        return OpenTranslationTask(learner_id=learner.id, delivery=delivery, lesson=lesson)
+        return OpenTranslationTask(learner_id=learner.id, delivery=delivery)
 
     async def start_translation_answer(
         self, delivery_id: int, learner_id: int, answer_text: str
@@ -708,9 +761,10 @@ class FakePractice:
         delivery = self.deliveries[answer.delivery_id]
         record = next(r for r in self._lessons.rows.values() if r.id == delivery.lesson_id)
         learner = next(r for r in self._learners.by_chat.values() if r.id == answer.learner_id)
-        if record.lesson is None:
+        grading_input = _fake_grading_input(record, delivery)
+        if grading_input is None:
             return None
-        return GradingTask(answer=answer, lesson=record.lesson, telegram_chat_id=learner.telegram_chat_id)
+        return GradingTask(answer=answer, input=grading_input, telegram_chat_id=learner.telegram_chat_id)
 
     async def begin_grading(self, answer_id: int, now: datetime) -> GradingTask | None:
         answer = self.translation_answers.get(answer_id)

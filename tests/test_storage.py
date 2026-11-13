@@ -309,7 +309,7 @@ async def test_translation_answer_lifecycle(sessions: SessionFactory, lesson: Le
     await practice.mark_sent(task.id, [20])
 
     open_task = await practice.open_translation("42")
-    assert open_task is not None and open_task.lesson == lesson
+    assert open_task is not None and open_task.delivery.id == task.id and open_task.learner_id == learner.id
     answer = await practice.start_translation_answer(task.id, open_task.learner_id, "first try")
     assert answer is not None
     assert await practice.start_translation_answer(task.id, open_task.learner_id, "again") is None  # pending

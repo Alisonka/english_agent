@@ -15,7 +15,7 @@ import html
 import re
 
 from english_agent.models.lesson import TELEGRAM_MAX_MESSAGE_LENGTH, Example, Lesson
-from english_agent.models.practice import QuizQuestion, TranslationGrade
+from english_agent.models.practice import QuizQuestion, TranslationGrade, TranslationTask
 from english_agent.models.profile import TopicWeakPoint
 from english_agent.models.topic import LessonStep, StepExample, TopicSummary
 
@@ -188,8 +188,8 @@ def _split(text: str, limit: int, separators: tuple[str, ...]) -> list[str]:
 _VERDICT_MARKS = {"correct": "✅", "fixed": "✏️", "missing": "➖"}
 
 
-def render_quiz_intro(lesson: Lesson) -> str:
-    return f"🧠 <b>Проверь себя:</b> {_e(lesson.title_en)} · {len(lesson.quiz)} вопроса"
+def render_quiz_intro(title_en: str, count: int) -> str:
+    return f"🧠 <b>Проверь себя:</b> {_e(title_en)} · {count} вопроса"
 
 
 def render_quiz_summary(results: list[tuple[QuizQuestion, bool]]) -> str:
@@ -203,10 +203,10 @@ def render_quiz_summary(results: list[tuple[QuizQuestion, bool]]) -> str:
     return PARAGRAPH.join(lines)
 
 
-def render_translation_task(lesson: Lesson) -> str:
-    sentences = "\n".join(f"{n}. {_e(task.ru)}" for n, task in enumerate(lesson.translation, start=1))
+def render_translation_task(title_en: str, tasks: list[TranslationTask]) -> str:
+    sentences = "\n".join(f"{n}. {_e(task.ru)}" for n, task in enumerate(tasks, start=1))
     return (
-        f"✍️ <b>Переведи на английский</b> · {_e(lesson.title_en)}\n\n{sentences}\n\n"
+        f"✍️ <b>Переведи на английский</b> · {_e(title_en)}\n\n{sentences}\n\n"
         "Ответь одним сообщением, каждое предложение с новой строки."
     )
 

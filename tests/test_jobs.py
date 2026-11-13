@@ -146,12 +146,14 @@ def research(topic_id: str) -> ResearchResult:
 
 
 async def test_deliver_lesson_sends_and_clears_its_key(monkeypatch: pytest.MonkeyPatch, lesson: Lesson) -> None:
+    from conftest import topic_content_payload
     from english_agent import pipeline
+    from english_agent.models.topic import TopicContent
 
-    async def generate(topic: Any, *args: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
-        return research(topic.id), lesson.model_copy(update={"topic_id": topic.id})
+    async def generate(topic: Any, *args: Any, **kwargs: Any) -> tuple[ResearchResult, TopicContent]:
+        return research(topic.id), TopicContent.model_validate(topic_content_payload(topic.id))
 
-    monkeypatch.setattr(pipeline, "generate_lesson", generate)
+    monkeypatch.setattr(pipeline, "generate_topic", generate)
     stores, learners, lessons = fake_stores()
     student = learners.started("42", date(2026, 11, 1))
     telegram = FakeTelegram()

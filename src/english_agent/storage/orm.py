@@ -93,8 +93,8 @@ class LessonRow(Base):
     curriculum_version: Mapped[int | None] = mapped_column(Integer)
     schema_version: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16))
-    # `Lesson.model_dump(mode="json")`; NULL for a failed run.
-    lesson: Mapped[dict[str, Any] | None] = mapped_column("payload", JSONB)
+    # A `Lesson` or a `LessonStep` dump (see `payload_kind`); NULL for a failed run.
+    payload: Mapped[dict[str, Any] | None] = mapped_column("payload", JSONB)
     error: Mapped[str | None] = mapped_column(Text)
     telegram_message_ids: Mapped[list[int]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
     created_at: Mapped[datetime] = _created_at()
@@ -132,7 +132,7 @@ class LessonContentRow(Base):
     schema_version: Mapped[int] = mapped_column(Integer)
     # "lesson" holds a `Lesson`; "topic" holds a whole `TopicContent` (plan + steps + cheat sheet).
     payload_kind: Mapped[str] = mapped_column(String(16), default="lesson", server_default=text("'lesson'"))
-    lesson: Mapped[dict[str, Any] | None] = mapped_column("payload", JSONB)
+    payload: Mapped[dict[str, Any] | None] = mapped_column("payload", JSONB)
     error: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

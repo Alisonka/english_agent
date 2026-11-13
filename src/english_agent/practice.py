@@ -18,13 +18,28 @@ from aiogram.types import ForceReply
 from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent.config import Settings
-from english_agent.items import core_item_from_lesson
+from english_agent.items import core_item_from_lesson, step_item_from
 from english_agent.logs import bind
-from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion
 from english_agent.models.schedule import local_now
-from english_agent.models.storage import LearnerRecord, LessonRecord, PracticeDeliveryRecord, PracticeKind
+from english_agent.models.storage import (
+    LearnerRecord,
+    LessonRecord,
+    PracticeBlock,
+    PracticeDeliveryRecord,
+    PracticeKind,
+)
 from english_agent.planning import practice_due
+from english_agent.practice_select import (
+    StepBank,
+    assemble_quiz,
+    assemble_translation,
+    bank_from_lesson,
+    bank_from_record,
+    bank_from_step,
+    choose_previous,
+)
+from english_agent.srs import make_scheduler
 from english_agent.storage.repositories import PracticeStore, Stores
 from english_agent.telegram.render import render_quiz_intro, render_translation_task
 from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError
@@ -49,19 +64,26 @@ def due_practice(
     The learner's own time zone, quiz delay and translation time; the cutoff and the gap
     between the quiz and the translation task are the same for everyone.
     """
-    lesson = record.lesson
-    if record.status != "sent" or record.sent_at is None or lesson is None or not lesson.quiz:
+    if record.status != "sent" or record.sent_at is None or not _has_practice(record):
         return None  # a failed day, or a lesson stored before practice existed
     local_time = local_now(learner.timezone, now).time()
     if local_time >= settings.practice_cutoff_time:
         return None
     if quiz is None:
         return "quiz" if now >= record.sent_at + timedelta(minutes=learner.quiz_delay_minutes) else None
-    if translation is None and lesson.translation and local_time >= learner.translation_send_time:
+    if translation is None and local_time >= learner.translation_send_time:
         quiz_at = quiz.sent_at or quiz.claimed_at
         if now >= quiz_at + timedelta(minutes=settings.practice_gap_minutes):
             return "translation"
     return None
+
+
+def _has_practice(record: LessonRecord) -> bool:
+    """A step day always has practice (from its bank); a legacy day needs a stored quiz."""
+    if record.payload_kind == "step":
+        return True
+    lesson = record.lesson
+    return lesson is not None and bool(lesson.quiz)
 
 
 def shuffle_options(question: QuizQuestion, rng: random.Random) -> QuizQuestion:
@@ -81,13 +103,13 @@ async def _send_quiz(
     practice: PracticeStore,
     delivery_id: int,
     chat_id: str,
-    lesson: Lesson,
-    item_id: int,
+    title_en: str,
+    block: PracticeBlock,
     rng: random.Random,
 ) -> list[int]:
-    message_ids = [await sender.send_text(chat_id, render_quiz_intro(lesson))]
-    for position, original in enumerate(lesson.quiz):
-        question = shuffle_options(original, rng)
+    message_ids = [await sender.send_text(chat_id, render_quiz_intro(title_en, len(block.questions)))]
+    for position, chosen in enumerate(block.questions):
+        question = shuffle_options(chosen.question, rng)
         message_id, poll_id = await sender.send_poll(
             chat_id,
             question.question,
@@ -101,11 +123,57 @@ async def _send_quiz(
             position=position,
             telegram_poll_id=poll_id,
             telegram_message_id=message_id,
-            item_id=item_id,
+            item_id=chosen.item_id,
             question=question,
         )
         message_ids.append(message_id)
     return message_ids
+
+
+async def _banks(
+    settings: Settings, stores: Stores, learner: LearnerRecord, record: LessonRecord, now: datetime
+) -> tuple[StepBank, StepBank | None, StepBank | None] | None:
+    """Today's bank, the earlier-step bank (least recalled) and the older-topic review bank."""
+    scheduler = make_scheduler(settings)
+    if record.payload_kind == "step":
+        content = await stores.contents.get(record.content_id) if record.content_id is not None else None
+        topic_content = content.topic if content is not None else None
+        if topic_content is None:
+            return None
+        index = record.step_index
+        main = topic_content.step(index, "main")
+        today_item, _ = await stores.items.get_or_create(
+            step_item_from(main, topic_content.form_for(index)), source_lesson_id=record.id
+        )
+        today_bank = bank_from_step(main, today_item.id)
+        earlier = [topic_content.step(i, "main") for i in range(1, index)]
+        id_by_key = await stores.items.ids_for_keys([step.item_key for step in earlier])
+        cards = {card.item_id: card for card in await stores.cards.for_items(learner.id, list(id_by_key.values()))}
+        banks: list[StepBank] = []
+        retrievability: dict[int, float] = {}
+        for step in earlier:
+            item_id = id_by_key.get(step.item_key)
+            banks.append(bank_from_step(step, item_id))
+            card = cards.get(item_id) if item_id is not None else None
+            if item_id is not None and card is not None:
+                retrievability[item_id] = scheduler.retrievability(card.fsrs_state, now)
+        previous_bank = choose_previous(banks, retrievability) if banks else None
+    else:
+        lesson = record.lesson
+        if lesson is None:
+            return None
+        today_item, _ = await stores.items.get_or_create(core_item_from_lesson(lesson), source_lesson_id=record.id)
+        today_bank = bank_from_lesson(lesson, record.item_key, today_item.id)
+        previous_bank = None
+
+    review_bank = None
+    chosen = await stores.cards.due_or_weakest(learner.id, now, exclude_topic_id=record.topic_id)
+    if chosen is not None:
+        _, item = chosen
+        taught = await stores.lessons.taught_step(learner.id, item.key)
+        if taught is not None:
+            review_bank = bank_from_record(taught, item.id)
+    return today_bank, previous_bank, review_bank
 
 
 async def deliver_practice_for(
@@ -119,34 +187,43 @@ async def deliver_practice_for(
     rng: random.Random | None = None,
 ) -> PracticeKind | None:
     """Send the block of the learner's lesson `record` that is due at `now`; its kind, or None."""
-    lesson = record.lesson
-    if lesson is None:
+    if not _has_practice(record):
         return None
     quiz = await stores.practice.delivery(record.id, "quiz")
     translation = await stores.practice.delivery(record.id, "translation")
     kind = due_practice(learner, settings, record, quiz, translation, now)
     if kind is None:
         return None
-
-    # The quiz rates the lesson's core item; created here too, so a lesson stored before items
-    # existed (or a failed write at send time) still gets its reviews.
-    item, _ = await stores.items.get_or_create(core_item_from_lesson(lesson), source_lesson_id=record.id)
-    item_count = len(lesson.quiz) if kind == "quiz" else len(lesson.translation)
-    delivery = await stores.practice.claim_delivery(record.id, kind, item_count)
+    banks = await _banks(settings, stores, learner, record, now)
+    if banks is None:
+        return None
+    today_bank, previous_bank, review_bank = banks
+    rng = rng or random.Random()
+    if kind == "quiz":
+        block = assemble_quiz(today_bank, previous_bank, review_bank, rng=rng)
+        item_count = len(block.questions)
+    else:
+        other = previous_bank or review_bank
+        block = assemble_translation(
+            today_bank, other, other_source="previous" if previous_bank is not None else "review", rng=rng
+        )
+        item_count = len(block.sentences)
+    delivery = await stores.practice.claim_delivery(record.id, kind, item_count, payload=block.model_dump(mode="json"))
     if delivery is None:
         return None
     chat_id = learner.telegram_chat_id
     with get_tracer().start_as_current_span("practice.deliver") as span:
         span.set_attribute("practice.kind", kind)
-        span.set_attribute("topic.id", lesson.topic_id)
-        span.set_attribute("item.key", item.key)
+        span.set_attribute("topic.id", record.topic_id)
+        span.set_attribute("item.key", today_bank.item_key)
         if kind == "quiz":
             message_ids = await _send_quiz(
-                sender, stores.practice, delivery.id, chat_id, lesson, item.id, rng or random.Random()
+                sender, stores.practice, delivery.id, chat_id, today_bank.title_en, block, rng
             )
         else:
             reply_markup = ForceReply(force_reply=True, input_field_placeholder=TRANSLATION_PLACEHOLDER)
-            message_ids = [await sender.send_text(chat_id, render_translation_task(lesson), reply_markup=reply_markup)]
+            text = render_translation_task(today_bank.title_en, [sentence.task for sentence in block.sentences])
+            message_ids = [await sender.send_text(chat_id, text, reply_markup=reply_markup)]
     await stores.practice.mark_sent(delivery.id, message_ids)
     return kind
 

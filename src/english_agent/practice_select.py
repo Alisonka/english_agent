@@ -13,7 +13,13 @@ from dataclasses import dataclass, field
 
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import DAILY_QUIZ_SIZE, TRANSLATION_SIZE, QuizQuestion, TranslationTask
-from english_agent.models.storage import AssembledQuestion, AssembledSentence, PracticeBlock, PracticeSource
+from english_agent.models.storage import (
+    AssembledQuestion,
+    AssembledSentence,
+    LessonRecord,
+    PracticeBlock,
+    PracticeSource,
+)
 from english_agent.models.topic import LessonStep
 
 
@@ -55,6 +61,17 @@ def bank_from_lesson(lesson: Lesson, item_key: str, item_id: int | None) -> Step
         questions=list(lesson.quiz),
         sentences=list(lesson.translation),
     )
+
+
+def bank_from_record(record: LessonRecord, item_id: int | None) -> StepBank | None:
+    """The practice bank a sent day offers: its step's bank, or a legacy lesson's core bank."""
+    step = record.step
+    if step is not None:
+        return bank_from_step(step, item_id) if step.practice is not None else None
+    lesson = record.lesson
+    if lesson is not None:
+        return bank_from_lesson(lesson, record.item_key, item_id)
+    return None
 
 
 def choose_previous(banks: list[StepBank], retrievability: dict[int, float]) -> StepBank | None:

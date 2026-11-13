@@ -14,6 +14,7 @@ from english_agent.models.lesson import Lesson, Source
 from english_agent.models.practice import QuizQuestion, TranslationGrade, TranslationTask
 from english_agent.models.profile import LearnerProfile
 from english_agent.models.schedule import LearnerSchedule
+from english_agent.models.topic import LessonStep, TopicContent
 
 LessonStatus = Literal["pending", "sending", "sent", "failed", "skipped"]
 LessonClaim = Literal["claimed", "resume", "busy", "done"]
@@ -60,7 +61,11 @@ class LearnerRecord(BaseModel):
 
 
 class LessonRecord(BaseModel):
-    """One learner's lesson for one day; `lesson` is None when the run failed."""
+    """One learner's lesson for one day; `payload` is None when the run failed.
+
+    The `payload` JSONB holds a whole `Lesson` (legacy days, `payload_kind="lesson"`) or one
+    `LessonStep` (`payload_kind="step"`); read it through the `lesson` / `step` properties.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -70,23 +75,36 @@ class LessonRecord(BaseModel):
     topic_id: str
     cefr: Cefr
     curriculum_version: int | None
-    schema_version: int  # SCHEMA_VERSIONS["lesson"] the payload was written with
+    schema_version: int  # the schema version the payload was written with
     status: LessonStatus
-    lesson: Lesson | None
-    error: str | None
-    telegram_message_ids: list[int]
+    payload: dict[str, Any] | None = None
+    error: str | None = None
+    telegram_message_ids: list[int] = Field(default_factory=list)
     created_at: datetime
-    sent_at: datetime | None
+    sent_at: datetime | None = None
     content_id: int | None = None  # the shared `LessonContentRecord` that was sent; None for older lessons
     claimed_at: datetime | None = None  # a worker is delivering it since then (None: nobody holds it)
     attempts: int = 0  # delivery attempts so far
-    # Which step of the topic this day is. Legacy rows are step 1 of 1, slug "core", a main variant
-    # whose `lesson` payload is a whole `Lesson`; step rows carry a `LessonStep` (read in later groups).
+    # Which step of the topic this day is. Legacy rows are step 1 of 1, slug "core", a main variant.
     payload_kind: PayloadKind = "lesson"
     step_index: int = 1
     step_count: int = 1
     step_slug: str = "core"
     variant: StepVariant = "main"
+
+    @property
+    def lesson(self) -> "Lesson | None":
+        """The legacy whole-topic lesson, when this day holds one."""
+        if self.payload_kind != "lesson" or self.payload is None:
+            return None
+        return Lesson.model_validate(self.payload)
+
+    @property
+    def step(self) -> "LessonStep | None":
+        """The step this day teaches, when it holds one."""
+        if self.payload_kind != "step" or self.payload is None:
+            return None
+        return LessonStep.model_validate(self.payload)
 
     @property
     def item_key(self) -> str:
@@ -123,13 +141,25 @@ class LessonContentRecord(BaseModel):
     status: ContentStatus
     schema_version: int
     payload_kind: Literal["lesson", "topic"] = "lesson"  # "topic" holds a whole TopicContent
-    lesson: Lesson | None
+    payload: dict[str, Any] | None = None
     error: str | None
     attempts: int
     claimed_at: datetime | None
     claimed_by: str | None
     generated_at: datetime | None
     created_at: datetime
+
+    @property
+    def lesson(self) -> "Lesson | None":
+        if self.payload_kind != "lesson" or self.payload is None:
+            return None
+        return Lesson.model_validate(self.payload)
+
+    @property
+    def topic(self) -> "TopicContent | None":
+        if self.payload_kind != "topic" or self.payload is None:
+            return None
+        return TopicContent.model_validate(self.payload)
 
 
 CORE_SLUG = "core"
@@ -339,14 +369,34 @@ class OpenTranslationTask(BaseModel):
 
     learner_id: int
     delivery: PracticeDeliveryRecord
-    lesson: Lesson
+
+
+class GradingSentence(BaseModel):
+    """One sentence to grade, with the step context that tells the grader what it checks."""
+
+    n: int = Field(ge=1)
+    ru: str
+    reference_en: str
+    focus_ru: str
+    key_idea_ru: str | None = None
+    form: str | None = None
+
+
+class GradingInput(BaseModel):
+    """What the grader sees: the day's sentences and their per-step context (not a whole lesson)."""
+
+    title_en: str
+    title_ru: str
+    cefr: Cefr
+    topic_id: str
+    sentences: list[GradingSentence]
 
 
 class GradingTask(BaseModel):
-    """What grading one translation answer needs: the answer, its lesson and where to reply."""
+    """What grading one translation answer needs: the answer, its input and where to reply."""
 
     answer: TranslationAnswerRecord
-    lesson: Lesson
+    input: GradingInput
     telegram_chat_id: str
 
 

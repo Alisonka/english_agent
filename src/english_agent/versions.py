@@ -49,6 +49,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "quiz_poll_record": 2,  # v2: item_id
     "translation_answer_record": 2,  # v2: grading_attempts, grading_started_at
     "translation_grade": 1,
+    "grading_input": 1,  # what the grader sees: the day's sentences and their per-step context
     "learner_profile": 1,
 }
 
