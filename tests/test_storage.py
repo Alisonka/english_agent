@@ -556,3 +556,93 @@ async def test_grading_attempts_are_counted_and_stale_ones_found(sessions: Sessi
 
     await practice.fail_translation_answer(answer.id, "x")
     assert await practice.begin_grading(answer.id, NOW) is None  # not pending any more
+
+
+# --- topic steps (0007) -------------------------------------------------------------
+
+
+def _topic_draft(topic_id: str, slug: str, sources: Any) -> ItemDraft:
+    return ItemDraft(
+        key=f"{topic_id}:{slug}",
+        topic_id=topic_id,
+        cefr="A2",
+        form="x",
+        function_ru="x",
+        explanation_ru="x",
+        sources=sources,
+    )
+
+
+async def test_sent_steps_and_taught_step_on_legacy_rows(sessions: SessionFactory, lesson: Lesson) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    lessons = LessonRepo(sessions)
+    await lessons.record_sent(learner.id, DAY, lesson, [1], curriculum_version=1)
+    await lessons.record_sent(learner.id, DAY + timedelta(days=1), lesson, [2], curriculum_version=1)
+
+    steps = await lessons.sent_steps(learner.id, "A2")
+    assert [(s.step_index, s.step_count, s.step_slug, s.variant) for s in steps] == [
+        (1, 1, "core", "main"),
+        (1, 1, "core", "main"),
+    ]
+    assert steps[0].item_key == "there_is_are:core"
+
+    taught = await lessons.taught_step(learner.id, "there_is_are:core")
+    assert taught is not None and taught.lesson_date == DAY + timedelta(days=1)  # latest main row
+    assert await lessons.taught_step(learner.id, "there_is_are:missing") is None
+
+
+async def test_due_or_weakest_excludes_the_current_topic(sessions: SessionFactory, lesson: Lesson) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    items, cards = ItemRepo(sessions), CardRepo(sessions, SCHEDULER)
+    now = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+    today_item = (await items.get_or_create(_topic_draft("present_simple", "s1", lesson.sources)))[0]
+    old_item = (await items.get_or_create(_topic_draft("there_is_are", "core", lesson.sources)))[0]
+    await cards.review(learner.id, today_item.id, AGAIN, now - timedelta(days=9), source="quiz", source_ref="a")
+    await cards.review(learner.id, old_item.id, AGAIN, now - timedelta(days=2), source="quiz", source_ref="b")
+
+    chosen = await cards.due_or_weakest(learner.id, now, exclude_topic_id="present_simple")
+    assert chosen is not None and chosen[1].id == old_item.id  # the current topic's overdue card is skipped
+
+
+async def test_item_accuracy_counts_checks_correct_and_days(sessions: SessionFactory, lesson: Lesson) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    items, cards = ItemRepo(sessions), CardRepo(sessions, SCHEDULER)
+    item_id = (await items.get_or_create(_topic_draft("there_is_are", "core", lesson.sources)))[0].id
+    day1 = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
+    await cards.review(learner.id, item_id, GOOD, day1, source="quiz", source_ref="q1")
+    await cards.review(learner.id, item_id, AGAIN, day1 + timedelta(days=2), source="quiz", source_ref="q2")
+
+    accuracy = await cards.item_accuracy(learner.id, [item_id])
+    assert item_id in accuracy
+    assert (accuracy[item_id].checks, accuracy[item_id].correct, accuracy[item_id].days) == (2, 1, 2)
+    assert await cards.item_accuracy(learner.id, []) == {}
+
+
+async def test_cards_for_items_returns_only_requested(sessions: SessionFactory, lesson: Lesson) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    items, cards = ItemRepo(sessions), CardRepo(sessions, SCHEDULER)
+    now = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+    wanted = (await items.get_or_create(_topic_draft("there_is_are", "core", lesson.sources)))[0].id
+    other = (await items.get_or_create(_topic_draft("present_simple", "s1", lesson.sources)))[0].id
+    await cards.review(learner.id, wanted, GOOD, now, source="quiz", source_ref="w")
+    await cards.review(learner.id, other, GOOD, now, source="quiz", source_ref="o")
+
+    assert [card.item_id for card in await cards.for_items(learner.id, [wanted])] == [wanted]
+    assert await cards.for_items(learner.id, []) == []
+
+
+async def test_content_get_and_claim_delivery_payload(sessions: SessionFactory, lesson: Lesson) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    contents = LessonContentRepo(sessions)
+    now = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+    _, record = await contents.claim(
+        "there_is_are", "A2", 1, "k", owner="w", now=now, stale_after=timedelta(minutes=10), max_attempts=5
+    )
+    finished = await contents.finish(record.id, lesson)
+    assert await contents.get(finished.id) == finished
+    assert await contents.get(10_000) is None
+
+    lesson_row = await LessonRepo(sessions).record_sent(learner.id, DAY, lesson, [1], curriculum_version=1)
+    practice = PracticeRepo(sessions, SCHEDULER)
+    delivery = await practice.claim_delivery(lesson_row.id, "quiz", 4, payload={"source": "test"})
+    assert delivery is not None and delivery.payload == {"source": "test"}

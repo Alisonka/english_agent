@@ -15,6 +15,7 @@ from english_agent.models.storage import (
     CardRecord,
     ClaimOutcome,
     GradingTask,
+    ItemAccuracy,
     ItemDraft,
     ItemRecord,
     LearnerProfileRecord,
@@ -30,6 +31,7 @@ from english_agent.models.storage import (
     ProfileInputs,
     QuizPollRecord,
     QuizResult,
+    SentStep,
     TranslationAnswerRecord,
 )
 from english_agent.research.models import PageContent, SearchHit
@@ -272,6 +274,37 @@ class FakeLessons:
             if lid == learner_id and r.cefr == cefr and r.status == "sent"
         }
 
+    async def sent_steps(self, learner_id: int, cefr: Cefr) -> list[SentStep]:
+        sent = [r for (lid, _), r in self.rows.items() if lid == learner_id and r.cefr == cefr and r.status == "sent"]
+        sent.sort(key=lambda r: (r.lesson_date, r.id))
+        return [
+            SentStep(
+                lesson_id=r.id,
+                topic_id=r.topic_id,
+                lesson_date=r.lesson_date,
+                step_index=r.step_index,
+                step_count=r.step_count,
+                step_slug=r.step_slug,
+                variant=r.variant,
+                content_id=r.content_id,
+            )
+            for r in sent
+        ]
+
+    async def taught_step(self, learner_id: int, item_key: str) -> LessonRecord | None:
+        topic_id, _, slug = item_key.partition(":")
+        matches = [
+            r
+            for (lid, _), r in self.rows.items()
+            if lid == learner_id
+            and r.topic_id == topic_id
+            and r.step_slug == slug
+            and r.variant == "main"
+            and r.status == "sent"
+        ]
+        matches.sort(key=lambda r: (r.lesson_date, r.id))
+        return matches[-1] if matches else None
+
     def _save(
         self,
         learner_id: int,
@@ -370,6 +403,9 @@ class FakeContents:
     async def fail(self, content_id: int, reason: str) -> LessonContentRecord:
         return self._update(content_id, status="failed", error=reason)
 
+    async def get(self, content_id: int) -> LessonContentRecord | None:
+        return next((row for row in self.rows.values() if row.id == content_id), None)
+
     async def unavailable_topics(
         self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
     ) -> set[str]:
@@ -409,9 +445,11 @@ class FakeItems:
 class FakeCards:
     """Cards without FSRS: a review bumps the counter and pushes `due_at` one day out."""
 
-    def __init__(self) -> None:
+    def __init__(self, items: FakeItems | None = None) -> None:
         self.by_key: dict[tuple[int, int], CardRecord] = {}
-        self.reviews: list[tuple[int, int, int, str]] = []  # (learner id, item id, rating, source_ref)
+        # (learner id, item id, rating, source_ref, reviewed_at)
+        self.reviews: list[tuple[int, int, int, str, datetime]] = []
+        self._items = items  # to resolve an item's topic for due_or_weakest
 
     async def get(self, learner_id: int, item_id: int) -> CardRecord | None:
         return self.by_key.get((learner_id, item_id))
@@ -419,6 +457,49 @@ class FakeCards:
     async def due(self, learner_id: int, now: datetime, *, limit: int = 20) -> list[CardRecord]:
         due = [c for c in self.by_key.values() if c.learner_id == learner_id and c.due_at <= now]
         return sorted(due, key=lambda c: c.due_at)[:limit]
+
+    async def for_items(self, learner_id: int, item_ids: list[int]) -> list[CardRecord]:
+        return [c for c in self.by_key.values() if c.learner_id == learner_id and c.item_id in set(item_ids)]
+
+    def _topic_of(self, item_id: int) -> str | None:
+        if self._items is None:
+            return None
+        return next((item.topic_id for item in self._items.by_key.values() if item.id == item_id), None)
+
+    async def due_or_weakest(
+        self, learner_id: int, now: datetime, *, exclude_topic_id: str
+    ) -> tuple[CardRecord, ItemRecord] | None:
+        if self._items is None:
+            return None
+        id_to_item = {item.id: item for item in self._items.by_key.values()}
+        cards = [
+            c
+            for c in self.by_key.values()
+            if c.learner_id == learner_id
+            and id_to_item.get(c.item_id) is not None
+            and id_to_item[c.item_id].topic_id != exclude_topic_id
+        ]
+        if not cards:
+            return None
+        due = sorted((c for c in cards if c.due_at <= now), key=lambda c: c.due_at)
+        chosen = due[0] if due else min(cards, key=lambda c: (c.reviews, c.due_at))
+        return chosen, id_to_item[chosen.item_id]
+
+    async def item_accuracy(self, learner_id: int, item_ids: list[int]) -> dict[int, ItemAccuracy]:
+        wanted = set(item_ids)
+        by_item: dict[int, list[tuple[int, datetime]]] = {}
+        for lid, item_id, rating, _ref, at in self.reviews:
+            if lid == learner_id and item_id in wanted:
+                by_item.setdefault(item_id, []).append((rating, at))
+        result: dict[int, ItemAccuracy] = {}
+        for item_id, entries in by_item.items():
+            result[item_id] = ItemAccuracy(
+                item_id=item_id,
+                checks=len(entries),
+                correct=sum(rating >= 3 for rating, _ in entries),
+                days=len({at.astimezone(UTC).date() for _, at in entries}),
+            )
+        return result
 
     async def review(
         self,
@@ -431,7 +512,7 @@ class FakeCards:
         source_ref: str,
         payload: dict[str, Any] | None = None,
     ) -> CardRecord:
-        if any(ref == source_ref for *_, ref in self.reviews):
+        if any(entry[3] == source_ref for entry in self.reviews):
             return self.by_key[(learner_id, item_id)]
         card = self.by_key.get((learner_id, item_id)) or CardRecord(
             id=len(self.by_key) + 1,
@@ -447,7 +528,7 @@ class FakeCards:
             update={"due_at": at + timedelta(days=1), "last_reviewed_at": at, "reviews": card.reviews + 1}
         )
         self.by_key[(learner_id, item_id)] = card
-        self.reviews.append((learner_id, item_id, rating, source_ref))
+        self.reviews.append((learner_id, item_id, rating, source_ref, at))
         return card
 
 
@@ -494,7 +575,7 @@ class FakePractice:
         return next((d for d in self.deliveries.values() if d.lesson_id == lesson_id and d.kind == kind), None)
 
     async def claim_delivery(
-        self, lesson_id: int, kind: PracticeKind, item_count: int
+        self, lesson_id: int, kind: PracticeKind, item_count: int, *, payload: dict[str, Any] | None = None
     ) -> PracticeDeliveryRecord | None:
         if await self.delivery(lesson_id, kind) is not None:
             return None
@@ -507,6 +588,7 @@ class FakePractice:
             sent_at=None,
             telegram_message_ids=[],
             completed_at=None,
+            payload=payload,
         )
         self.deliveries[record.id] = record
         return record
@@ -674,12 +756,13 @@ class FakePractice:
 
 def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
     learners, lessons = FakeLearners(), FakeLessons()
+    items = FakeItems()
     stores = Stores(
         learners=learners,
         lessons=lessons,
         practice=FakePractice(learners, lessons),
-        items=FakeItems(),
-        cards=FakeCards(),
+        items=items,
+        cards=FakeCards(items),
         profiles=FakeProfiles(learners),
         contents=FakeContents(),
     )

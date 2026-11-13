@@ -29,6 +29,7 @@ from english_agent.models.storage import (
     ClaimOutcome,
     ErrorRecord,
     GradingTask,
+    ItemAccuracy,
     ItemDraft,
     ItemRecord,
     LearnerProfileRecord,
@@ -44,10 +45,11 @@ from english_agent.models.storage import (
     ProfileInputs,
     QuizPollRecord,
     QuizResult,
+    SentStep,
     TranslationAnswerRecord,
     core_item_key,
 )
-from english_agent.srs import ReviewScheduler, due_at, make_scheduler, quiz_rating, translation_rating
+from english_agent.srs import GOOD, ReviewScheduler, due_at, make_scheduler, quiz_rating, translation_rating
 from english_agent.storage.db import SessionFactory, make_engine, make_session_factory, session_scope
 from english_agent.storage.orm import (
     CardRow,
@@ -118,6 +120,10 @@ class LessonStore(Protocol):
 
     async def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]: ...
 
+    async def sent_steps(self, learner_id: int, cefr: Cefr) -> list[SentStep]: ...
+
+    async def taught_step(self, learner_id: int, item_key: str) -> LessonRecord | None: ...
+
     async def states(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonState]: ...
 
     async def claim(
@@ -164,6 +170,8 @@ class LessonContentStore(Protocol):
 
     async def fail(self, content_id: int, reason: str) -> LessonContentRecord: ...
 
+    async def get(self, content_id: int) -> LessonContentRecord | None: ...
+
     async def unavailable_topics(
         self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
     ) -> set[str]: ...
@@ -181,7 +189,7 @@ class PracticeStore(Protocol):
     async def delivery(self, lesson_id: int, kind: PracticeKind) -> PracticeDeliveryRecord | None: ...
 
     async def claim_delivery(
-        self, lesson_id: int, kind: PracticeKind, item_count: int
+        self, lesson_id: int, kind: PracticeKind, item_count: int, *, payload: dict[str, Any] | None = None
     ) -> PracticeDeliveryRecord | None: ...
 
     async def mark_sent(self, delivery_id: int, message_ids: list[int]) -> PracticeDeliveryRecord: ...
@@ -226,6 +234,14 @@ class PracticeStore(Protocol):
 
 class CardStore(Protocol):
     async def get(self, learner_id: int, item_id: int) -> CardRecord | None: ...
+
+    async def for_items(self, learner_id: int, item_ids: list[int]) -> list[CardRecord]: ...
+
+    async def due_or_weakest(
+        self, learner_id: int, now: datetime, *, exclude_topic_id: str
+    ) -> tuple[CardRecord, ItemRecord] | None: ...
+
+    async def item_accuracy(self, learner_id: int, item_ids: list[int]) -> dict[int, ItemAccuracy]: ...
 
     async def due(self, learner_id: int, now: datetime, *, limit: int = 20) -> list[CardRecord]: ...
 
@@ -527,6 +543,55 @@ class LessonRepo:
             )
             return set(rows)
 
+    async def sent_steps(self, learner_id: int, cefr: Cefr) -> list[SentStep]:
+        """Every step the learner has been sent at this level, oldest first (no payloads)."""
+        async with session_scope(self._sessions) as session:
+            rows = await session.execute(
+                select(
+                    LessonRow.id,
+                    LessonRow.topic_id,
+                    LessonRow.lesson_date,
+                    LessonRow.step_index,
+                    LessonRow.step_count,
+                    LessonRow.step_slug,
+                    LessonRow.variant,
+                    LessonRow.content_id,
+                )
+                .where(LessonRow.learner_id == learner_id, LessonRow.cefr == cefr, LessonRow.status == "sent")
+                .order_by(LessonRow.lesson_date, LessonRow.id)
+            )
+            return [
+                SentStep(
+                    lesson_id=row.id,
+                    topic_id=row.topic_id,
+                    lesson_date=row.lesson_date,
+                    step_index=row.step_index,
+                    step_count=row.step_count,
+                    step_slug=row.step_slug,
+                    variant=row.variant,
+                    content_id=row.content_id,
+                )
+                for row in rows
+            ]
+
+    async def taught_step(self, learner_id: int, item_key: str) -> LessonRecord | None:
+        """The learner's own main-variant row that taught `item_key` (`<topic>:<slug>`); the review bank source."""
+        topic_id, _, slug = item_key.partition(":")
+        async with session_scope(self._sessions) as session:
+            row = await session.scalar(
+                select(LessonRow)
+                .where(
+                    LessonRow.learner_id == learner_id,
+                    LessonRow.topic_id == topic_id,
+                    LessonRow.step_slug == slug,
+                    LessonRow.variant == "main",
+                    LessonRow.status == "sent",
+                )
+                .order_by(LessonRow.lesson_date.desc(), LessonRow.id.desc())
+                .limit(1)
+            )
+            return None if row is None else LessonRecord.model_validate(row)
+
     async def states(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonState]:
         """The rows of these (learner id, day) keys without their payload, one query."""
         if not keys:
@@ -783,6 +848,12 @@ class LessonContentRepo:
             await session.flush()
             return LessonContentRecord.model_validate(row)
 
+    async def get(self, content_id: int) -> LessonContentRecord | None:
+        """A content row by id; used to reuse the topic a learner is already partway through."""
+        async with session_scope(self._sessions) as session:
+            row = await session.get(LessonContentRow, content_id)
+            return None if row is None else LessonContentRecord.model_validate(row)
+
     async def unavailable_topics(
         self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
     ) -> set[str]:
@@ -883,6 +954,61 @@ class CardRepo:
                 .limit(limit)
             )
             return [CardRecord.model_validate(row) for row in rows]
+
+    async def for_items(self, learner_id: int, item_ids: list[int]) -> list[CardRecord]:
+        """The learner's cards for `item_ids` (those that exist), any order."""
+        if not item_ids:
+            return []
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(CardRow).where(CardRow.learner_id == learner_id, CardRow.item_id.in_(item_ids))
+            )
+            return [CardRecord.model_validate(row) for row in rows]
+
+    async def due_or_weakest(
+        self, learner_id: int, now: datetime, *, exclude_topic_id: str
+    ) -> tuple[CardRecord, ItemRecord] | None:
+        """A card to interleave from an older topic: the most overdue, else the least-recalled.
+
+        Excludes the topic being taught today, so the review slot always reaches back. None when the
+        learner has no card outside that topic.
+        """
+        async with session_scope(self._sessions) as session:
+            base = (
+                select(CardRow, ItemRow)
+                .join(ItemRow, CardRow.item_id == ItemRow.id)
+                .where(CardRow.learner_id == learner_id, ItemRow.topic_id != exclude_topic_id)
+            )
+            due = (await session.execute(base.where(CardRow.due_at <= now).order_by(CardRow.due_at).limit(1))).first()
+            if due is not None:
+                return CardRecord.model_validate(due[0]), ItemRecord.model_validate(due[1])
+            rows = (await session.execute(base)).all()
+            if not rows:
+                return None
+            card, item = min(rows, key=lambda pair: self._scheduler.retrievability(pair[0].fsrs_state, now))
+            return CardRecord.model_validate(card), ItemRecord.model_validate(item)
+
+    async def item_accuracy(self, learner_id: int, item_ids: list[int]) -> dict[int, ItemAccuracy]:
+        """Per item: how many reviews, how many were correct (rating >= Good), on how many UTC days."""
+        if not item_ids:
+            return {}
+        day = func.date(func.timezone("UTC", ReviewLogRow.reviewed_at))
+        async with session_scope(self._sessions) as session:
+            rows = await session.execute(
+                select(
+                    CardRow.item_id,
+                    func.count(ReviewLogRow.id).label("checks"),
+                    func.count(ReviewLogRow.id).filter(ReviewLogRow.rating >= GOOD).label("correct"),
+                    func.count(func.distinct(day)).label("days"),
+                )
+                .join(ReviewLogRow, ReviewLogRow.card_id == CardRow.id)
+                .where(CardRow.learner_id == learner_id, CardRow.item_id.in_(item_ids))
+                .group_by(CardRow.item_id)
+            )
+            return {
+                row.item_id: ItemAccuracy(item_id=row.item_id, checks=row.checks, correct=row.correct, days=row.days)
+                for row in rows
+            }
 
 
 class ProfileRepo:
@@ -1063,12 +1189,12 @@ class PracticeRepo:
             return None if row is None else PracticeDeliveryRecord.model_validate(row)
 
     async def claim_delivery(
-        self, lesson_id: int, kind: PracticeKind, item_count: int
+        self, lesson_id: int, kind: PracticeKind, item_count: int, *, payload: dict[str, Any] | None = None
     ) -> PracticeDeliveryRecord | None:
         """Reserve the block before sending it; None when it is already claimed (never send twice)."""
         statement = (
             insert(PracticeDeliveryRow)
-            .values(lesson_id=lesson_id, kind=kind, item_count=item_count)
+            .values(lesson_id=lesson_id, kind=kind, item_count=item_count, payload=payload)
             .on_conflict_do_nothing(index_elements=["lesson_id", "kind"])
             .returning(PracticeDeliveryRow.id)
         )

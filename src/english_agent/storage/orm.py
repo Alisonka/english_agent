@@ -77,9 +77,12 @@ class LessonRow(Base):
         # One lesson per learner per day: a restart or a manual run must not send it twice.
         UniqueConstraint("learner_id", "lesson_date"),
         CheckConstraint("status IN ('pending', 'sending', 'sent', 'failed', 'skipped')", name="status"),
+        CheckConstraint("variant IN ('main', 'alt')", name="variant"),
+        CheckConstraint("payload_kind IN ('lesson', 'step')", name="payload_kind"),
         Index(
             "ix_lessons_unfinished", "lesson_date", postgresql_where=text("status IN ('pending', 'sending', 'failed')")
         ),
+        Index("ix_lessons_learner_id_topic_id", "learner_id", "topic_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -100,6 +103,13 @@ class LessonRow(Base):
     # Who is delivering it: set when a worker claims the day, cleared when it lets go; see `LessonRepo.claim`.
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    # Which step of the topic this day is, and what the payload holds. Legacy rows are step 1 of 1,
+    # slug "core", a main variant whose payload is a whole `Lesson`; step rows carry a `LessonStep`.
+    step_index: Mapped[int] = mapped_column(SmallInteger, default=1, server_default=text("1"))
+    step_count: Mapped[int] = mapped_column(SmallInteger, default=1, server_default=text("1"))
+    step_slug: Mapped[str] = mapped_column(String(40), default="core", server_default=text("'core'"))
+    variant: Mapped[str] = mapped_column(String(8), default="main", server_default=text("'main'"))
+    payload_kind: Mapped[str] = mapped_column(String(16), default="lesson", server_default=text("'lesson'"))
 
 
 class LessonContentRow(Base):
@@ -110,6 +120,7 @@ class LessonContentRow(Base):
         # One piece of content per recipe: the claim that prevents two workers writing it at once.
         UniqueConstraint("topic_id", "cefr", "curriculum_version", "content_key"),
         CheckConstraint("status IN ('generating', 'ready', 'failed')", name="status"),
+        CheckConstraint("payload_kind IN ('lesson', 'topic')", name="payload_kind"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -119,6 +130,8 @@ class LessonContentRow(Base):
     content_key: Mapped[str] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(16))
     schema_version: Mapped[int] = mapped_column(Integer)
+    # "lesson" holds a `Lesson`; "topic" holds a whole `TopicContent` (plan + steps + cheat sheet).
+    payload_kind: Mapped[str] = mapped_column(String(16), default="lesson", server_default=text("'lesson'"))
     lesson: Mapped[dict[str, Any] | None] = mapped_column("payload", JSONB)
     error: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
@@ -214,7 +227,7 @@ class PracticeDeliveryRow(Base):
     __table_args__ = (
         # Claimed before sending: a second tick (or a restart) must not send the same block twice.
         UniqueConstraint("lesson_id", "kind"),
-        CheckConstraint("kind IN ('quiz', 'translation')", name="kind"),
+        CheckConstraint("kind IN ('quiz', 'translation', 'summary')", name="kind"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -225,6 +238,8 @@ class PracticeDeliveryRow(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     telegram_message_ids: Mapped[list[int]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The assembled practice set for the day (per-item question/sentence tags); NULL for legacy rows.
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class QuizPollRow(Base):

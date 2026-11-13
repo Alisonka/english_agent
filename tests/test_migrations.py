@@ -113,3 +113,45 @@ def test_0006_downgrade_turns_unfinished_days_into_failed_ones(database_url: str
         with engine.connect() as connection:
             statuses = [row[0] for row in connection.execute(text("SELECT status FROM lessons ORDER BY lesson_date"))]
         assert statuses == ["sent", "failed", "failed"]
+
+
+def test_0007_backfills_legacy_rows_as_one_step_and_round_trips(database_url: str) -> None:
+    with schema_engine(database_url) as engine:
+        run_alembic(engine, "upgrade", "0006")
+        with engine.begin() as connection:
+            learner = connection.execute(
+                text("INSERT INTO learners (telegram_chat_id, cefr) VALUES ('1', 'A2') RETURNING id")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO lessons (learner_id, lesson_date, topic_id, cefr, schema_version, status)"
+                    " VALUES (:learner, '2026-11-01', 'there_is_are', 'A2', 3, 'sent')"
+                ),
+                {"learner": learner},
+            )
+
+        run_alembic(engine, "upgrade", "0007")
+        with engine.connect() as connection:
+            step = connection.execute(
+                text("SELECT step_index, step_count, step_slug, variant, payload_kind FROM lessons")
+            ).one()
+            kind = connection.execute(text("SELECT payload_kind FROM lesson_contents")).all()
+        assert tuple(step) == (1, 1, "core", "main", "lesson")
+        assert kind == []  # no content rows, but the column and its default exist
+
+        # A cheat-sheet delivery has no place in the old schema and is dropped on downgrade.
+        with engine.begin() as connection:
+            lesson_id = connection.execute(text("SELECT id FROM lessons")).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO practice_deliveries (lesson_id, kind, item_count, claimed_at)"
+                    " VALUES (:lesson, 'summary', 0, now())"
+                ),
+                {"lesson": lesson_id},
+            )
+
+        run_alembic(engine, "downgrade", "0006")
+        with engine.connect() as connection:
+            kinds = [row[0] for row in connection.execute(text("SELECT kind FROM practice_deliveries"))]
+        assert kinds == []  # the summary delivery was removed
+        assert "step_index" not in {column["name"] for column in inspect(engine).get_columns("lessons")}

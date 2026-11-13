@@ -20,8 +20,10 @@ LessonClaim = Literal["claimed", "resume", "busy", "done"]
 ContentStatus = Literal["generating", "ready", "failed"]
 ClaimOutcome = Literal["ready", "claimed", "busy", "exhausted"]
 ErrorKind = Literal["quiz", "text"]
-PracticeKind = Literal["quiz", "translation"]
+PracticeKind = Literal["quiz", "translation", "summary"]
 TranslationAnswerStatus = Literal["pending", "graded", "failed"]
+PayloadKind = Literal["lesson", "step"]
+StepVariant = Literal["main", "alt"]
 
 
 class LearnerRecord(BaseModel):
@@ -78,6 +80,20 @@ class LessonRecord(BaseModel):
     content_id: int | None = None  # the shared `LessonContentRecord` that was sent; None for older lessons
     claimed_at: datetime | None = None  # a worker is delivering it since then (None: nobody holds it)
     attempts: int = 0  # delivery attempts so far
+    # Which step of the topic this day is. Legacy rows are step 1 of 1, slug "core", a main variant
+    # whose `lesson` payload is a whole `Lesson`; step rows carry a `LessonStep` (read in later groups).
+    payload_kind: PayloadKind = "lesson"
+    step_index: int = 1
+    step_count: int = 1
+    step_slug: str = "core"
+    variant: StepVariant = "main"
+
+    @property
+    def item_key(self) -> str:
+        """The learnable item this day teaches: the topic core item, or the step item."""
+        if self.payload_kind == "lesson":
+            return core_item_key(self.topic_id)
+        return f"{self.topic_id}:{self.step_slug}"
 
 
 class LessonState(BaseModel):
@@ -106,6 +122,7 @@ class LessonContentRecord(BaseModel):
     content_key: str
     status: ContentStatus
     schema_version: int
+    payload_kind: Literal["lesson", "topic"] = "lesson"  # "topic" holds a whole TopicContent
     lesson: Lesson | None
     error: str | None
     attempts: int
@@ -207,6 +224,39 @@ class PracticeDeliveryRecord(BaseModel):
     sent_at: datetime | None
     telegram_message_ids: list[int]
     completed_at: datetime | None
+    payload: dict[str, Any] | None = None  # the assembled PracticeBlock (typed in the practice group)
+
+
+class SentStep(BaseModel):
+    """A sent step of a topic, for progression and re-teach decisions (no payload)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    lesson_id: int
+    topic_id: str
+    lesson_date: date
+    step_index: int
+    step_count: int
+    step_slug: str
+    variant: StepVariant
+    content_id: int | None = None
+
+    @property
+    def item_key(self) -> str:
+        return f"{self.topic_id}:{self.step_slug}"
+
+
+class ItemAccuracy(BaseModel):
+    """How a learner has done on one item across all its reviews: counts and distinct review days."""
+
+    item_id: int
+    checks: int
+    correct: int
+    days: int  # distinct calendar days the item was reviewed on (UTC)
+
+    @property
+    def ratio(self) -> float | None:
+        return self.correct / self.checks if self.checks else None
 
 
 class QuizPollRecord(BaseModel):
