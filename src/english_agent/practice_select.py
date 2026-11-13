@@ -165,7 +165,7 @@ def assemble_translation(
         for bank, source in fillers:
             if bank is None or len(picks) >= TRANSLATION_SIZE:
                 continue
-            more = _pick_sentences(bank, 1, source, used=used, rng=rng)  # type: ignore[arg-type]
+            more = _pick_sentences(bank, 1, source, used=used, rng=rng)
             if more:
                 picks += more
                 added = True

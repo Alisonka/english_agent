@@ -48,15 +48,15 @@ def test_step_example_rejects_a_long_sentence() -> None:
 
 def test_step_message_over_budget_is_rejected() -> None:
     payload = copy.deepcopy(STEP_MESSAGE_SINGULAR)
-    payload["contrast_ru"] = "о" * 160  # pushes the visible-text sum past the budget
+    payload["hook_ru"] = "а" * 140  # max every long field so the visible-text sum clears the budget
     payload["key_idea_ru"] = "и" * 160
-    payload["hook_ru"] = "а" * 140
-    message = payload
+    payload["contrast_ru"] = "о" * 160
+    payload["incorrect"] = "e" * 90
+    payload["correct"] = "c" * 90
+    payload["teaser_ru"] = "т" * 100
     with pytest.raises(ValidationError) as error:
-        StepMessage.model_validate(message)
-    assert "budget" in str(error.value)
-    # Guard the test itself: the inflated payload really exceeds the budget.
-    assert 140 + 160 + 160 > 0 and STEP_TEXT_BUDGET == 950
+        StepMessage.model_validate(payload)
+    assert "budget" in str(error.value) and STEP_TEXT_BUDGET == 950
 
 
 def test_teaser_required_on_every_step_but_the_last() -> None:

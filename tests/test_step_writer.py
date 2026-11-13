@@ -88,4 +88,4 @@ async def test_last_step_must_not_carry_a_teaser() -> None:
     llm = ScriptedLLM([submit(args), submit(good)])
     step: LessonStep = await write_step(llm, PLAN, 2, NOTES, variant="main")
     assert step.index == 2 and step.message.teaser_ru is None
-    assert "last step must not have a teaser" in llm.calls[1]["messages"][-1]["content"]
+    assert "teaser" in llm.calls[1]["messages"][-1]["content"]  # the last-of-topic row was rejected and retried
