@@ -242,6 +242,14 @@ class OpenTranslationTask(BaseModel):
     lesson: Lesson
 
 
+class GradingTask(BaseModel):
+    """What grading one translation answer needs: the answer, its lesson and where to reply."""
+
+    answer: TranslationAnswerRecord
+    lesson: Lesson
+    telegram_chat_id: str
+
+
 class LearnerProfileRecord(BaseModel):
     """One version of a learner's profile; versions are only ever appended."""
 

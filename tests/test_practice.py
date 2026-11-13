@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-import json
 import random
 from datetime import date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import httpx
 import pytest
+from aiogram.methods import SendMessage, SendPoll
 
 from english_agent.config import Settings
 from english_agent.models.lesson import Lesson
 from english_agent.models.storage import LearnerRecord, LessonRecord, PracticeDeliveryRecord
 from english_agent.practice import deliver_due_practice, due_practice, shuffle_options
 from english_agent.storage import Stores
-from english_agent.telegram import TelegramClient
 from fakes import fake_items, fake_practice, fake_stores
+from telegram_fake import FakeTelegram, blocked_by, fake_sender
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 DAY = date(2026, 11, 6)
@@ -135,95 +134,69 @@ def test_shuffle_keeps_the_correct_answer(lesson: Lesson) -> None:
 # --- sending --------------------------------------------------------------------
 
 
-class PollTelegram:
-    """Answers sendMessage and sendPoll like the Bot API; records every call."""
-
-    def __init__(self) -> None:
-        self.requests: list[tuple[str, dict[str, Any]]] = []
-
-    def _handler(self, request: httpx.Request) -> httpx.Response:
-        method = request.url.path.rsplit("/", 1)[-1]
-        self.requests.append((method, json.loads(request.content or b"{}")))
-        message_id = len(self.requests)
-        result: dict[str, Any] = {"message_id": message_id}
-        if method == "sendPoll":
-            result["poll"] = {"id": f"poll-{message_id}"}
-        return httpx.Response(200, json={"ok": True, "result": result})
-
-    def client(self) -> TelegramClient:
-        return TelegramClient(httpx.Client(transport=httpx.MockTransport(self._handler)), "1:T")
-
-
 @pytest.fixture
-def stores(lesson: Lesson) -> Stores:
+async def stores(lesson: Lesson) -> Stores:
     stores, learners, lessons = fake_stores()
     student = learners.started("42", DAY)
-    record = lessons.record_sent(student.id, DAY, lesson, [1], curriculum_version=1)
+    record = await lessons.record_sent(student.id, DAY, lesson, [1], curriculum_version=1)
     lessons.rows[(student.id, DAY)] = record.model_copy(update={"sent_at": LESSON_AT})
     return stores
 
 
-def test_quiz_is_sent_once_and_recorded(stores: Stores, lesson: Lesson) -> None:
-    telegram = PollTelegram()
+async def test_quiz_is_sent_once_and_recorded(stores: Stores, lesson: Lesson) -> None:
+    telegram = FakeTelegram()
+    sender = fake_sender(telegram)
     now = at(11)
 
-    assert deliver_due_practice(telegram.client(), settings(), stores, now, rng=random.Random(1)) == [("42", "quiz")]
-    assert deliver_due_practice(telegram.client(), settings(), stores, now) == []  # already claimed
+    assert await deliver_due_practice(sender, settings(), stores, now, rng=random.Random(1)) == [("42", "quiz")]
+    assert await deliver_due_practice(sender, settings(), stores, now) == []  # already claimed
 
-    methods = [method for method, _ in telegram.requests]
-    assert methods == ["sendMessage", "sendPoll", "sendPoll", "sendPoll"]
-    poll = telegram.requests[1][1]
-    assert poll["type"] == "quiz" and poll["is_anonymous"] is False
+    assert [type(call) for call in telegram.calls] == [SendMessage, SendPoll, SendPoll, SendPoll]
+    poll = telegram.of(SendPoll)[0]
+    assert poll.type == "quiz" and poll.is_anonymous is False and poll.explanation_parse_mode is None
     practice = fake_practice(stores)
     assert len(practice.polls) == 3
     stored = practice.polls["poll-2"].question
-    assert poll["options"] == [{"text": option} for option in stored.options]
-    assert poll["correct_option_ids"] == [stored.correct_option]
+    assert [option.text for option in poll.options] == stored.options
+    assert poll.correct_option_ids == [stored.correct_option]
     [sent] = practice.deliveries.values()
     assert sent.sent_at is not None and sent.telegram_message_ids == [1, 2, 3, 4]
     # Every poll rates the lesson's core item, created on the spot if the lesson predates items.
-    item = fake_items(stores).get_by_key(f"{lesson.topic_id}:core")
+    item = fake_items(stores).by_key.get(f"{lesson.topic_id}:core")
     assert item is not None and item.source_lesson_id == 1
     assert {p.item_id for p in practice.polls.values()} == {item.id}
 
 
-def test_translation_is_sent_with_force_reply(stores: Stores, lesson: Lesson) -> None:
+async def test_translation_is_sent_with_force_reply(stores: Stores, lesson: Lesson) -> None:
     practice = fake_practice(stores)
-    quiz = practice.claim_delivery(1, "quiz", 3)
+    quiz = await practice.claim_delivery(1, "quiz", 3)
     assert quiz is not None
-    practice.mark_sent(quiz.id, [2])
+    await practice.mark_sent(quiz.id, [2])
     practice.deliveries[quiz.id] = practice.deliveries[quiz.id].model_copy(update={"sent_at": at(10)})
-    telegram = PollTelegram()
+    telegram = FakeTelegram()
 
-    assert deliver_due_practice(telegram.client(), settings(), stores, at(18, 0)) == [("42", "translation")]
+    assert await deliver_due_practice(fake_sender(telegram), settings(), stores, at(18, 0)) == [("42", "translation")]
 
-    [(method, payload)] = telegram.requests
-    assert method == "sendMessage"
-    assert lesson.translation[0].ru in payload["text"]
-    assert payload["reply_markup"]["force_reply"] is True
-
-
-def test_paused_learner_gets_no_practice(stores: Stores) -> None:
-    stores.learners.set_paused("42", True)
-    telegram = PollTelegram()
-    assert deliver_due_practice(telegram.client(), settings(), stores, at(11)) == []
-    assert telegram.requests == []
+    [message] = telegram.of(SendMessage)
+    assert lesson.translation[0].ru in message.text
+    assert message.reply_markup.force_reply is True
 
 
-def test_blocked_chat_is_deactivated_and_others_still_get_their_quiz(lesson: Lesson) -> None:
+async def test_paused_learner_gets_no_practice(stores: Stores) -> None:
+    await stores.learners.set_paused("42", True)
+    telegram = FakeTelegram()
+    assert await deliver_due_practice(fake_sender(telegram), settings(), stores, at(11)) == []
+    assert telegram.calls == []
+
+
+async def test_blocked_chat_is_deactivated_and_others_still_get_their_quiz(lesson: Lesson) -> None:
     stores, learners, lessons = fake_stores()
     for chat_id in ("42", "43"):
         student = learners.started(chat_id, DAY)
-        record = lessons.record_sent(student.id, DAY, lesson, [1], curriculum_version=1)
+        record = await lessons.record_sent(student.id, DAY, lesson, [1], curriculum_version=1)
         lessons.rows[(student.id, DAY)] = record.model_copy(update={"sent_at": LESSON_AT})
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if json.loads(request.content or b"{}").get("chat_id") == "42":
-            return httpx.Response(403, json={"ok": False, "description": "Forbidden: bot was blocked by the user"})
-        result: dict[str, Any] = {"message_id": 1, "poll": {"id": f"poll-{len(fake_practice(stores).polls)}"}}
-        return httpx.Response(200, json={"ok": True, "result": result})
-
-    client = TelegramClient(httpx.Client(transport=httpx.MockTransport(handler)), "1:T")
-    assert deliver_due_practice(client, settings(), stores, at(11)) == [("43", "quiz")]
-    blocked = learners.get("42")
-    assert blocked is not None and (blocked.is_active, blocked.deactivated_reason) == (False, "blocked")
+    sender = fake_sender(FakeTelegram(fail=blocked_by("42")))
+    assert await deliver_due_practice(sender, settings(), stores, at(11)) == [("43", "quiz")]
+    blocked = learners.by_chat["42"]
+    assert (blocked.is_active, blocked.deactivated_reason) == (False, "blocked")

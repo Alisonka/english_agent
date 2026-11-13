@@ -35,7 +35,7 @@ def core_item_from_lesson(lesson: Lesson) -> ItemDraft:
     )
 
 
-def record_core_item(items: ItemStore, lesson: Lesson, lesson_id: int) -> ItemRecord | None:
+async def record_core_item(items: ItemStore, lesson: Lesson, lesson_id: int) -> ItemRecord | None:
     """Make sure the lesson's topic has its core item; a storage failure is logged, never raised.
 
     Runs after the lesson is sent and recorded: the learner already has it, so a failure here
@@ -44,7 +44,7 @@ def record_core_item(items: ItemStore, lesson: Lesson, lesson_id: int) -> ItemRe
     """
     span = trace.get_current_span()
     try:
-        item, created = items.get_or_create(core_item_from_lesson(lesson), source_lesson_id=lesson_id)
+        item, created = await items.get_or_create(core_item_from_lesson(lesson), source_lesson_id=lesson_id)
     except SQLAlchemyError as error:
         span.record_exception(error)
         log.warning("could not record the item for %s: %s", lesson.topic_id, error)
@@ -61,14 +61,14 @@ class BackfillResult:
     skipped: int = 0  # sent lessons without a stored payload
 
 
-def backfill_core_items(stores: Stores) -> BackfillResult:
+async def backfill_core_items(stores: Stores) -> BackfillResult:
     """A core item for every sent lesson that lacks one. Idempotent: safe to run again any time."""
     result = BackfillResult()
-    for record in stores.lessons.list_sent():
+    for record in await stores.lessons.list_sent():
         if record.lesson is None:
             result.skipped += 1
             continue
-        _, created = stores.items.get_or_create(core_item_from_lesson(record.lesson), source_lesson_id=record.id)
+        _, created = await stores.items.get_or_create(core_item_from_lesson(record.lesson), source_lesson_id=record.id)
         if created:
             result.created += 1
         else:

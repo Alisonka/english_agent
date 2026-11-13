@@ -10,6 +10,7 @@ uv run python -m english_agent.storage set-schedule --chat 42 --lesson-time 08:3
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 from datetime import date, time
@@ -36,55 +37,56 @@ class _LegacyLearnerState(BaseModel):
     cefr: Cefr
 
 
-def _import_learner_json(path: str) -> int:
+async def _import_learner_json(path: str) -> int:
     settings = get_settings()
     if not settings.telegram_chat_id:
         log.error("TELEGRAM_CHAT_ID must be set: the learner is stored under that chat")
         return 2
-    stores = open_stores(settings)
-    if stores is None:
-        log.error("DATABASE_URL must be set")
-        return 2
-
     try:
         text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
         state = _LegacyLearnerState.model_validate_json(text)
     except (OSError, ValidationError) as error:
         log.error("cannot read learner state from %s: %s", path, error)
         return 1
-
-    record = stores.learners.set_cefr(settings.telegram_chat_id, state.cefr)
+    async with open_stores(settings) as stores:
+        if stores is None:
+            log.error("DATABASE_URL must be set")
+            return 2
+        record = await stores.learners.set_cefr(settings.telegram_chat_id, state.cefr)
     print(f"learner {record.id} (chat {record.telegram_chat_id}): cefr={record.cefr}")
     return 0
 
 
-def _backfill_items() -> int:
-    stores = open_stores(get_settings())
-    if stores is None:
-        log.error("DATABASE_URL must be set")
-        return 2
-    try:
-        result = backfill_core_items(stores)
-    except SQLAlchemyError as error:
-        log.error("backfill failed: %s", error)
-        return 1
+async def _backfill_items() -> int:
+    async with open_stores(get_settings()) as stores:
+        if stores is None:
+            log.error("DATABASE_URL must be set")
+            return 2
+        try:
+            result = await backfill_core_items(stores)
+        except SQLAlchemyError as error:
+            log.error("backfill failed: %s", error)
+            return 1
     print(f"items: {result.created} created, {result.existing} already present, {result.skipped} lessons skipped")
     return 0
 
 
-def _backfill_reviews() -> int:
+async def _backfill_reviews() -> int:
     """Run after `backfill-items`: links old polls to items, then rates every stored answer once."""
     settings = get_settings()
     if not settings.database_url.get_secret_value():
         log.error("DATABASE_URL must be set")
         return 2
-    maintenance = MaintenanceRepo(make_session_factory(make_engine(settings)), make_scheduler(settings))
+    engine = make_engine(settings)
+    maintenance = MaintenanceRepo(make_session_factory(engine), make_scheduler(settings))
     try:
-        linked = maintenance.link_polls_to_items()
-        applied = maintenance.replay_reviews()
+        linked = await maintenance.link_polls_to_items()
+        applied = await maintenance.replay_reviews()
     except SQLAlchemyError as error:
         log.error("backfill failed: %s", error)
         return 1
+    finally:
+        await engine.dispose()
     print(f"reviews: {linked} polls linked to items, {applied} ratings applied")
     return 0
 
@@ -96,16 +98,12 @@ def _clock(text: str) -> time:
     return clock
 
 
-def _set_schedule(args: argparse.Namespace) -> int:
+async def _set_schedule(args: argparse.Namespace) -> int:
     """Set one learner's schedule; every option left out takes its value from the settings (.env)."""
     settings = get_settings()
     chat_id = args.chat or settings.telegram_chat_id
     if not chat_id:
         log.error("pass --chat or set TELEGRAM_CHAT_ID")
-        return 2
-    stores = open_stores(settings)
-    if stores is None:
-        log.error("DATABASE_URL must be set")
         return 2
     defaults = settings.default_schedule()
     try:
@@ -118,16 +116,20 @@ def _set_schedule(args: argparse.Namespace) -> int:
     except ValidationError as error:
         log.error("invalid schedule: %s", error)
         return 2
-    try:
-        if stores.learners.get(chat_id) is None:
-            log.error("no learner with chat id %s", chat_id)
+    async with open_stores(settings) as stores:
+        if stores is None:
+            log.error("DATABASE_URL must be set")
+            return 2
+        try:
+            if await stores.learners.get(chat_id) is None:
+                log.error("no learner with chat id %s", chat_id)
+                return 1
+            record = await stores.learners.set_schedule(chat_id, schedule)
+            if args.started_on is not None:
+                record = await stores.learners.start_course(chat_id, args.started_on)
+        except SQLAlchemyError as error:
+            log.error("could not set the schedule: %s", error)
             return 1
-        record = stores.learners.set_schedule(chat_id, schedule)
-        if args.started_on is not None:
-            record = stores.learners.start_course(chat_id, args.started_on)
-    except SQLAlchemyError as error:
-        log.error("could not set the schedule: %s", error)
-        return 1
     assert record is not None
     print(
         f"learner {record.id} (chat {record.telegram_chat_id}): {record.timezone}, "
@@ -161,13 +163,13 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(get_settings())
 
     if args.command == "import-learner-json":
-        return _import_learner_json(args.path)
+        return asyncio.run(_import_learner_json(args.path))
     if args.command == "backfill-items":
-        return _backfill_items()
+        return asyncio.run(_backfill_items())
     if args.command == "backfill-reviews":
-        return _backfill_reviews()
+        return asyncio.run(_backfill_reviews())
     if args.command == "set-schedule":
-        return _set_schedule(args)
+        return asyncio.run(_set_schedule(args))
     return 2
 
 

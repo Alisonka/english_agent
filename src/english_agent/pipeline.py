@@ -1,7 +1,8 @@
 """Topic -> research -> lesson -> Telegram. The one place that wires the steps together.
 
-The server app calls `run_lesson_tick` every minute: every learner whose local send time has
-come gets the next topic of their level they have not had yet. From the command line:
+The server calls `run_lesson_tick` every minute: every learner whose local send time has come
+gets the next topic of their level they have not had yet, written once per topic and level
+(see `ensure_content`) and shared by everyone who reaches it. From the command line:
 
 uv run python -m english_agent.pipeline                                 # TELEGRAM_CHAT_ID's next lesson, send
 uv run python -m english_agent.pipeline --topic there_is_are            # a specific topic, send
@@ -17,7 +18,9 @@ import argparse
 import asyncio
 import html
 import logging
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -42,7 +45,7 @@ from english_agent.research.models import ResearchResult
 from english_agent.research.sitemaps import FileSitemapCache, SitemapCache, SitemapIndex
 from english_agent.research.tools import LiveResearchTools
 from english_agent.storage.repositories import Stores, open_stores
-from english_agent.telegram import TelegramClient, TelegramError, TelegramForbiddenError
+from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError, make_bot
 from english_agent.tracing import configure_tracing, get_tracer
 from english_agent.writer import write_lesson
 
@@ -52,15 +55,20 @@ LESSON_FAILED = "Урок «{title}» сегодня не получился. П
 # Exit codes of one lesson run.
 OK, FAILED, USAGE, RETRY_LATER = 0, 1, 2, 75  # 75: EX_TEMPFAIL, the content is being written elsewhere
 
+_CONCURRENT_LESSONS = 16  # learners served at once by one tick; Claude and Telegram have their own limits
+
 log = logging.getLogger(__name__)
 
 
-def _http_client(settings: Settings) -> httpx.Client:
-    return httpx.Client(
-        timeout=settings.http_timeout_seconds,
-        headers={"User-Agent": settings.http_user_agent},
-        follow_redirects=True,
-    )
+@dataclass(frozen=True)
+class Runtime:
+    """What a lesson run needs: the process's stores, bot, Claude client and sitemap cache."""
+
+    settings: Settings
+    stores: Stores
+    sender: Sender
+    client: AsyncAnthropic | None = None  # None: each generation opens its own
+    sitemaps: SitemapCache | None = None  # None: sitemaps cached on disk
 
 
 def _research_http(settings: Settings) -> httpx.AsyncClient:
@@ -124,13 +132,9 @@ def local_today(settings: Settings) -> date:
     return datetime.now(ZoneInfo(settings.timezone)).date()
 
 
-def deliver_lesson(lesson: Lesson, settings: Settings, chat_id: str) -> list[int]:
+async def deliver_lesson(sender: Sender, lesson: Lesson, chat_id: str) -> list[int]:
     """Send the lesson to the chat; returns the message ids."""
-    token = settings.telegram_bot_token.get_secret_value()
-    if not token:
-        raise TelegramError("TELEGRAM_BOT_TOKEN must be set")
-    with _http_client(settings) as http:
-        return TelegramClient(http, token).send_lesson(chat_id, lesson)
+    return await sender.send_lesson(chat_id, lesson)
 
 
 def topic_for_day(curriculum: Curriculum, day: int) -> CurriculumTopic | None:
@@ -150,12 +154,10 @@ def next_topic(curriculum: Curriculum, sent_topic_ids: set[str]) -> CurriculumTo
     return next((topic for topic in ordered if topic.id not in sent_topic_ids), None)
 
 
-def notify(settings: Settings, chat_id: str, text: str) -> None:
+async def notify(sender: Sender, chat_id: str, text: str) -> None:
     """Send a short plain-text notice to the chat; a delivery failure is only logged."""
     try:
-        with _http_client(settings) as http:
-            client = TelegramClient(http, settings.telegram_bot_token.get_secret_value())
-            client.send_message(chat_id, html.escape(text, quote=False))
+        await sender.send_text(chat_id, html.escape(text, quote=False))
     except TelegramError as error:
         log.warning("telegram error: %s", error)
 
@@ -175,27 +177,33 @@ def lesson_due(learner: LearnerRecord, today_status: LessonStatus | None, now: d
     return in_daily_window(local, learner.lesson_send_time, settings.lesson_catch_up_hours)
 
 
-def run_lesson_tick(settings: Settings, stores: Stores, now: datetime) -> int:
+async def run_lesson_tick(runtime: Runtime, now: datetime) -> int:
     """Run the lesson of every learner it is due for at `now`; returns how many runs ended without error."""
-    learners = stores.learners.list_active()
+    stores = runtime.stores
+    learners = await stores.learners.list_active()
     days = {learner.id: local_now(learner.timezone, now).date() for learner in learners}
-    statuses = stores.lessons.statuses([(learner.id, days[learner.id]) for learner in learners])
-    succeeded = 0
-    for learner in learners:
-        day = days[learner.id]
-        if not lesson_due(learner, statuses.get((learner.id, day)), now, settings):
-            continue
-        with bind(chat_id=learner.telegram_chat_id):
-            try:
-                succeeded += run_lesson_for_learner(settings, stores, learner, day, now=now) == OK
-            except Exception:  # one learner's failure must not stop the others
-                log.exception("lesson run failed")
-    return succeeded
+    statuses = await stores.lessons.statuses([(learner.id, days[learner.id]) for learner in learners])
+    due = [
+        learner
+        for learner in learners
+        if lesson_due(learner, statuses.get((learner.id, days[learner.id])), now, runtime.settings)
+    ]
+    gate = asyncio.Semaphore(_CONCURRENT_LESSONS)
+
+    async def one(learner: LearnerRecord) -> bool:
+        async with gate:
+            with bind(chat_id=learner.telegram_chat_id):
+                try:
+                    return await run_lesson_for_learner(runtime, learner, days[learner.id], now=now) == OK
+                except Exception:  # one learner's failure must not stop the others
+                    log.exception("lesson run failed")
+                    return False
+
+    return sum(await asyncio.gather(*(one(learner) for learner in due)))
 
 
-def ensure_content(
-    settings: Settings,
-    stores: Stores,
+async def ensure_content(
+    runtime: Runtime,
     topic: CurriculumTopic,
     cefr: Cefr,
     curriculum_version: int,
@@ -207,7 +215,8 @@ def ensure_content(
     Returns a "ready" record, a "failed" one (this attempt failed, or every attempt did), or None
     when another worker is writing it or the last attempt failed only moments ago: try again later.
     """
-    outcome, record = stores.contents.claim(
+    settings, stores = runtime.settings, runtime.stores
+    outcome, record = await stores.contents.claim(
         topic.id,
         cefr,
         curriculum_version,
@@ -226,21 +235,24 @@ def ensure_content(
         return None
     log.info("writing the lesson for %s (%s), attempt %d", topic.id, cefr, record.attempts)
     try:
-        # Bridge until the stores are async: one event loop for this lesson's research and writing.
-        research, lesson = asyncio.run(
-            generate_lesson(topic, settings, cefr=cefr, curriculum_version=curriculum_version)
+        research, lesson = await generate_lesson(
+            topic,
+            settings,
+            cefr=cefr,
+            curriculum_version=curriculum_version,
+            client=runtime.client,
+            sitemaps=runtime.sitemaps,
         )
         reason = research.message
     except Exception as error:  # unattended run: every failure is recorded, not just logged
         lesson, reason = None, f"{type(error).__name__}: {error}"
     if lesson is None:
-        return stores.contents.fail(record.id, reason)
-    return stores.contents.finish(record.id, lesson)
+        return await stores.contents.fail(record.id, reason)
+    return await stores.contents.finish(record.id, lesson)
 
 
-def run_lesson_for_learner(
-    settings: Settings,
-    stores: Stores,
+async def run_lesson_for_learner(
+    runtime: Runtime,
     learner: LearnerRecord,
     today: date,
     *,
@@ -254,6 +266,8 @@ def run_lesson_for_learner(
     The lesson itself is shared content (see `ensure_content`): written by the first learner's run
     to reach the topic at this level, reused by everyone after.
     """
+    settings, stores, sender = runtime.settings, runtime.stores, runtime.sender
+    chat_id = learner.telegram_chat_id
     with get_tracer().start_as_current_span("pipeline.run") as span:
         span.set_attribute("pipeline.send", send)
         level = cefr or learner.cefr
@@ -265,29 +279,29 @@ def run_lesson_for_learner(
                 log.error("unknown topic %r", topic_id)
                 return USAGE
         else:
-            done = stores.lessons.sent_topic_ids(learner.id, level)
-            skipped = stores.contents.unavailable_topics(
+            done = await stores.lessons.sent_topic_ids(learner.id, level)
+            skipped = await stores.contents.unavailable_topics(
                 level, curriculum.version, content_key(settings), max_attempts=settings.job_max_attempts
             )
             topic = next_topic(curriculum, done | skipped)
             if topic is None:
                 log.info("course finished at level %s", level)
                 if send:
-                    stores.learners.deactivate(learner.telegram_chat_id, "course_finished")
-                    notify(settings, learner.telegram_chat_id, COURSE_FINISHED)
+                    await stores.learners.deactivate(chat_id, "course_finished")
+                    await notify(sender, chat_id, COURSE_FINISHED)
                 return OK
         span.set_attribute("topic.id", topic.id)
 
-        if stores.lessons.sent_on(learner.id, today):
+        if await stores.lessons.sent_on(learner.id, today):
             log.info("lesson for %s is already sent", today.isoformat())
             return OK
 
-        def record_failed(reason: str) -> None:
-            stores.lessons.record_failed(
+        async def record_failed(reason: str) -> None:
+            await stores.lessons.record_failed(
                 learner.id, today, topic_id=topic.id, cefr=level, reason=reason, curriculum_version=curriculum.version
             )
 
-        content = ensure_content(settings, stores, topic, level, curriculum.version, now=now)
+        content = await ensure_content(runtime, topic, level, curriculum.version, now=now)
         if content is None:
             log.info("the lesson for %s is being written elsewhere; next tick", topic.id)
             return RETRY_LATER
@@ -296,38 +310,39 @@ def run_lesson_for_learner(
             reason = content.error or "the lesson could not be written"
             log.error("lesson for %s failed: %s", topic.id, reason)
             span.set_status(Status(StatusCode.ERROR, reason))
-            record_failed(reason)
+            await record_failed(reason)
             if send:
-                notify(settings, learner.telegram_chat_id, LESSON_FAILED.format(title=topic.title_ru))
+                await notify(sender, chat_id, LESSON_FAILED.format(title=topic.title_ru))
             return FAILED
         if not send:
             print(lesson.model_dump_json(indent=2, ensure_ascii=False))
             return OK
 
         try:
-            message_ids = deliver_lesson(lesson, settings, learner.telegram_chat_id)
+            message_ids = await deliver_lesson(sender, lesson, chat_id)
         except TelegramError as error:
             log.error("telegram error: %s", error)
             span.set_status(Status(StatusCode.ERROR, str(error)))
-            record_failed(f"telegram: {error}")
+            await record_failed(f"telegram: {error}")
             if isinstance(error, TelegramForbiddenError):
-                stores.learners.deactivate(learner.telegram_chat_id, "blocked")
+                await stores.learners.deactivate(chat_id, "blocked")
             return FAILED
-        log.info("sent %d message(s) to Telegram chat %s", len(message_ids), learner.telegram_chat_id)
-        record = stores.lessons.record_sent(
+        log.info("sent %d message(s) to Telegram chat %s", len(message_ids), chat_id)
+        record = await stores.lessons.record_sent(
             learner.id, today, lesson, message_ids, curriculum_version=curriculum.version, content_id=content.id
         )
-        record_core_item(stores.items, lesson, record.id)
+        await record_core_item(stores.items, lesson, record.id)
         return OK
 
 
-def preview_lesson(
+async def preview_lesson(
     settings: Settings,
     today: date,
     *,
     topic_id: str | None,
     level: Cefr,
-    send_to: str | None = None,
+    sender: Sender | None = None,
+    chat_id: str | None = None,
 ) -> int:
     """Write (and print) a lesson without the database: `topic_id`, or the topic of course day `today`."""
     curriculum = load_curriculum(level)
@@ -335,43 +350,51 @@ def preview_lesson(
         topic = next((item for item in curriculum.topics if item.id == topic_id), None)
         if topic is None:
             log.error("unknown topic %r", topic_id)
-            return 2
+            return USAGE
     else:
         start = settings.curriculum_start_date
         if start is None:
             log.error("CURRICULUM_START_DATE must be set (or pass --topic)")
-            return 2
+            return USAGE
         day = (today - start).days
         if day < 0:
             print(f"course starts on {start.isoformat()}")
-            return 0
+            return OK
         topic = topic_for_day(curriculum, day)
         if topic is None:
             print(COURSE_FINISHED)
-            return 0
+            return OK
     try:
-        research, lesson = asyncio.run(
-            generate_lesson(topic, settings, cefr=level, curriculum_version=curriculum.version)
-        )
+        research, lesson = await generate_lesson(topic, settings, cefr=level, curriculum_version=curriculum.version)
         reason = research.message
     except Exception as error:
         lesson, reason = None, f"{type(error).__name__}: {error}"
     if lesson is None:
         log.error("lesson for %s failed: %s", topic.id, reason)
-        return 1
+        return FAILED
     print(lesson.model_dump_json(indent=2, ensure_ascii=False))
-    if send_to is None:
-        return 0
+    if sender is None or chat_id is None:
+        return OK
     try:
-        message_ids = deliver_lesson(lesson, settings, send_to)
+        message_ids = await deliver_lesson(sender, lesson, chat_id)
     except TelegramError as error:
         log.error("telegram error: %s", error)
-        return 1
-    log.info("sent %d message(s) to Telegram chat %s", len(message_ids), send_to)
-    return 0
+        return FAILED
+    log.info("sent %d message(s) to Telegram chat %s", len(message_ids), chat_id)
+    return OK
 
 
-def main(argv: list[str] | None = None) -> int:
+@asynccontextmanager
+async def open_sender(settings: Settings) -> AsyncIterator[Sender]:
+    """A bot for one command-line run, closed afterwards."""
+    bot = make_bot(settings)
+    try:
+        yield Sender(bot)
+    finally:
+        await bot.session.close()
+
+
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Research a topic, write the lesson and send it to Telegram.")
     parser.add_argument("--topic", help="topic id from the level's curriculum file (default: the learner's next one)")
     parser.add_argument(
@@ -389,36 +412,50 @@ def main(argv: list[str] | None = None) -> int:
         help="CEFR level to teach (default: the learner's saved choice, else LEARNER_CEFR)",
     )
     parser.add_argument("--chat", help="the learner's chat id (default: TELEGRAM_CHAT_ID)")
-    args = parser.parse_args(argv)
+    return parser
 
-    settings = get_settings()
-    configure_logging(settings)
+
+async def _run(settings: Settings, args: argparse.Namespace) -> int:
     send = not args.no_send
     chat_id = args.chat or settings.telegram_chat_id
     # Fail before spending LLM calls on a lesson we could not deliver.
     if send and not (settings.telegram_bot_token.get_secret_value() and chat_id):
         log.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (or --chat) must be set (or pass --no-send)")
-        return 2
-    stores: Stores | None = None
-    if send and not args.no_store:
-        stores = open_stores(settings)
+        return USAGE
+    async with AsyncExitStack() as stack:
+        stores: Stores | None = None
+        if send and not args.no_store:
+            stores = await stack.enter_async_context(open_stores(settings))
+            if stores is None:
+                log.error("DATABASE_URL must be set (or pass --no-store)")
+                return USAGE
+        sender = await stack.enter_async_context(open_sender(settings)) if send else None
         if stores is None:
-            log.error("DATABASE_URL must be set (or pass --no-store)")
-            return 2
+            today = args.date or local_today(settings)
+            level = cast(Cefr, args.level or settings.learner_cefr)
+            return await preview_lesson(
+                settings, today, topic_id=args.topic, level=level, sender=sender, chat_id=chat_id
+            )
+        assert sender is not None
+        learner = await stores.learners.get_or_create(chat_id, settings.learner_cefr, settings.default_schedule())
+        today = args.date or local_now(learner.timezone, datetime.now(UTC)).date()
+        cefr = resolve_cefr(args.level, learner, settings.learner_cefr)
+        with bind(chat_id=chat_id):
+            return await run_lesson_for_learner(
+                Runtime(settings, stores, sender), learner, today, topic_id=args.topic, cefr=cefr
+            )
+    return OK  # unreachable; keeps mypy's return analysis simple
 
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    settings = get_settings()
+    configure_logging(settings)
     # Tracing is a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set; shutdown() flushes
     # the batched spans, which matters because this process exits right after main().
     provider = configure_tracing(settings)
     try:
-        if stores is None:
-            today = args.date or local_today(settings)
-            level = cast(Cefr, args.level or settings.learner_cefr)
-            return preview_lesson(settings, today, topic_id=args.topic, level=level, send_to=chat_id if send else None)
-        learner = stores.learners.get_or_create(chat_id, settings.learner_cefr, settings.default_schedule())
-        today = args.date or local_now(learner.timezone, datetime.now(UTC)).date()
-        cefr = resolve_cefr(args.level, learner, settings.learner_cefr)
-        with bind(chat_id=chat_id):
-            return run_lesson_for_learner(settings, stores, learner, today, topic_id=args.topic, cefr=cefr)
+        return asyncio.run(_run(settings, args))
     finally:
         if provider is not None:
             provider.shutdown()

@@ -9,11 +9,12 @@ is worse than a missing one). One learner's failure (a blocked bot, say) never s
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
-from datetime import UTC, datetime, timedelta
+from datetime import date, datetime, timedelta
 
-import httpx
+from aiogram.types import ForceReply
 from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent.config import Settings
@@ -24,11 +25,12 @@ from english_agent.models.practice import QuizQuestion
 from english_agent.models.schedule import local_now
 from english_agent.models.storage import LearnerRecord, LessonRecord, PracticeDeliveryRecord, PracticeKind
 from english_agent.storage.repositories import PracticeStore, Stores
-from english_agent.telegram.client import TelegramClient, TelegramError, TelegramForbiddenError
 from english_agent.telegram.render import render_quiz_intro, render_translation_task
+from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError
 from english_agent.tracing import get_tracer
 
 TRANSLATION_PLACEHOLDER = "1. … 2. … 3. …"
+_CONCURRENT_LEARNERS = 16  # sends are rate-limited anyway; this bounds open DB transactions
 
 log = logging.getLogger(__name__)
 
@@ -73,8 +75,8 @@ def shuffle_options(question: QuizQuestion, rng: random.Random) -> QuizQuestion:
     )
 
 
-def _send_quiz(
-    client: TelegramClient,
+async def _send_quiz(
+    sender: Sender,
     practice: PracticeStore,
     delivery_id: int,
     chat_id: str,
@@ -82,10 +84,10 @@ def _send_quiz(
     item_id: int,
     rng: random.Random,
 ) -> list[int]:
-    message_ids = [client.send_message(chat_id, render_quiz_intro(lesson))]
+    message_ids = [await sender.send_text(chat_id, render_quiz_intro(lesson))]
     for position, original in enumerate(lesson.quiz):
         question = shuffle_options(original, rng)
-        message_id, poll_id = client.send_poll(
+        message_id, poll_id = await sender.send_poll(
             chat_id,
             question.question,
             question.options,
@@ -93,7 +95,7 @@ def _send_quiz(
             explanation=question.explanation_ru,
         )
         # Recorded right away: the learner may answer before the next poll is sent.
-        practice.add_poll(
+        await practice.add_poll(
             delivery_id,
             position=position,
             telegram_poll_id=poll_id,
@@ -105,8 +107,8 @@ def _send_quiz(
     return message_ids
 
 
-def deliver_practice_for(
-    client: TelegramClient,
+async def deliver_practice_for(
+    sender: Sender,
     settings: Settings,
     stores: Stores,
     learner: LearnerRecord,
@@ -119,17 +121,17 @@ def deliver_practice_for(
     lesson = record.lesson
     if lesson is None:
         return None
-    quiz = stores.practice.delivery(record.id, "quiz")
-    translation = stores.practice.delivery(record.id, "translation")
+    quiz = await stores.practice.delivery(record.id, "quiz")
+    translation = await stores.practice.delivery(record.id, "translation")
     kind = due_practice(learner, settings, record, quiz, translation, now)
     if kind is None:
         return None
 
     # The quiz rates the lesson's core item; created here too, so a lesson stored before items
     # existed (or a failed write at send time) still gets its reviews.
-    item, _ = stores.items.get_or_create(core_item_from_lesson(lesson), source_lesson_id=record.id)
+    item, _ = await stores.items.get_or_create(core_item_from_lesson(lesson), source_lesson_id=record.id)
     item_count = len(lesson.quiz) if kind == "quiz" else len(lesson.translation)
-    delivery = stores.practice.claim_delivery(record.id, kind, item_count)
+    delivery = await stores.practice.claim_delivery(record.id, kind, item_count)
     if delivery is None:
         return None
     chat_id = learner.telegram_chat_id
@@ -138,18 +140,45 @@ def deliver_practice_for(
         span.set_attribute("topic.id", lesson.topic_id)
         span.set_attribute("item.key", item.key)
         if kind == "quiz":
-            message_ids = _send_quiz(
-                client, stores.practice, delivery.id, chat_id, lesson, item.id, rng or random.Random()
+            message_ids = await _send_quiz(
+                sender, stores.practice, delivery.id, chat_id, lesson, item.id, rng or random.Random()
             )
         else:
-            reply_markup = {"force_reply": True, "input_field_placeholder": TRANSLATION_PLACEHOLDER}
-            message_ids = [client.send_message(chat_id, render_translation_task(lesson), reply_markup=reply_markup)]
-    stores.practice.mark_sent(delivery.id, message_ids)
+            reply_markup = ForceReply(force_reply=True, input_field_placeholder=TRANSLATION_PLACEHOLDER)
+            message_ids = [await sender.send_text(chat_id, render_translation_task(lesson), reply_markup=reply_markup)]
+    await stores.practice.mark_sent(delivery.id, message_ids)
     return kind
 
 
-def deliver_due_practice(
-    client: TelegramClient,
+async def _deliver_one(
+    sender: Sender,
+    settings: Settings,
+    stores: Stores,
+    learner: LearnerRecord,
+    day: date,
+    now: datetime,
+    rng: random.Random | None,
+) -> PracticeKind | None:
+    with bind(chat_id=learner.telegram_chat_id):
+        try:
+            record = await stores.lessons.get(learner.id, day)
+            if record is None:
+                return None
+            kind = await deliver_practice_for(sender, settings, stores, learner, record, now, rng=rng)
+        except TelegramForbiddenError as error:
+            log.info("chat blocked the bot, deactivating: %s", error)
+            await stores.learners.deactivate(learner.telegram_chat_id, "blocked")
+            return None
+        except (TelegramError, SQLAlchemyError) as error:
+            log.warning("practice failed: %s", error)
+            return None
+        if kind is not None:
+            log.info("practice sent: %s", kind)
+        return kind
+
+
+async def deliver_due_practice(
+    sender: Sender,
     settings: Settings,
     stores: Stores,
     now: datetime,
@@ -157,37 +186,15 @@ def deliver_due_practice(
     rng: random.Random | None = None,
 ) -> list[tuple[str, PracticeKind]]:
     """Send every learner the practice block that is due at `now`; returns (chat id, kind) of each one sent."""
-    learners = stores.learners.list_active()
+    learners = await stores.learners.list_active()
     today = {learner.id: local_now(learner.timezone, now).date() for learner in learners}
-    statuses = stores.lessons.statuses([(learner.id, today[learner.id]) for learner in learners])
-    sent: list[tuple[str, PracticeKind]] = []
-    for learner in learners:
-        if statuses.get((learner.id, today[learner.id])) != "sent":
-            continue  # no lesson today yet: nothing to practise
-        with bind(chat_id=learner.telegram_chat_id):
-            try:
-                record = stores.lessons.get(learner.id, today[learner.id])
-                if record is None:
-                    continue
-                kind = deliver_practice_for(client, settings, stores, learner, record, now, rng=rng)
-            except TelegramForbiddenError as error:
-                log.info("chat blocked the bot, deactivating: %s", error)
-                stores.learners.deactivate(learner.telegram_chat_id, "blocked")
-                continue
-            except (TelegramError, SQLAlchemyError) as error:
-                log.warning("practice failed: %s", error)
-                continue
-            if kind is not None:
-                sent.append((learner.telegram_chat_id, kind))
-                log.info("practice sent: %s", kind)
-    return sent
+    statuses = await stores.lessons.statuses([(learner.id, today[learner.id]) for learner in learners])
+    due = [learner for learner in learners if statuses.get((learner.id, today[learner.id])) == "sent"]
+    gate = asyncio.Semaphore(_CONCURRENT_LEARNERS)
 
+    async def one(learner: LearnerRecord) -> PracticeKind | None:
+        async with gate:
+            return await _deliver_one(sender, settings, stores, learner, today[learner.id], now, rng)
 
-def run_practice_tick(settings: Settings, stores: Stores) -> None:
-    """Scheduler entry point: one pass over all learners, every failure logged (the next tick still runs)."""
-    try:
-        with httpx.Client(timeout=settings.http_timeout_seconds) as http:
-            client = TelegramClient(http, settings.telegram_bot_token.get_secret_value())
-            deliver_due_practice(client, settings, stores, datetime.now(UTC))
-    except (TelegramError, SQLAlchemyError) as error:
-        log.warning("practice tick failed: %s", error)
+    kinds = await asyncio.gather(*(one(learner) for learner in due))
+    return [(learner.telegram_chat_id, kind) for learner, kind in zip(due, kinds, strict=True) if kind is not None]

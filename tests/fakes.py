@@ -14,6 +14,7 @@ from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import (
     CardRecord,
     ClaimOutcome,
+    GradingTask,
     ItemDraft,
     ItemRecord,
     LearnerProfileRecord,
@@ -40,15 +41,21 @@ class FakeLearners:
     def __init__(self) -> None:
         self.by_chat: dict[str, LearnerRecord] = {}
 
-    def get(self, telegram_chat_id: str) -> LearnerRecord | None:
+    async def get(self, telegram_chat_id: str) -> LearnerRecord | None:
         return self.by_chat.get(telegram_chat_id)
 
-    def get_by_id(self, learner_id: int) -> LearnerRecord | None:
+    async def get_by_id(self, learner_id: int) -> LearnerRecord | None:
         return next((learner for learner in self.by_chat.values() if learner.id == learner_id), None)
 
-    def get_or_create(
+    async def get_or_create(
         self, telegram_chat_id: str, default_cefr: Cefr, schedule: LearnerSchedule | None = None
     ) -> LearnerRecord:
+        return self.create(telegram_chat_id, default_cefr, schedule)
+
+    def create(
+        self, telegram_chat_id: str, default_cefr: Cefr, schedule: LearnerSchedule | None = None
+    ) -> LearnerRecord:
+        """Test helper, and the body of `get_or_create`."""
         if telegram_chat_id not in self.by_chat:
             now = datetime.now(UTC)
             self.by_chat[telegram_chat_id] = LearnerRecord(
@@ -61,12 +68,12 @@ class FakeLearners:
             )
         return self.by_chat[telegram_chat_id]
 
-    def set_cefr(self, telegram_chat_id: str, cefr: Cefr) -> LearnerRecord:
-        learner = self.get_or_create(telegram_chat_id, cefr).model_copy(update={"cefr": cefr})
+    async def set_cefr(self, telegram_chat_id: str, cefr: Cefr) -> LearnerRecord:
+        learner = self.create(telegram_chat_id, cefr).model_copy(update={"cefr": cefr})
         self.by_chat[telegram_chat_id] = learner
         return learner
 
-    def list_active(self) -> list[LearnerRecord]:
+    async def list_active(self) -> list[LearnerRecord]:
         return sorted((r for r in self.by_chat.values() if r.receives_lessons), key=lambda r: r.id)
 
     def _change(self, telegram_chat_id: str, **changes: Any) -> LearnerRecord | None:
@@ -76,25 +83,25 @@ class FakeLearners:
         self.by_chat[telegram_chat_id] = learner.model_copy(update=changes)
         return self.by_chat[telegram_chat_id]
 
-    def set_schedule(self, telegram_chat_id: str, schedule: LearnerSchedule) -> LearnerRecord | None:
+    async def set_schedule(self, telegram_chat_id: str, schedule: LearnerSchedule) -> LearnerRecord | None:
         return self._change(telegram_chat_id, **schedule.model_dump())
 
-    def start_course(self, telegram_chat_id: str, on: date) -> LearnerRecord | None:
+    async def start_course(self, telegram_chat_id: str, on: date) -> LearnerRecord | None:
         learner = self.by_chat.get(telegram_chat_id)
         started = on if learner is None or learner.curriculum_started_on is None else learner.curriculum_started_on
         return self._change(telegram_chat_id, curriculum_started_on=started, is_active=True, deactivated_reason=None)
 
-    def set_paused(self, telegram_chat_id: str, paused: bool) -> LearnerRecord | None:
+    async def set_paused(self, telegram_chat_id: str, paused: bool) -> LearnerRecord | None:
         learner = self.by_chat.get(telegram_chat_id)
         paused_at = (learner.paused_at if learner else None) or datetime.now(UTC) if paused else None
         return self._change(telegram_chat_id, paused_at=paused_at)
 
-    def deactivate(self, telegram_chat_id: str, reason: str) -> None:
+    async def deactivate(self, telegram_chat_id: str, reason: str) -> None:
         self._change(telegram_chat_id, is_active=False, deactivated_reason=reason)
 
     def started(self, telegram_chat_id: str, on: date, cefr: Cefr = "A2", **changes: Any) -> LearnerRecord:
         """Test helper: a learner whose course started on `on`."""
-        self.get_or_create(telegram_chat_id, cefr)
+        self.create(telegram_chat_id, cefr)
         learner = self._change(telegram_chat_id, curriculum_started_on=on, **changes)
         assert learner is not None
         return learner
@@ -104,14 +111,17 @@ class FakeLessons:
     def __init__(self) -> None:
         self.rows: dict[tuple[int, date], LessonRecord] = {}
 
-    def get(self, learner_id: int, day: date) -> LessonRecord | None:
+    async def get(self, learner_id: int, day: date) -> LessonRecord | None:
         return self.rows.get((learner_id, day))
 
-    def sent_on(self, learner_id: int, day: date) -> bool:
+    async def sent_on(self, learner_id: int, day: date) -> bool:
+        return self.is_sent(learner_id, day)
+
+    def is_sent(self, learner_id: int, day: date) -> bool:
         row = self.rows.get((learner_id, day))
         return row is not None and row.status == "sent"
 
-    def record_sent(
+    async def record_sent(
         self,
         learner_id: int,
         day: date,
@@ -133,7 +143,7 @@ class FakeLessons:
             content_id=content_id,
         )
 
-    def record_failed(
+    async def record_failed(
         self, learner_id: int, day: date, *, topic_id: str, cefr: Cefr, reason: str, curriculum_version: int | None
     ) -> LessonRecord:
         return self._save(
@@ -147,14 +157,14 @@ class FakeLessons:
             message_ids=[],
         )
 
-    def list_sent(self) -> list[LessonRecord]:
+    async def list_sent(self) -> list[LessonRecord]:
         sent = (record for record in self.rows.values() if record.status == "sent")
         return sorted(sent, key=lambda record: (record.lesson_date, record.id))
 
-    def statuses(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonStatus]:
+    async def statuses(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonStatus]:
         return {key: self.rows[key].status for key in keys if key in self.rows}
 
-    def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]:
+    async def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]:
         return {
             r.topic_id
             for (lid, _), r in self.rows.items()
@@ -174,7 +184,7 @@ class FakeLessons:
         message_ids: list[int],
         content_id: int | None = None,
     ) -> LessonRecord:
-        if self.sent_on(learner_id, day):
+        if self.is_sent(learner_id, day):
             raise LessonAlreadySentError(f"{learner_id} {day}")
         now = datetime.now(UTC)
         record = LessonRecord(
@@ -203,7 +213,7 @@ class FakeContents:
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str, int, str], LessonContentRecord] = {}
 
-    def claim(
+    async def claim(
         self,
         topic_id: str,
         cefr: Cefr,
@@ -253,13 +263,13 @@ class FakeContents:
         self.rows[key] = row.model_copy(update=changes)
         return self.rows[key]
 
-    def finish(self, content_id: int, lesson: Lesson) -> LessonContentRecord:
+    async def finish(self, content_id: int, lesson: Lesson) -> LessonContentRecord:
         return self._update(content_id, status="ready", lesson=lesson, error=None, generated_at=datetime.now(UTC))
 
-    def fail(self, content_id: int, reason: str) -> LessonContentRecord:
+    async def fail(self, content_id: int, reason: str) -> LessonContentRecord:
         return self._update(content_id, status="failed", error=reason)
 
-    def unavailable_topics(
+    async def unavailable_topics(
         self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
     ) -> set[str]:
         return {
@@ -276,10 +286,10 @@ class FakeItems:
         self.by_key: dict[str, ItemRecord] = {}
         self.failure: Exception | None = None  # raised by get_or_create, to test callers' failure handling
 
-    def get_by_key(self, key: str) -> ItemRecord | None:
+    async def get_by_key(self, key: str) -> ItemRecord | None:
         return self.by_key.get(key)
 
-    def get_or_create(self, draft: ItemDraft, *, source_lesson_id: int | None = None) -> tuple[ItemRecord, bool]:
+    async def get_or_create(self, draft: ItemDraft, *, source_lesson_id: int | None = None) -> tuple[ItemRecord, bool]:
         if self.failure is not None:
             raise self.failure
         if draft.key in self.by_key:
@@ -302,14 +312,14 @@ class FakeCards:
         self.by_key: dict[tuple[int, int], CardRecord] = {}
         self.reviews: list[tuple[int, int, int, str]] = []  # (learner id, item id, rating, source_ref)
 
-    def get(self, learner_id: int, item_id: int) -> CardRecord | None:
+    async def get(self, learner_id: int, item_id: int) -> CardRecord | None:
         return self.by_key.get((learner_id, item_id))
 
-    def due(self, learner_id: int, now: datetime, *, limit: int = 20) -> list[CardRecord]:
+    async def due(self, learner_id: int, now: datetime, *, limit: int = 20) -> list[CardRecord]:
         due = [c for c in self.by_key.values() if c.learner_id == learner_id and c.due_at <= now]
         return sorted(due, key=lambda c: c.due_at)[:limit]
 
-    def review(
+    async def review(
         self,
         learner_id: int,
         item_id: int,
@@ -346,11 +356,11 @@ class FakeProfiles:
         self.versions: dict[int, list[LearnerProfileRecord]] = {}
         self.next_inputs: ProfileInputs | None = None  # what `inputs` returns next, when a test sets it
 
-    def latest(self, learner_id: int) -> LearnerProfileRecord | None:
+    async def latest(self, learner_id: int) -> LearnerProfileRecord | None:
         versions = self.versions.get(learner_id)
         return versions[-1] if versions else None
 
-    def append(self, learner_id: int, profile: LearnerProfile) -> LearnerProfileRecord:
+    async def append(self, learner_id: int, profile: LearnerProfile) -> LearnerProfileRecord:
         versions = self.versions.setdefault(learner_id, [])
         record = LearnerProfileRecord(
             id=sum(len(v) for v in self.versions.values()) + 1,
@@ -363,7 +373,7 @@ class FakeProfiles:
         versions.append(record)
         return record
 
-    def inputs(self, learner_id: int, now: datetime, *, window_days: int) -> ProfileInputs:
+    async def inputs(self, learner_id: int, now: datetime, *, window_days: int) -> ProfileInputs:
         if self.next_inputs is not None:
             return self.next_inputs
         learner = next(record for record in self._learners.by_chat.values() if record.id == learner_id)
@@ -379,11 +389,13 @@ class FakePractice:
         self.translation_answers: dict[int, TranslationAnswerRecord] = {}
         self.errors: list[tuple[str, str, str]] = []  # (kind, original, corrected)
 
-    def delivery(self, lesson_id: int, kind: PracticeKind) -> PracticeDeliveryRecord | None:
+    async def delivery(self, lesson_id: int, kind: PracticeKind) -> PracticeDeliveryRecord | None:
         return next((d for d in self.deliveries.values() if d.lesson_id == lesson_id and d.kind == kind), None)
 
-    def claim_delivery(self, lesson_id: int, kind: PracticeKind, item_count: int) -> PracticeDeliveryRecord | None:
-        if self.delivery(lesson_id, kind) is not None:
+    async def claim_delivery(
+        self, lesson_id: int, kind: PracticeKind, item_count: int
+    ) -> PracticeDeliveryRecord | None:
+        if await self.delivery(lesson_id, kind) is not None:
             return None
         record = PracticeDeliveryRecord(
             id=len(self.deliveries) + 1,
@@ -398,14 +410,14 @@ class FakePractice:
         self.deliveries[record.id] = record
         return record
 
-    def mark_sent(self, delivery_id: int, message_ids: list[int]) -> PracticeDeliveryRecord:
+    async def mark_sent(self, delivery_id: int, message_ids: list[int]) -> PracticeDeliveryRecord:
         record = self.deliveries[delivery_id].model_copy(
             update={"sent_at": datetime.now(UTC), "telegram_message_ids": message_ids}
         )
         self.deliveries[delivery_id] = record
         return record
 
-    def add_poll(
+    async def add_poll(
         self,
         delivery_id: int,
         *,
@@ -428,11 +440,11 @@ class FakePractice:
         self.polls[telegram_poll_id] = record
         return record
 
-    def record_poll_answer(
+    async def record_poll_answer(
         self, telegram_poll_id: str, telegram_chat_id: str, option_ids: list[int]
     ) -> QuizResult | None:
         poll = self.polls.get(telegram_poll_id)
-        learner = self._learners.get(telegram_chat_id)
+        learner = self._learners.by_chat.get(telegram_chat_id)
         if poll is None or learner is None:
             return None
         if (poll.id, telegram_chat_id) in self.poll_answers:
@@ -462,8 +474,8 @@ class FakePractice:
             results=[(p.question, self.poll_answers[(p.id, telegram_chat_id)]) for p in answered],
         )
 
-    def open_translation(self, telegram_chat_id: str) -> OpenTranslationTask | None:
-        learner = self._learners.get(telegram_chat_id)
+    async def open_translation(self, telegram_chat_id: str) -> OpenTranslationTask | None:
+        learner = self._learners.by_chat.get(telegram_chat_id)
         if learner is None:
             return None
         lessons = {r.id: r for (learner_id, _), r in self._lessons.rows.items() if learner_id == learner.id}
@@ -481,7 +493,7 @@ class FakePractice:
             return None
         return OpenTranslationTask(learner_id=learner.id, delivery=delivery, lesson=lesson)
 
-    def start_translation_answer(
+    async def start_translation_answer(
         self, delivery_id: int, learner_id: int, answer_text: str
     ) -> TranslationAnswerRecord | None:
         existing = next((a for a in self.translation_answers.values() if a.delivery_id == delivery_id), None)
@@ -503,18 +515,29 @@ class FakePractice:
         self.translation_answers[record.id] = record
         return record
 
-    def set_progress_message(self, answer_id: int, message_id: int) -> None:
+    async def set_progress_message(self, answer_id: int, message_id: int) -> None:
         self._update_answer(answer_id, progress_message_id=message_id)
 
-    def finish_translation_answer(self, answer_id: int, grade: TranslationGrade) -> TranslationAnswerRecord:
+    async def translation_for_grading(self, answer_id: int) -> GradingTask | None:
+        answer = self.translation_answers.get(answer_id)
+        if answer is None:
+            return None
+        delivery = self.deliveries[answer.delivery_id]
+        record = next(r for r in self._lessons.rows.values() if r.id == delivery.lesson_id)
+        learner = next(r for r in self._learners.by_chat.values() if r.id == answer.learner_id)
+        if record.lesson is None:
+            return None
+        return GradingTask(answer=answer, lesson=record.lesson, telegram_chat_id=learner.telegram_chat_id)
+
+    async def finish_translation_answer(self, answer_id: int, grade: TranslationGrade) -> TranslationAnswerRecord:
         record = self._update_answer(answer_id, status="graded", grade=grade, graded_at=datetime.now(UTC))
         self.errors.extend(("text", s.learner_text, s.corrected) for s in grade.sentences if s.verdict == "fixed")
         return record
 
-    def fail_translation_answer(self, answer_id: int, reason: str) -> None:
+    async def fail_translation_answer(self, answer_id: int, reason: str) -> None:
         self._update_answer(answer_id, status="failed", error=reason)
 
-    def dispute(self, answer_id: int) -> bool:
+    async def dispute(self, answer_id: int) -> bool:
         answer = self.translation_answers.get(answer_id)
         if answer is None or answer.status != "graded":
             return False

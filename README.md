@@ -261,7 +261,23 @@ docker compose run --rm --no-deps app python -m english_agent.pipeline --topic t
 ```
 
 The app must be the bot's only `getUpdates` consumer: do not run
-`python -m english_agent.telegram level` against the same bot while it is up.
+`python -m english_agent.telegram chats` against the same bot while it is up.
+
+Inside the app everything runs on one asyncio event loop: the bot (aiogram 3, long
+polling, updates handled concurrently), the lesson and practice ticks (APScheduler's
+asyncio scheduler), the database (async SQLAlchemy over psycopg 3) and the Claude
+API (one `AsyncAnthropic` client). A slow model call never blocks a reply. Limits:
+
+- at most `LLM_MAX_CONCURRENCY` Claude requests in flight, with SDK retries and a
+  per-request timeout;
+- outgoing Telegram messages at `TELEGRAM_GLOBAL_RATE_PER_SECOND` in total and
+  `TELEGRAM_CHAT_RATE_PER_SECOND` per chat; a 429 is waited out (`retry_after`) and
+  retried;
+- `DB_POOL_SIZE` + `DB_MAX_OVERFLOW` database connections.
+
+Translation grading runs as a background task of the app; on SIGTERM the app stops
+polling, waits up to 90 s for ticks and gradings in progress, then closes the bot,
+the Claude client and the pool. A grading cut short stays pending.
 
 From a laptop, reach the database and the Jaeger UI through an SSH tunnel:
 
@@ -272,7 +288,7 @@ psql postgresql://english_agent:<pw>@localhost:5432/english_agent
 
 ### Database
 
-Storage is PostgreSQL through SQLAlchemy 2.0 (sync, psycopg 3), see
+Storage is PostgreSQL through SQLAlchemy 2.0 (async, psycopg 3), see
 [src/english_agent/storage/](src/english_agent/storage/). Repositories return the
 pydantic records from [models/storage.py](src/english_agent/models/storage.py);
 ORM objects stay inside the package. Tables: `learners` (with each learner's
@@ -372,10 +388,14 @@ release history.
 
 ```
 src/english_agent/
-  app.py           # server process: bot + daily lesson and practice scheduler
+  app.py           # server process: bot + lesson and practice ticks on one event loop
+  bot/             # aiogram dispatcher, update handlers, background jobs of the bot
   config.py        # runtime settings (env / .env)
+  content.py       # shared lesson content: recipe key, claim owner
   grader.py        # learner's translation -> validated TranslationGrade
+  grading.py       # grade a stored answer, save it, show it (bot or job)
   items.py         # sent lesson -> core item in the `items` table (+ backfill)
+  logs.py          # logging setup: text or JSON, bound context fields, trace ids
   profile.py       # learner profile: computed from answers, errors and cards; versioned
   srs.py           # spaced repetition (FSRS-6 via py-fsrs): ratings, scheduling
   paths.py         # repo-relative paths
@@ -388,7 +408,7 @@ src/english_agent/
   prompts/         # system prompts
   research/        # research agent, tools, sitemaps, sources
   storage/         # PostgreSQL: SQLAlchemy mappings, repositories
-  telegram/        # HTML rendering, Bot API client, the bot's update handlers
+  telegram/        # HTML rendering, the aiogram sender, outgoing rate limits
 migrations/        # Alembic migrations
 deploy/systemd/    # backup timer units
 scripts/           # pg_backup.sh
