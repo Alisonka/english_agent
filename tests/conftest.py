@@ -9,8 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from db import fresh_schema, run_alembic, schema_engine, search_path
 from english_agent.models.lesson import Lesson
+from english_agent.models.topic import TopicContent
 from english_agent.storage import SessionFactory
-from samples import QUIZ, TRANSLATION
+from samples import (
+    QUIZ,
+    SOURCE,
+    STEP_MESSAGE_PLURAL,
+    STEP_MESSAGE_SINGULAR,
+    TRANSLATION,
+    step_quiz,
+    step_translation,
+)
 
 
 @pytest.fixture(scope="session")
@@ -100,3 +109,103 @@ def lesson_payload(**overrides: Any) -> dict[str, Any]:
 @pytest.fixture
 def lesson() -> Lesson:
     return Lesson.model_validate(lesson_payload())
+
+
+def topic_content_payload(**overrides: Any) -> dict[str, Any]:
+    """A valid two-step `TopicContent` payload for `there_is_are`; override individual fields."""
+    plan = {
+        "topic_id": "there_is_are",
+        "cefr": "A2",
+        "steps": [
+            {
+                "slug": "singular",
+                "title_en": "there is",
+                "title_ru": "there is — один предмет",
+                "key_idea_ru": "Для одного предмета по-английски нужен оборот there is.",
+                "rule_point_ids": [0, 1],
+                "nuance_ids": [0],
+                "example_ids": [0, 1],
+                "mistake_ids": [0],
+                "introduces_form": True,
+            },
+            {
+                "slug": "plural",
+                "title_en": "there are / questions",
+                "title_ru": "there are и вопросы",
+                "key_idea_ru": "Для многих предметов — there are, в вопросе глагол выходит вперёд.",
+                "rule_point_ids": [2, 3],
+                "nuance_ids": [1, 2],
+                "example_ids": [2, 3],
+                "mistake_ids": [],
+                "introduces_form": True,
+            },
+        ],
+        "characters": ["Anna", "Max"],
+    }
+
+    def main_step(slug: str, index: int, title_en: str, title_ru: str, message: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "topic_id": "there_is_are",
+            "title_en": title_en,
+            "title_ru": title_ru,
+            "cefr": "A2",
+            "slug": slug,
+            "index": index,
+            "total": 2,
+            "variant": "main",
+            "message": message,
+            "practice": {"quiz": step_quiz(slug), "translation": step_translation(slug)},
+            "sources": [SOURCE],
+        }
+
+    def alt_step(slug: str, index: int, title_en: str, title_ru: str, message: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "topic_id": "there_is_are",
+            "title_en": title_en,
+            "title_ru": title_ru,
+            "cefr": "A2",
+            "slug": slug,
+            "index": index,
+            "total": 2,
+            "variant": "alt",
+            "message": message,
+            "practice": None,
+            "sources": [SOURCE],
+        }
+
+    summary = {
+        "topic_id": "there_is_are",
+        "cefr": "A2",
+        "title_en": "there is / there are",
+        "title_ru": "there is / there are",
+        "sections": [
+            {"title_ru": "Один предмет", "lines_ru": ["there is + ед. число", "There is a cat here."]},
+            {"title_ru": "Много и вопросы", "lines_ru": ["there are + мн. число", "Is there…? / Are there…?"]},
+        ],
+        "forms": ["There is + sing.", "There are + pl."],
+        "top_mistakes_ru": ["It is a cat → There is a cat"],
+        "sources": [SOURCE],
+    }
+
+    payload: dict[str, Any] = {
+        "topic_id": "there_is_are",
+        "cefr": "A2",
+        "plan": plan,
+        "steps": [
+            main_step("singular", 1, "there is", "there is — один предмет", STEP_MESSAGE_SINGULAR),
+            main_step("plural", 2, "there are / questions", "there are и вопросы", STEP_MESSAGE_PLURAL),
+        ],
+        "alternatives": [
+            alt_step("singular", 1, "there is", "there is — один предмет", STEP_MESSAGE_SINGULAR),
+            alt_step("plural", 2, "there are / questions", "there are и вопросы", STEP_MESSAGE_PLURAL),
+        ],
+        "summary": summary,
+        "sources": [SOURCE],
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.fixture
+def topic_content() -> TopicContent:
+    return TopicContent.model_validate(topic_content_payload())

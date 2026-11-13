@@ -9,7 +9,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from english_agent.versions import Provenance
 
-QUIZ_SIZE = 3
+QUIZ_SIZE = 3  # questions in a legacy `Lesson`; the step-based daily quiz uses DAILY_QUIZ_SIZE
+DAILY_QUIZ_SIZE = 4  # polls in a day's quiz: 2 on today's step + 1 previous step + 1 older topic
 TRANSLATION_SIZE = 3
 POLL_EXPLANATION_MAX_LINE_FEEDS = 2
 

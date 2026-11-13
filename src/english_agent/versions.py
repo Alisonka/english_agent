@@ -27,9 +27,14 @@ from english_agent import __version__
 # Schema versions. Bump the relevant entry whenever the corresponding model's
 # shape changes in a way that downstream consumers must notice.
 SCHEMA_VERSIONS: dict[str, int] = {
-    "lesson": 3,  # v3: added quiz and translation (practice sent after the lesson)
+    "lesson": 3,  # v3: added quiz and translation; frozen — legacy payloads only, superseded by topic steps
     "research_result": 1,
     "topic_notes": 1,
+    # A topic taught in steps (models/topic.py): plan, per-step message + bank, and the cheat sheet.
+    "topic_plan": 1,
+    "lesson_step": 1,
+    "topic_summary": 1,
+    "topic_content": 1,
     # Storage records (models/storage.py); the table shapes themselves are versioned by Alembic.
     "learner_record": 2,  # v2: schedule (timezone, send times, quiz delay), started_on, is_active, paused_at
     "learner_schedule": 1,
