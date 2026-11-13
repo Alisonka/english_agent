@@ -4,7 +4,7 @@ Repositories build these with `Record.model_validate(orm_row)` (`from_attributes
 so SQLAlchemy objects never leave `english_agent.storage`.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,14 +13,20 @@ from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson, Source
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
+from english_agent.models.schedule import LearnerSchedule
 
-LessonStatus = Literal["sent", "failed"]
+LessonStatus = Literal["pending", "sending", "sent", "failed", "skipped"]
+LessonClaim = Literal["claimed", "resume", "busy", "done"]
+ContentStatus = Literal["generating", "ready", "failed"]
+ClaimOutcome = Literal["ready", "claimed", "busy", "exhausted"]
 ErrorKind = Literal["quiz", "text"]
 PracticeKind = Literal["quiz", "translation"]
 TranslationAnswerStatus = Literal["pending", "graded", "failed"]
 
 
 class LearnerRecord(BaseModel):
+    """A learner and their schedule. Defaults mirror the column defaults of the `learners` table."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -28,6 +34,27 @@ class LearnerRecord(BaseModel):
     cefr: Cefr
     created_at: datetime
     updated_at: datetime
+    timezone: str = "Europe/Moscow"
+    lesson_send_time: time = time(9, 0)
+    translation_send_time: time = time(18, 0)
+    quiz_delay_minutes: int = 60
+    curriculum_started_on: date | None = None  # None until /start: no lessons before that
+    is_active: bool = True  # False once the learner blocked the bot or finished the course
+    paused_at: datetime | None = None  # /pause: no lessons and no practice until /resume
+    deactivated_reason: str | None = None  # "blocked" | "course_finished"
+
+    @property
+    def schedule(self) -> LearnerSchedule:
+        return LearnerSchedule(
+            timezone=self.timezone,
+            lesson_send_time=self.lesson_send_time,
+            translation_send_time=self.translation_send_time,
+            quiz_delay_minutes=self.quiz_delay_minutes,
+        )
+
+    @property
+    def receives_lessons(self) -> bool:
+        return self.is_active and self.paused_at is None and self.curriculum_started_on is not None
 
 
 class LessonRecord(BaseModel):
@@ -48,6 +75,44 @@ class LessonRecord(BaseModel):
     telegram_message_ids: list[int]
     created_at: datetime
     sent_at: datetime | None
+    content_id: int | None = None  # the shared `LessonContentRecord` that was sent; None for older lessons
+    claimed_at: datetime | None = None  # a worker is delivering it since then (None: nobody holds it)
+    attempts: int = 0  # delivery attempts so far
+
+
+class LessonState(BaseModel):
+    """A day's row without the payload: what the planner needs to decide whether to (re)run it."""
+
+    lesson_id: int
+    status: LessonStatus
+    attempts: int
+    claimed_at: datetime | None
+    sent_at: datetime | None
+
+
+class LessonContentRecord(BaseModel):
+    """A lesson written once for every learner of a topic and level, by one generation recipe.
+
+    `content_key` names the recipe (schema version, prompt fingerprints, models): changing any of
+    them makes new content instead of reusing lessons an older recipe wrote.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    topic_id: str
+    cefr: Cefr
+    curriculum_version: int  # 0 for lessons backfilled from before shared content
+    content_key: str
+    status: ContentStatus
+    schema_version: int
+    lesson: Lesson | None
+    error: str | None
+    attempts: int
+    claimed_at: datetime | None
+    claimed_by: str | None
+    generated_at: datetime | None
+    created_at: datetime
 
 
 CORE_SLUG = "core"
@@ -180,6 +245,8 @@ class TranslationAnswerRecord(BaseModel):
     disputed: bool
     created_at: datetime
     graded_at: datetime | None
+    grading_attempts: int = 0
+    grading_started_at: datetime | None = None
 
 
 class OpenTranslationTask(BaseModel):
@@ -188,6 +255,14 @@ class OpenTranslationTask(BaseModel):
     learner_id: int
     delivery: PracticeDeliveryRecord
     lesson: Lesson
+
+
+class GradingTask(BaseModel):
+    """What grading one translation answer needs: the answer, its lesson and where to reply."""
+
+    answer: TranslationAnswerRecord
+    lesson: Lesson
+    telegram_chat_id: str
 
 
 class LearnerProfileRecord(BaseModel):

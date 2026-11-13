@@ -86,32 +86,32 @@ def test_empty_history_gives_no_accuracy() -> None:
     assert profile.weak_points == [] and profile.error_patterns == []
 
 
-def test_refresh_appends_only_when_something_changed() -> None:
+async def test_refresh_appends_only_when_something_changed() -> None:
     stores, learners, _ = fake_stores()
-    learner = learners.get_or_create("42", "A2")
+    learner = await learners.get_or_create("42", "A2")
     profiles = fake_profiles(stores)
 
-    first = refresh_profile(profiles, learner.id, NOW)
+    first = await refresh_profile(profiles, learner.id, NOW)
     assert first is not None and first.version == 1
-    assert refresh_profile(profiles, learner.id, NOW) is None  # nothing new
+    assert await refresh_profile(profiles, learner.id, NOW) is None  # nothing new
 
     profiles.next_inputs = ProfileInputs(cefr="A2", window_days=7, quiz_answers=3, quiz_correct=2)
-    second = refresh_profile(profiles, learner.id, NOW)
+    second = await refresh_profile(profiles, learner.id, NOW)
     assert second is not None and second.version == 2
     assert second.profile.stats.quiz_accuracy == 0.667
 
 
-def test_refresh_keeps_the_reflectors_notes() -> None:
+async def test_refresh_keeps_the_reflectors_notes() -> None:
     stores, learners, _ = fake_stores()
-    learner = learners.get_or_create("42", "A2")
+    learner = await learners.get_or_create("42", "A2")
     profiles = fake_profiles(stores)
-    first = refresh_profile(profiles, learner.id, NOW)
+    first = await refresh_profile(profiles, learner.id, NOW)
     assert first is not None
     profiles.versions[learner.id][-1] = first.model_copy(
         update={"profile": first.profile.model_copy(update={"notes_ru": "Путает there is и it is."})}
     )
 
     profiles.next_inputs = ProfileInputs(cefr="A2", window_days=7, lessons_sent=1)
-    updated = refresh_profile(profiles, learner.id, NOW)
+    updated = await refresh_profile(profiles, learner.id, NOW)
 
     assert updated is not None and updated.profile.notes_ru == "Путает there is и it is."

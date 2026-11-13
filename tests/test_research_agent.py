@@ -11,9 +11,10 @@ import pytest
 from english_agent.llm import AssistantTurn, ToolCall
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.research.agent import ResearchAgent
-from english_agent.research.models import NOT_FOUND_MESSAGE, PageContent, SearchHit
-from english_agent.research.sites import SITE_BY_NAME, Site
+from english_agent.research.models import NOT_FOUND_MESSAGE
+from english_agent.research.sites import SITE_BY_NAME
 from english_agent.research.tools import rank_urls
+from fakes import FakeTools, ScriptedLLM
 
 TOPIC = CurriculumTopic(
     id="present_perfect_vs_past_simple",
@@ -45,32 +46,6 @@ GOOD_NOTES: dict[str, Any] = {
     ],
     "typical_mistakes": ["I have seen him yesterday."],
 }
-
-
-class FakeTools:
-    def __init__(self, urls: dict[str, list[str]], pages: dict[str, str]) -> None:
-        self.urls = urls
-        self.pages = pages
-        self.fetched: list[str] = []
-
-    def search_site(self, site: Site, keywords: list[str], limit: int = 5) -> list[SearchHit]:
-        return rank_urls(self.urls.get(site.name, []), keywords, limit)
-
-    def fetch_page(self, url: str) -> PageContent:
-        self.fetched.append(url)
-        return PageContent(url=url, title=f"Title of {url}", text=self.pages[url], truncated=False)
-
-
-class ScriptedLLM:
-    def __init__(self, turns: list[AssistantTurn]) -> None:
-        self._turns = list(turns)
-        self.transcripts: list[list[dict[str, Any]]] = []
-
-    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> AssistantTurn:
-        self.transcripts.append(list(messages))
-        if not self._turns:
-            raise AssertionError("LLM asked for more turns than scripted")
-        return self._turns.pop(0)
 
 
 def call(name: str, **arguments: Any) -> AssistantTurn:
@@ -123,7 +98,7 @@ def last_tool_result(llm: ScriptedLLM) -> str:
 # -- happy path ----------------------------------------------------------------------
 
 
-def test_found_on_first_site_grounds_source_in_fetched_page() -> None:
+async def test_found_on_first_site_grounds_source_in_fetched_page() -> None:
     tools = all_sites_tools()
     agent, _ = make_agent(
         [
@@ -133,7 +108,7 @@ def test_found_on_first_site_grounds_source_in_fetched_page() -> None:
         ],
         tools,
     )
-    result = agent.run(TOPIC)
+    result = await agent.run(TOPIC)
 
     assert result.status == "found"
     assert result.sites_checked == ["englex"]
@@ -156,7 +131,7 @@ def test_found_on_first_site_grounds_source_in_fetched_page() -> None:
     assert "research_system" in result.provenance.prompts
 
 
-def test_falls_through_to_third_site() -> None:
+async def test_falls_through_to_third_site() -> None:
     tools = FakeTools(
         urls={
             "englex": ["https://englex.ru/idioms-about-food/"],
@@ -179,13 +154,13 @@ def test_falls_through_to_third_site() -> None:
         ],
         tools,
     )
-    result = agent.run(TOPIC)
+    result = await agent.run(TOPIC)
     assert result.status == "found"
     assert result.notes is not None and result.notes.site == "skysmart"
     assert result.sites_checked == ["englex", "skyeng", "skysmart"]
 
 
-def test_not_found_on_any_site_returns_exact_message() -> None:
+async def test_not_found_on_any_site_returns_exact_message() -> None:
     tools = FakeTools(urls={"englex": [], "skyeng": [], "skysmart": []}, pages={})
     agent, _ = make_agent(
         [
@@ -196,7 +171,7 @@ def test_not_found_on_any_site_returns_exact_message() -> None:
         ],
         tools,
     )
-    result = agent.run(TOPIC)
+    result = await agent.run(TOPIC)
     assert result.status == "not_found"
     assert result.message == NOT_FOUND_MESSAGE
     assert result.notes is None
@@ -206,7 +181,7 @@ def test_not_found_on_any_site_returns_exact_message() -> None:
 # -- rules enforced by code, not by the prompt -------------------------------------------
 
 
-def test_site_order_is_enforced() -> None:
+async def test_site_order_is_enforced() -> None:
     tools = all_sites_tools()
     agent, llm = make_agent(
         [
@@ -217,7 +192,7 @@ def test_site_order_is_enforced() -> None:
         ],
         tools,
     )
-    result = agent.run(TOPIC)
+    result = await agent.run(TOPIC)
     assert result.status == "found"
     first = result.trajectory[0]
     assert first.tool == "search_site" and not first.ok
@@ -225,7 +200,7 @@ def test_site_order_is_enforced() -> None:
     assert "error" in llm.transcripts[1][-1]["content"]
 
 
-def test_cannot_declare_not_found_before_checking_all_sites() -> None:
+async def test_cannot_declare_not_found_before_checking_all_sites() -> None:
     tools = all_sites_tools()
     agent, _llm = make_agent(
         [
@@ -237,14 +212,14 @@ def test_cannot_declare_not_found_before_checking_all_sites() -> None:
         ],
         tools,
     )
-    result = agent.run(TOPIC)
+    result = await agent.run(TOPIC)
     assert result.status == "not_found"
     rejected = [record for record in result.trajectory if record.tool == "finish" and not record.ok]
     assert len(rejected) == 1
     assert "skyeng, skysmart" in rejected[0].summary
 
 
-def test_fetch_only_urls_offered_by_search_and_inside_allowlist() -> None:
+async def test_fetch_only_urls_offered_by_search_and_inside_allowlist() -> None:
     tools = all_sites_tools()
     agent, _ = make_agent(
         [
@@ -256,7 +231,7 @@ def test_fetch_only_urls_offered_by_search_and_inside_allowlist() -> None:
         ],
         tools,
     )
-    result = agent.run(TOPIC)
+    result = await agent.run(TOPIC)
     assert result.status == "found"
     summaries = [record.summary for record in result.trajectory if record.tool == "fetch_page"]
     assert summaries[0] == "URL is outside the allowed sites"
@@ -264,7 +239,7 @@ def test_fetch_only_urls_offered_by_search_and_inside_allowlist() -> None:
     assert tools.fetched == [ENGLEX_URL]
 
 
-def test_finish_rejects_source_that_was_not_fetched() -> None:
+async def test_finish_rejects_source_that_was_not_fetched() -> None:
     tools = all_sites_tools()
     bad_notes = {
         **GOOD_NOTES,
@@ -279,13 +254,13 @@ def test_finish_rejects_source_that_was_not_fetched() -> None:
         ],
         tools,
     )
-    result = agent.run(TOPIC)
+    result = await agent.run(TOPIC)
     assert result.status == "found"
     rejected = [record for record in result.trajectory if record.tool == "finish" and not record.ok]
     assert rejected and "must be a page you fetched" in rejected[0].summary
 
 
-def test_fetch_cap_per_site() -> None:
+async def test_fetch_cap_per_site() -> None:
     urls = [f"https://englex.ru/post-{i}-present/" for i in range(3)]
     tools = FakeTools(
         urls={"englex": urls, "skyeng": [], "skysmart": []},
@@ -306,23 +281,23 @@ def test_fetch_cap_per_site() -> None:
         tools,
         max_fetches_per_site=2,
     )
-    result = agent.run(TOPIC)
+    result = await agent.run(TOPIC)
     assert result.status == "found"
     assert tools.fetched == urls[:2]
     capped = [record for record in result.trajectory if record.tool == "fetch_page" and not record.ok]
     assert capped and "fetch limit reached" in capped[0].summary
 
 
-def test_budget_exhaustion_is_failed_not_not_found() -> None:
+async def test_budget_exhaustion_is_failed_not_not_found() -> None:
     tools = all_sites_tools()
     agent, _ = make_agent([search("englex", "present")] * 3, tools, max_steps=3, max_searches_per_site=5)
-    result = agent.run(TOPIC)
+    result = await agent.run(TOPIC)
     assert result.status == "failed"
     assert "budget exhausted" in result.message
     assert result.steps == 3
 
 
-def test_prose_without_tools_is_nudged_and_counts_as_step() -> None:
+async def test_prose_without_tools_is_nudged_and_counts_as_step() -> None:
     tools = all_sites_tools()
     agent, llm = make_agent(
         [
@@ -333,13 +308,13 @@ def test_prose_without_tools_is_nudged_and_counts_as_step() -> None:
         ],
         tools,
     )
-    result = agent.run(TOPIC)
+    result = await agent.run(TOPIC)
     assert result.status == "found"
     assert result.steps == 4
     assert "Use a tool" in llm.transcripts[1][-1]["content"]
 
 
-def test_page_text_is_marked_untrusted() -> None:
+async def test_page_text_is_marked_untrusted() -> None:
     tools = all_sites_tools()
     agent, llm = make_agent(
         [
@@ -349,7 +324,7 @@ def test_page_text_is_marked_untrusted() -> None:
         ],
         tools,
     )
-    agent.run(TOPIC)
+    await agent.run(TOPIC)
     fetch_result = json.loads(llm.transcripts[2][-1]["content"])
     assert fetch_result["text"].startswith('<page_content untrusted="true">')
 

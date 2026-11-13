@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from db import run_alembic, schema_engine
+from db import fresh_schema, run_alembic, schema_engine, search_path
 from english_agent.models.lesson import Lesson
 from english_agent.storage import SessionFactory
 from samples import QUIZ, TRANSLATION
@@ -24,24 +23,32 @@ def database_url() -> str:
 
 
 @pytest.fixture(scope="session")
-def migrated_engine(database_url: str) -> Iterator[Engine]:
-    with schema_engine(database_url) as engine:
+def migrated_schema(database_url: str) -> Iterator[str]:
+    """A throwaway schema migrated to head once per test session."""
+    with fresh_schema(database_url) as schema, schema_engine(database_url, schema) as engine:
         run_alembic(engine, "upgrade", "head")
-        yield engine
+        yield schema
+
+
+@pytest.fixture(scope="session")
+async def async_engine(database_url: str, migrated_schema: str) -> AsyncIterator[AsyncEngine]:
+    engine = create_async_engine(database_url, connect_args=search_path(migrated_schema))
+    yield engine
+    await engine.dispose()
 
 
 @pytest.fixture
-def sessions(migrated_engine: Engine) -> Iterator[SessionFactory]:
+async def sessions(async_engine: AsyncEngine) -> AsyncIterator[SessionFactory]:
     """Sessions inside one outer transaction that is rolled back after the test.
 
     Repository commits become savepoints, so every test starts from empty tables.
     """
-    with migrated_engine.connect() as connection:
-        transaction = connection.begin()
+    async with async_engine.connect() as connection:
+        transaction = await connection.begin()
         try:
-            yield sessionmaker(bind=connection, join_transaction_mode="create_savepoint", expire_on_commit=False)
+            yield async_sessionmaker(bind=connection, join_transaction_mode="create_savepoint", expire_on_commit=False)
         finally:
-            transaction.rollback()
+            await transaction.rollback()
 
 
 def lesson_payload(**overrides: Any) -> dict[str, Any]:

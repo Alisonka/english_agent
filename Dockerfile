@@ -22,4 +22,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-CMD ["python", "-m", "english_agent.app"]
+CMD ["python", "-m", "english_agent.bot"]

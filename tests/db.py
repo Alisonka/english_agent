@@ -18,21 +18,38 @@ from sqlalchemy import Engine, create_engine, text
 from english_agent.paths import repo_root
 
 
+def search_path(schema: str) -> dict[str, str]:
+    """`connect_args` that make every connection use `schema` (sync and async psycopg alike)."""
+    return {"options": f"-csearch_path={schema}"}
+
+
 @contextmanager
-def schema_engine(url: str) -> Iterator[Engine]:
-    """An engine whose connections use a fresh schema; the schema is dropped afterwards."""
+def fresh_schema(url: str) -> Iterator[str]:
+    """A fresh schema, dropped afterwards."""
     schema = f"test_{uuid.uuid4().hex[:12]}"
     admin = create_engine(url)
     with admin.begin() as connection:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-    engine = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     try:
-        yield engine
+        yield schema
     finally:
-        engine.dispose()
         with admin.begin() as connection:
             connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         admin.dispose()
+
+
+@contextmanager
+def schema_engine(url: str, schema: str | None = None) -> Iterator[Engine]:
+    """A sync engine whose connections use `schema`, or a fresh schema dropped afterwards (Alembic, migrations)."""
+    if schema is not None:
+        engine = create_engine(url, connect_args=search_path(schema))
+        try:
+            yield engine
+        finally:
+            engine.dispose()
+        return
+    with fresh_schema(url) as fresh, schema_engine(url, fresh) as engine:
+        yield engine
 
 
 def run_alembic(engine: Engine, action: Literal["upgrade", "downgrade"], revision: str) -> None:

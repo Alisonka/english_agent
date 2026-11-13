@@ -62,7 +62,7 @@ def _practice_problem(lesson: Lesson) -> str:
     return "; ".join(problems)
 
 
-def write_lesson(
+async def write_lesson(
     llm: ChatLLM,
     topic: CurriculumTopic,
     notes: TopicNotes,
@@ -95,7 +95,7 @@ def write_lesson(
         span.set_attribute("topic.id", topic.id)
         last_error = "model did not call submit_lesson"
         for attempt in range(1, attempts + 1):
-            turn = llm.chat(messages, [tool], tool_choice=tool_choice)
+            turn = await llm.chat(messages, [tool], tool_choice=tool_choice)
             messages.append(turn.to_message())
             call = next((c for c in turn.tool_calls if c.name == "submit_lesson"), None)
             if call is None:

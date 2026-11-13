@@ -84,13 +84,13 @@ def build_profile(inputs: ProfileInputs) -> LearnerProfile:
     )
 
 
-def refresh_profile(profiles: ProfileStore, learner_id: int, now: datetime) -> LearnerProfileRecord | None:
+async def refresh_profile(profiles: ProfileStore, learner_id: int, now: datetime) -> LearnerProfileRecord | None:
     """Recompute the profile; store it as a new version if it differs from the latest one."""
-    latest = profiles.latest(learner_id)
-    inputs = profiles.inputs(learner_id, now, window_days=PROFILE_WINDOW_DAYS)
+    latest = await profiles.latest(learner_id)
+    inputs = await profiles.inputs(learner_id, now, window_days=PROFILE_WINDOW_DAYS)
     if latest is not None:
         inputs = inputs.model_copy(update={"notes_ru": latest.profile.notes_ru})
     profile = build_profile(inputs)
     if latest is not None and latest.profile.same_as(profile):
         return None
-    return profiles.append(learner_id, profile)
+    return await profiles.append(learner_id, profile)

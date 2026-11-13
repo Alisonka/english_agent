@@ -4,9 +4,10 @@ import json
 import time
 from pathlib import Path
 
+import fakeredis
 import httpx
 
-from english_agent.research.sitemaps import SitemapIndex
+from english_agent.research.sitemaps import FileSitemapCache, RedisSitemapCache, SitemapIndex
 from english_agent.research.sites import ENGLEX, SKYSMART
 
 INDEX_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -28,7 +29,7 @@ SKYSMART_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </urlset>"""
 
 
-def make_client(routes: dict[str, str], calls: list[str]) -> httpx.Client:
+def make_client(routes: dict[str, str], calls: list[str]) -> httpx.AsyncClient:
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
         body = routes.get(str(request.url))
@@ -36,10 +37,10 @@ def make_client(routes: dict[str, str], calls: list[str]) -> httpx.Client:
             return httpx.Response(404)
         return httpx.Response(200, content=body.encode("utf-8"))
 
-    return httpx.Client(transport=httpx.MockTransport(handler))
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-def test_sitemap_index_follows_only_post_children(tmp_path: Path) -> None:
+async def test_sitemap_index_follows_only_post_children(tmp_path: Path) -> None:
     calls: list[str] = []
     client = make_client(
         {
@@ -48,32 +49,56 @@ def test_sitemap_index_follows_only_post_children(tmp_path: Path) -> None:
         },
         calls,
     )
-    index = SitemapIndex(client, tmp_path)
-    urls = index.urls_for(ENGLEX)
+    index = SitemapIndex(client, FileSitemapCache(tmp_path))
+    urls = await index.urls_for(ENGLEX)
     assert urls == ["https://englex.ru/articles-in-english/", "https://englex.ru/present-perfect/"]
     assert "https://englex.ru/sitemap-pt-webinar-p1-2026-10.xml" not in calls
 
 
-def test_flat_sitemap_filters_by_article_prefix_and_caches(tmp_path: Path) -> None:
+async def test_flat_sitemap_filters_by_article_prefix_and_caches(tmp_path: Path) -> None:
     calls: list[str] = []
     client = make_client({SKYSMART.sitemaps[0]: SKYSMART_XML}, calls)
-    index = SitemapIndex(client, tmp_path)
-    assert index.urls_for(SKYSMART) == ["https://skysmart.ru/articles/english/present-simple-tense"]
+    index = SitemapIndex(client, FileSitemapCache(tmp_path))
+    assert await index.urls_for(SKYSMART) == ["https://skysmart.ru/articles/english/present-simple-tense"]
 
     cache_file = tmp_path / "sitemaps" / "skysmart.json"
     assert cache_file.exists()
-    fresh_index = SitemapIndex(client, tmp_path)
-    assert fresh_index.urls_for(SKYSMART) == ["https://skysmart.ru/articles/english/present-simple-tense"]
+    fresh_index = SitemapIndex(client, FileSitemapCache(tmp_path))
+    assert await fresh_index.urls_for(SKYSMART) == ["https://skysmart.ru/articles/english/present-simple-tense"]
     assert len(calls) == 1
 
 
-def test_expired_cache_is_rebuilt(tmp_path: Path) -> None:
+async def test_expired_cache_is_rebuilt(tmp_path: Path) -> None:
     calls: list[str] = []
     client = make_client({SKYSMART.sitemaps[0]: SKYSMART_XML}, calls)
     cache_file = tmp_path / "sitemaps" / "skysmart.json"
     cache_file.parent.mkdir(parents=True)
     cache_file.write_text(json.dumps({"fetched_at": time.time() - 30 * 24 * 3600, "urls": ["stale"]}))
 
-    index = SitemapIndex(client, tmp_path, ttl_days=7)
-    assert index.urls_for(SKYSMART) == ["https://skysmart.ru/articles/english/present-simple-tense"]
+    index = SitemapIndex(client, FileSitemapCache(tmp_path, ttl_days=7))
+    assert await index.urls_for(SKYSMART) == ["https://skysmart.ru/articles/english/present-simple-tense"]
     assert len(calls) == 1
+
+
+async def test_an_incomplete_index_is_used_but_not_cached(tmp_path: Path) -> None:
+    calls: list[str] = []
+    # The index lists a post sitemap that answers 404: the URLs found are used, but not stored for a week.
+    client = make_client({"https://englex.ru/sitemap.xml": INDEX_XML}, calls)
+    index = SitemapIndex(client, FileSitemapCache(tmp_path))
+    assert await index.urls_for(ENGLEX) == []
+    assert not (tmp_path / "sitemaps" / "englex.json").exists()
+
+
+async def test_an_unreadable_cache_file_counts_as_missing(tmp_path: Path) -> None:
+    (tmp_path / "sitemaps").mkdir()
+    (tmp_path / "sitemaps" / "skysmart.json").write_text("{not json")
+    assert await FileSitemapCache(tmp_path).get("skysmart") is None
+
+
+async def test_the_redis_cache_is_shared_and_expires() -> None:
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    cache = RedisSitemapCache(redis, ttl_days=7)
+    assert await cache.get("skysmart") is None
+    await cache.put("skysmart", ["https://skysmart.ru/articles/english/a"])
+    assert await RedisSitemapCache(redis).get("skysmart") == ["https://skysmart.ru/articles/english/a"]
+    assert 0 < await redis.ttl("sitemaps:skysmart") <= 7 * 24 * 3600

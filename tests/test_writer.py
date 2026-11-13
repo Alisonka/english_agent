@@ -8,6 +8,7 @@ from english_agent.llm import AssistantTurn, ToolCall
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.research.models import TopicNotes
 from english_agent.writer import LessonWriteError, _submit_tool, write_lesson
+from fakes import ScriptedLLM
 from samples import QUIZ, TRANSLATION
 
 TOPIC = CurriculumTopic(
@@ -85,21 +86,6 @@ GOOD_ARGS: dict[str, Any] = {
 }
 
 
-class ScriptedLLM:
-    def __init__(self, turns: list[AssistantTurn]) -> None:
-        self.turns = list(turns)
-        self.calls: list[dict[str, Any]] = []
-
-    def chat(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        tool_choice: Any = "auto",
-    ) -> AssistantTurn:
-        self.calls.append({"messages": list(messages), "tools": tools, "tool_choice": tool_choice})
-        return self.turns.pop(0)
-
-
 def submit(args: dict[str, Any]) -> AssistantTurn:
     return AssistantTurn(
         content=None,
@@ -107,7 +93,7 @@ def submit(args: dict[str, Any]) -> AssistantTurn:
     )
 
 
-def test_writer_returns_lesson_with_code_owned_provenance() -> None:
+async def test_writer_returns_lesson_with_code_owned_provenance() -> None:
     llm = ScriptedLLM(
         [
             submit(
@@ -126,7 +112,7 @@ def test_writer_returns_lesson_with_code_owned_provenance() -> None:
             )
         ]
     )
-    lesson = write_lesson(llm, TOPIC, NOTES)
+    lesson = await write_lesson(llm, TOPIC, NOTES)
 
     assert lesson.topic_id == "there_is_are"
     assert lesson.cefr == "A2"
@@ -139,24 +125,24 @@ def test_writer_returns_lesson_with_code_owned_provenance() -> None:
     assert not {"topic_id", "cefr", "sources"} & set(params["properties"])
 
 
-def test_writer_feeds_validation_errors_back_once() -> None:
+async def test_writer_feeds_validation_errors_back_once() -> None:
     bad = {
         **GOOD_ARGS,
         "examples": [{"en": "There is a cat.", "ru": "Кот.", "highlights": ["There are"]}],
     }
     llm = ScriptedLLM([submit(bad), submit(GOOD_ARGS)])
-    lesson = write_lesson(llm, TOPIC, NOTES)
+    lesson = await write_lesson(llm, TOPIC, NOTES)
     assert len(lesson.examples) == 4
     retry_messages = llm.calls[1]["messages"]
     assert retry_messages[-1]["role"] == "tool"
     assert "highlights" in retry_messages[-1]["content"]
 
 
-def test_writer_gives_up_after_attempts() -> None:
+async def test_writer_gives_up_after_attempts() -> None:
     bad = {**GOOD_ARGS, "rule_ru": "коротко"}
     llm = ScriptedLLM([submit(bad), submit(bad)])
     with pytest.raises(LessonWriteError):
-        write_lesson(llm, TOPIC, NOTES)
+        await write_lesson(llm, TOPIC, NOTES)
 
 
 def test_writer_requires_exactly_three_practice_items() -> None:
@@ -166,10 +152,10 @@ def test_writer_requires_exactly_three_practice_items() -> None:
         assert params["properties"][field]["minItems"] == params["properties"][field]["maxItems"] == 3
 
 
-def test_writer_retries_when_practice_is_incomplete() -> None:
+async def test_writer_retries_when_practice_is_incomplete() -> None:
     incomplete = {**GOOD_ARGS, "quiz": QUIZ[:2], "translation": []}
     llm = ScriptedLLM([submit(incomplete), submit(GOOD_ARGS)])
-    lesson = write_lesson(llm, TOPIC, NOTES)
+    lesson = await write_lesson(llm, TOPIC, NOTES)
     assert len(lesson.quiz) == len(lesson.translation) == 3
     feedback = llm.calls[1]["messages"][-1]["content"]
     assert "quiz must have exactly 3" in feedback

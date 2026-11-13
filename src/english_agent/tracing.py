@@ -19,7 +19,10 @@ from typing import TYPE_CHECKING, Any
 
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.aiohttp_client import AioHttpClientInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.redis import RedisInstrumentor
+from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 from opentelemetry.sdk.resources import SERVICE_NAME, SERVICE_VERSION, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -27,8 +30,10 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from english_agent import __version__
 
 if TYPE_CHECKING:
+    import aiohttp
     from opentelemetry.instrumentation.httpx import RequestInfo
     from opentelemetry.trace import Span
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
     from english_agent.config import Settings
 
@@ -84,6 +89,23 @@ def _httpx_request_hook(span: Span, request: RequestInfo) -> None:
     span.set_attribute("http.url", safe)
 
 
+def _aiohttp_request_hook(span: Span, params: aiohttp.TraceRequestStartParams) -> None:
+    """aiogram talks to Telegram over aiohttp: the same token scrubbing as for httpx."""
+    if not span.is_recording():
+        return
+    url = str(params.url)
+    if "/bot" in url:
+        safe = _redact(url)
+        span.set_attribute("url.full", safe)
+        span.set_attribute("http.url", safe)
+
+
+def instrument_engine(engine: AsyncEngine) -> None:
+    """Spans for the queries of this engine; a no-op while tracing is off (the no-op tracer)."""
+    if isinstance(trace.get_tracer_provider(), TracerProvider):
+        SQLAlchemyInstrumentor().instrument(engine=engine.sync_engine, enable_commenter=False)
+
+
 def configure_tracing(settings: Settings) -> TracerProvider | None:
     """Install a tracer provider that exports over OTLP, if an endpoint is set.
 
@@ -100,4 +122,6 @@ def configure_tracing(settings: Settings) -> TracerProvider | None:
     trace.set_tracer_provider(provider)
 
     HTTPXClientInstrumentor().instrument(request_hook=_httpx_request_hook)
+    AioHttpClientInstrumentor().instrument(request_hook=_aiohttp_request_hook)
+    RedisInstrumentor().instrument()
     return provider

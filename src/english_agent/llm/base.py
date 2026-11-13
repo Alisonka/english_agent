@@ -33,7 +33,22 @@ class AssistantTurn:
         return {"role": "assistant", "content": blocks}
 
 
+class LLMError(Exception):
+    """A model call failed; see the subclasses for whether retrying can help."""
+
+
+class LLMUnavailable(LLMError):
+    """Rate limited, overloaded, a 5xx, a timeout or a network error after the SDK's own retries.
+
+    Transient: the job that made the call should be retried later, with backoff.
+    """
+
+
+class LLMRejected(LLMError):
+    """The request itself was refused (400/401/403/404): retrying the same request will not help."""
+
+
 class ChatLLM(Protocol):
-    def chat(
+    async def chat(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], tool_choice: Any = "auto"
     ) -> AssistantTurn: ...

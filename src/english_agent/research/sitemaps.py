@@ -1,19 +1,29 @@
-"""Per-site URL index built from sitemaps and cached on disk.
+"""Per-site URL index built from sitemaps, cached so it is rebuilt at most once per TTL.
 
 None of the three sites exposes a usable search endpoint, so "search" means
 scanning article URLs from their sitemaps. englex publishes a sitemap index with
 ~170 monthly post sitemaps; skyeng/skysmart publish flat sitemaps.
+
+The child sitemaps are fetched concurrently (bounded by a semaphore). Only a
+complete index is cached: when any sitemap could not be fetched or parsed, the
+URLs found are used for this run but not stored, so one network blip does not
+leave a site half-searchable for SITEMAP_TTL_DAYS. The cache is a `SitemapCache`:
+files on disk for command-line runs, Redis where several processes share it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import tempfile
 import time
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Protocol
 
 import httpx
+from redis.asyncio import Redis
 
 from english_agent.research.sites import Site
 
@@ -28,59 +38,101 @@ def _locs(root: ET.Element, parent_tag: str) -> list[str]:
     ]
 
 
-class SitemapIndex:
-    def __init__(self, http: httpx.Client, cache_dir: Path, ttl_days: int = 7, workers: int = 8) -> None:
-        self._http = http
-        self._cache_dir = cache_dir
+class SitemapCache(Protocol):
+    async def get(self, site: str) -> list[str] | None: ...
+
+    async def put(self, site: str, urls: list[str]) -> None: ...
+
+
+class FileSitemapCache:
+    """`<cache_dir>/sitemaps/<site>.json` with the fetch time; a stale or unreadable file counts as missing."""
+
+    def __init__(self, cache_dir: Path, ttl_days: int = 7) -> None:
+        self._dir = cache_dir / "sitemaps"
         self._ttl_seconds = ttl_days * 24 * 3600
-        self._workers = workers
-        self._memory: dict[str, list[str]] = {}
 
-    def urls_for(self, site: Site) -> list[str]:
-        if site.name in self._memory:
-            return self._memory[site.name]
-        cached = self._read_cache(site)
-        if cached is None:
-            cached = self._build(site)
-            self._write_cache(site, cached)
-        self._memory[site.name] = cached
-        return cached
+    async def get(self, site: str) -> list[str] | None:
+        return await asyncio.to_thread(self._read, site)
 
-    # -- cache -----------------------------------------------------------------
+    async def put(self, site: str, urls: list[str]) -> None:
+        await asyncio.to_thread(self._write, site, urls)
 
-    def _cache_path(self, site: Site) -> Path:
-        return self._cache_dir / "sitemaps" / f"{site.name}.json"
-
-    def _read_cache(self, site: Site) -> list[str] | None:
-        path = self._cache_path(site)
-        if not path.exists():
+    def _read(self, site: str) -> list[str] | None:
+        path = self._dir / f"{site}.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
         if time.time() - payload.get("fetched_at", 0) > self._ttl_seconds:
             return None
         return list(payload["urls"])
 
-    def _write_cache(self, site: Site, urls: list[str]) -> None:
-        path = self._cache_path(site)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"fetched_at": time.time(), "urls": urls}), encoding="utf-8")
+    def _write(self, site: str, urls: list[str]) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        # Write then rename: a reader in another process never sees a half-written file.
+        fd, tmp = tempfile.mkstemp(dir=self._dir, prefix=f".{site}.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump({"fetched_at": time.time(), "urls": urls}, file)
+        os.replace(tmp, self._dir / f"{site}.json")
+
+
+class RedisSitemapCache:
+    """`sitemaps:<site>` with a TTL: one copy for every worker process, rebuilt by whoever finds it missing."""
+
+    def __init__(self, redis: Redis, ttl_days: int = 7, prefix: str = "sitemaps") -> None:
+        self._redis, self._ttl_seconds, self._prefix = redis, ttl_days * 24 * 3600, prefix
+
+    async def get(self, site: str) -> list[str] | None:
+        raw = await self._redis.get(f"{self._prefix}:{site}")
+        if raw is None:
+            return None
+        try:
+            return list(json.loads(raw))
+        except ValueError:
+            return None
+
+    async def put(self, site: str, urls: list[str]) -> None:
+        await self._redis.set(f"{self._prefix}:{site}", json.dumps(urls), ex=self._ttl_seconds)
+
+
+class SitemapIndex:
+    def __init__(self, http: httpx.AsyncClient, cache: SitemapCache, concurrency: int = 8) -> None:
+        self._http = http
+        self._cache = cache
+        self._concurrency = concurrency
+        self._memory: dict[str, list[str]] = {}
+
+    async def urls_for(self, site: Site) -> list[str]:
+        if site.name in self._memory:
+            return self._memory[site.name]
+        urls = await self._cache.get(site.name)
+        if urls is None:
+            urls, complete = await self._build(site)
+            if complete and urls:
+                await self._cache.put(site.name, urls)
+        self._memory[site.name] = urls
+        return urls
 
     # -- building --------------------------------------------------------------
 
-    def _fetch_xml(self, url: str) -> ET.Element | None:
+    async def _fetch_xml(self, url: str, gate: asyncio.Semaphore) -> ET.Element | None:
         try:
-            response = self._http.get(url)
+            async with gate:
+                response = await self._http.get(url)
             response.raise_for_status()
             return ET.fromstring(response.content)
         except (httpx.HTTPError, ET.ParseError):
             return None
 
-    def _build(self, site: Site) -> list[str]:
+    async def _build(self, site: Site) -> tuple[list[str], bool]:
+        """All article URLs of the site, and whether every sitemap was read."""
+        gate = asyncio.Semaphore(self._concurrency)
+        complete = True
         leaf_roots: list[ET.Element] = []
         child_sitemaps: list[str] = []
-        for entry in site.sitemaps:
-            root = self._fetch_xml(entry)
+        for root in await asyncio.gather(*(self._fetch_xml(entry, gate) for entry in site.sitemaps)):
             if root is None:
+                complete = False
                 continue
             children = _locs(root, "sitemap")
             if not children:
@@ -90,10 +142,13 @@ class SitemapIndex:
                 children = [child for child in children if site.child_sitemap_filter in child]
             child_sitemaps.extend(children)
 
-        with ThreadPoolExecutor(max_workers=self._workers) as pool:
-            leaf_roots.extend(root for root in pool.map(self._fetch_xml, child_sitemaps) if root is not None)
+        for root in await asyncio.gather(*(self._fetch_xml(child, gate) for child in child_sitemaps)):
+            if root is None:
+                complete = False
+            else:
+                leaf_roots.append(root)
 
         urls: set[str] = set()
         for root in leaf_roots:
             urls.update(url for url in _locs(root, "url") if site.is_article(url))
-        return sorted(urls)
+        return sorted(urls), complete

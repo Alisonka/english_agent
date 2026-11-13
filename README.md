@@ -143,15 +143,15 @@ Configuration is read from environment variables or a local `.env` file (see
 | --- | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | yes | – | Anthropic (Claude) API key |
 | `TELEGRAM_BOT_TOKEN` | for sending | – | Bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | for sending | – | Chat that receives the lessons (`python -m english_agent.telegram chats`) |
-| `CURRICULUM_START_DATE` | without `--topic` | – | Day topic 1 is sent (`YYYY-MM-DD`); one topic per day after that |
+| `TELEGRAM_CHAT_ID` | for CLI runs | – | The chat command-line runs act on (`pipeline`, `telegram ping`, `storage set-schedule`); learners register with /start |
+| `CURRICULUM_START_DATE` | for `--no-send` previews | – | Course day 1 (`YYYY-MM-DD`) when previewing the topic of a day |
 | `DATABASE_URL` | for sending | – | PostgreSQL URL, `postgresql+psycopg://english_agent:<pw>@localhost:5432/english_agent` (compose sets it for its services) |
 | `POSTGRES_PASSWORD` | for compose | – | Password of the compose `postgres` service; use a URL-safe one (`openssl rand -hex 24`) |
-| `LESSON_SEND_TIME` | no | `09:00` | When the server app sends the daily lesson |
-| `TIMEZONE` | no | `Europe/Moscow` | Time zone for `LESSON_SEND_TIME` and for "today" |
+| `LESSON_SEND_TIME` | no | `09:00` | A new learner's lesson time (each learner then sets their own with /time) |
+| `TIMEZONE` | no | `Europe/Moscow` | A new learner's time zone (/timezone), and "today" for CLI previews |
 | `LEARNER_CEFR` | no | `A2` | Level of a new learner; the level chosen with /level wins |
-| `QUIZ_DELAY_MINUTES` | no | `60` | Quiz polls are sent this long after the lesson |
-| `TRANSLATION_SEND_TIME` | no | `18:00` | When the translation task is sent (at least `PRACTICE_GAP_MINUTES` after the quiz) |
+| `QUIZ_DELAY_MINUTES` | no | `60` | A new learner's delay of the quiz polls after the lesson |
+| `TRANSLATION_SEND_TIME` | no | `18:00` | A new learner's translation task time (/translation) |
 | `PRACTICE_GAP_MINUTES` | no | `60` | Minimum gap between the quiz and the translation task |
 | `PRACTICE_CUTOFF_TIME` | no | `22:00` | No practice is sent after this local time |
 | `GRADER_MODEL` | no | `claude-haiku-5-5` | Model that grades the learner's translation |
@@ -166,6 +166,26 @@ Configuration is read from environment variables or a local `.env` file (see
 | `RESEARCH_PAGE_CHAR_LIMIT` | no | `40000` | Max chars read per page |
 | `SITEMAP_TTL_DAYS` | no | `7` | Days a cached sitemap stays fresh |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | – | OTLP/HTTP endpoint for traces (e.g. `http://localhost:4318`); unset disables tracing |
+| `HTTP_TIMEOUT_SECONDS` | no | `20` | Timeout of research and Telegram HTTP requests |
+| `HTTP_USER_AGENT` | no | `english-agent/0.1` | User-Agent of research page fetches |
+| `CACHE_DIR` | no | `.cache` | Where sitemaps are cached on disk |
+| `LLM_TIMEOUT_SECONDS` | no | `120` | Timeout of one Claude API request |
+| `LLM_MAX_RETRIES` | no | `4` | Retries of a Claude API request on 429, 5xx and overloaded, with backoff |
+| `LLM_MAX_CONCURRENCY` | no | `3` | Claude API requests one process keeps in flight |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | no | `5` / `5` | PostgreSQL connections per process, kept open / extra under load |
+| `REDIS_URL` | for the worker | – | Redis for the job queue, de-duplication and rate limits, e.g. `redis://localhost:6379/0` |
+| `TELEGRAM_GLOBAL_RATE_PER_SECOND` | no | `25` | Outgoing Telegram messages per second, all chats together |
+| `TELEGRAM_CHAT_RATE_PER_SECOND` | no | `1` | Outgoing Telegram messages per second to one chat |
+| `TELEGRAM_API_BASE` | no | `https://api.telegram.org` | Bot API server (a fake one in load tests) |
+| `TELEGRAM_WEBHOOK_URL` / `TELEGRAM_WEBHOOK_SECRET` / `TELEGRAM_WEBHOOK_PORT` | no | – / – / `8080` | Receive updates by webhook instead of long polling |
+| `ADMIN_CHAT_ID` | no | – | Chat that receives operational alerts |
+| `LESSON_CATCH_UP_HOURS` | no | `6` | A lesson not sent this long after its send time is not sent that day |
+| `JOB_MAX_ATTEMPTS` | no | `5` | Attempts of a failing background job |
+| `LESSON_CLAIM_STALE_MINUTES` | no | `10` | A lesson claimed this long ago by a dead worker is taken over |
+| `CONTENT_GENERATION_STALE_MINUTES` | no | `20` | A lesson being written this long ago by a dead worker is taken over |
+| `LOG_FORMAT` | no | `text` | `json` for one JSON object per line (the server) |
+| `LOG_LEVEL` | no | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
+| `METRICS_PORT` | no | `0` | Port of this process's Prometheus `/metrics` (0 = off; compose sets 9100) |
 
 See [.env.example](.env.example) for the full template.
 
@@ -180,14 +200,45 @@ uv run python -m english_agent.pipeline --topic there_is_are
 ```
 
 Add `--no-send` to only print the lesson without sending it. Without `--topic`
-the pipeline sends the topic of the day (counted from `CURRICULUM_START_DATE`;
-`--date YYYY-MM-DD` checks another day). After the last topic it announces
-"курс завершён" once and exits with 0; a failed lesson is reported to the chat.
+the pipeline sends the learner's next topic: the first topic of their level, by
+order, they have not had yet, so a failed day, a pause or a missed day never loses
+a topic. The learner is `TELEGRAM_CHAT_ID` unless `--chat` names another one.
+`--no-send` without `--topic` previews the topic of a course day instead, counted
+from `CURRICULUM_START_DATE` (`--date YYYY-MM-DD` picks the day). After the last
+topic the learner hears "курс завершён" once and stops getting lessons until they
+pick another level; a failed lesson is reported to the chat without error details
+(those go to the log).
 
 Sending needs PostgreSQL (`DATABASE_URL`): every sent lesson is recorded in the
 `lessons` table, one per learner per day, and a run for a day whose lesson is
-already sent does nothing. A failed run is recorded too and is retried by the next
-run that day. `--no-send` never touches the database; `--no-store` sends without it.
+already sent does nothing. `--no-send` never touches the database; `--no-store`
+sends without it.
+
+### Learners and their schedule
+
+Anyone who sends the bot /start becomes a learner and starts the course. Each
+learner keeps their own schedule; `LESSON_SEND_TIME`, `TRANSLATION_SEND_TIME`,
+`QUIZ_DELAY_MINUTES` and `TIMEZONE` are only what a new learner starts with:
+
+| Command | What it does |
+| --- | --- |
+| `/start` | Register and start the course (again, after blocking the bot) |
+| `/level`, `/mylevel` | Pick or show the CEFR level; progress is kept per level |
+| `/time 09:00` | When the daily lesson comes, in the learner's time zone |
+| `/translation 18:00` | When the translation task comes (at least `PRACTICE_GAP_MINUTES` after the quiz) |
+| `/timezone Europe/Moscow` | The learner's IANA time zone |
+| `/pause`, `/resume` | Stop and resume lessons and practice |
+| `/status` | The current settings |
+
+A lesson is due from the learner's send time for `LESSON_CATCH_UP_HOURS`
+(a restart or a deploy inside that window still sends it); a failed day is not
+retried that day, and its topic comes the next day. A learner who blocks the
+bot is deactivated until they send /start again. To give an existing learner a
+schedule other than the defaults, e.g. the values of an older `.env`:
+
+```bash
+uv run python -m english_agent.storage set-schedule --chat 42 --lesson-time 08:30 --timezone Asia/Vladivostok
+```
 
 ### Running on the server
 
@@ -195,24 +246,54 @@ Everything runs on the server (`ssh vpn`) as one docker compose stack, see
 [docker-compose.yml](docker-compose.yml):
 
 - `postgres` — PostgreSQL 17, data in the `pgdata` volume, published on `127.0.0.1:5432` only;
-- `migrate` — runs `alembic upgrade head` once, before the app starts;
-- `app` — `python -m english_agent.app`: one long-running process that answers
-  /level and /mylevel, quiz answers and translation answers (long polling) and
-  sends the daily lesson at `LESSON_SEND_TIME` in `TIMEZONE`. Started after that
-  time (a restart, a deploy), it sends today's lesson right away unless it is
-  already sent. Every 5 minutes it sends the practice that is due; that state is
-  in the database, so a restart neither loses nor repeats it;
-- `jaeger` — traces from `app`.
+- `redis` — Redis 7: the job queue (a Redis Stream), de-duplication keys, the Telegram
+  rate budget shared by all processes and the sitemap cache. No state lives only here;
+- `migrate` — runs `alembic upgrade head` once, before the others start;
+- `bot` — `python -m english_agent.bot`: answers commands, quiz answers and
+  translations (aiogram 3, long polling, updates handled concurrently) and hands
+  gradings to the queue;
+- `worker` — `taskiq worker`: runs the jobs (lessons, practice, gradings, profile
+  refreshes, writing lessons ahead), up to 16 at once; scale it with
+  `docker compose up -d --scale worker=2`;
+- `scheduler` — `taskiq scheduler`: exactly one; every minute it enqueues the job
+  `schedule_tick`, which works out from PostgreSQL what is due and enqueues it;
+  every six hours `prewarm_content` writes the next lesson of every active learner
+  ahead of time;
+- `jaeger` — traces from the bot and the workers.
 
 ```bash
 cd ~/english_agent && git pull
-docker compose up -d --build      # migrate applies new migrations, then app restarts
-docker compose logs -f app
-docker compose run --rm --no-deps app python -m english_agent.pipeline --topic there_is_are   # manual run
+docker compose up -d --build --remove-orphans   # migrate applies new migrations, then the rest restarts
+docker compose logs -f bot worker scheduler
+docker compose run --rm --no-deps worker python -m english_agent.pipeline --topic there_is_are   # manual run
 ```
 
-The app must be the bot's only `getUpdates` consumer: do not run
-`python -m english_agent.telegram level` against the same bot while it is up.
+The bot must be the only `getUpdates` consumer: do not run
+`python -m english_agent.telegram chats` against the same bot while it is up. With
+`TELEGRAM_WEBHOOK_URL` set the bot serves a webhook on `TELEGRAM_WEBHOOK_PORT`
+instead (behind an HTTPS proxy), which also allows more than one bot process.
+
+How the jobs stay correct (PostgreSQL is the source of truth, Redis Streams deliver
+at least once, and every job may run twice):
+
+| Work | Claimed in PostgreSQL by | If a worker dies |
+| --- | --- | --- |
+| A learner's lesson of the day | the `lessons` row: `pending` → `sending` → `sent`, with `claimed_at` and `attempts` | after `LESSON_CLAIM_STALE_MINUTES` the next tick takes it over and sends only the messages that had not arrived (each sent message id is recorded at once) |
+| The shared lesson content | the `lesson_contents` row (`generating`) | taken over after `CONTENT_GENERATION_STALE_MINUTES` |
+| A quiz or a translation task | the `practice_deliveries` row (lesson, kind) | stays claimed, not resent (a duplicate quiz is worse than a missing one) |
+| A translation grade | the answer row while `pending`, `grading_attempts` | regraded after 15 minutes, up to 3 attempts; then the learner is asked to send it again |
+
+A failed lesson send (a Telegram outage) is retried after 2, 4, 8 … minutes up to
+`JOB_MAX_ATTEMPTS`; a lesson that could not be written is skipped for the day and its
+topic comes the next day. Each process keeps its own limits: `LLM_MAX_CONCURRENCY`
+Claude requests in flight with SDK retries and a timeout, `DB_POOL_SIZE` +
+`DB_MAX_OVERFLOW` connections; the Telegram budget (`TELEGRAM_GLOBAL_RATE_PER_SECOND`,
+`TELEGRAM_CHAT_RATE_PER_SECOND`) is shared through Redis, and a 429 is waited out and
+retried. On SIGTERM the bot finishes the updates in progress and the worker waits up
+to four minutes for running jobs; a job cut short is taken over as above.
+
+`bot` and `worker` write a heartbeat file every 30 seconds; their healthcheck fails
+(and Docker restarts them) when it is older than two minutes.
 
 From a laptop, reach the database and the Jaeger UI through an SSH tunnel:
 
@@ -221,13 +302,90 @@ ssh -N -L 5432:localhost:5432 -L 16686:localhost:16686 vpn
 psql postgresql://english_agent:<pw>@localhost:5432/english_agent
 ```
 
+### Operations
+
+**Logs.** Every service logs one JSON object per line (`LOG_FORMAT=json`) with
+`chat_id`, `job`, `job_id` and the OpenTelemetry `trace_id` where they apply, so one
+learner's or one job's lines can be filtered and joined with its trace in Jaeger:
+
+```bash
+docker compose logs worker | grep '"chat_id": "42"'
+docker compose logs worker | grep '"job": "deliver_lesson"' | grep ERROR
+```
+
+**Traces.** Jaeger shows each job as `job.<name>`, continuing the trace of whatever
+enqueued it, with the database queries, Redis calls, Claude calls (`llm.chat`, tokens
+and estimated cost) and Telegram requests (bot token redacted) inside.
+
+**Metrics.** The bot and each worker serve Prometheus metrics on port 9100 of the
+compose network (`bot:9100`, `worker:9100`); what to watch:
+
+| Metric | Watch for |
+| --- | --- |
+| `english_agent_jobs_total{outcome="error"}` | a rising rate: jobs failing |
+| `english_agent_job_duration_seconds{task="deliver_lesson"}` | lessons taking minutes: content not prewarmed, Claude slow |
+| `english_agent_lessons_sent_total`, `english_agent_lessons_failed_total` | sent per day vs. learners due |
+| `english_agent_llm_errors_total`, `english_agent_llm_cost_usd_total` | Claude outages and spend |
+| `english_agent_telegram_requests_total{outcome!="ok"}`, `english_agent_telegram_retry_after_seconds_total` | blocked chats, flood control |
+| `english_agent_alerts_total` | anything that also went to `ADMIN_CHAT_ID` |
+
+**Alerts.** With `ADMIN_CHAT_ID` set, the workers send a message there when a job fails
+for good (no retry left, or a failure retrying cannot fix) and when a lesson could not
+be written; the same kind of alert at most once per ten minutes per worker.
+
+**Common tasks.**
+
+```bash
+# a learner's state
+docker compose exec postgres psql -U english_agent -c "SELECT * FROM learners WHERE telegram_chat_id = '42'"
+# today's unfinished lessons
+docker compose exec postgres psql -U english_agent -c \
+  "SELECT learner_id, status, attempts, claimed_at, error FROM lessons WHERE status <> 'sent' AND lesson_date >= current_date - 1"
+# send one learner's lesson now (the same claim rules: never twice)
+docker compose run --rm --no-deps worker python -m english_agent.pipeline --chat 42
+# pause a learner
+docker compose exec postgres psql -U english_agent -c "UPDATE learners SET paused_at = now() WHERE telegram_chat_id = '42'"
+# what is queued
+docker compose exec redis redis-cli XLEN english_agent
+```
+
+To rotate the bot token, change `TELEGRAM_BOT_TOKEN` in `.env` and run
+`docker compose up -d bot worker`. Restore a backup with `pg_restore` into a stopped
+stack (see Backups); Redis needs nothing, the scheduler rebuilds the queue.
+
+**Load test.** `scripts/soak.py` puts N learners on the same minute and runs the
+real scheduler, worker and bot against a fake Telegram (`scripts/fake_telegram.py`,
+which answers 429 like Telegram does above its limits) in a compose project of its
+own, then checks that every learner got the lesson exactly once:
+
+```bash
+export POSTGRES_PORT=15432 REDIS_PORT=16379 JAEGER_UI_PORT=26686 JAEGER_GRPC_PORT=24317 JAEGER_OTLP_PORT=24318
+docker compose -p english-agent-soak -f docker-compose.yml -f docker-compose.soak.yml up -d --build
+docker compose -p english-agent-soak -f docker-compose.yml -f docker-compose.soak.yml \
+    run --rm soak python scripts/soak.py --learners 500
+docker compose -p english-agent-soak -f docker-compose.yml -f docker-compose.soak.yml down -v
+```
+
 ### Database
 
-Storage is PostgreSQL through SQLAlchemy 2.0 (sync, psycopg 3), see
+Storage is PostgreSQL through SQLAlchemy 2.0 (async, psycopg 3), see
 [src/english_agent/storage/](src/english_agent/storage/). Repositories return the
 pydantic records from [models/storage.py](src/english_agent/models/storage.py);
-ORM objects stay inside the package. Tables: `learners`, `lessons` (the lesson
-JSON, status and Telegram message ids), the practice tables, and the learner model:
+ORM objects stay inside the package. Tables: `learners` (with each learner's
+schedule), `lesson_contents`, `lessons`, the practice tables, and the learner model:
+
+- `lesson_contents` — a lesson written once per topic, level and *recipe* and sent
+  to every learner who reaches that topic ([content.py](src/english_agent/content.py)):
+  research and writing cost up to ~14 Claude calls, so they run once per topic and
+  level, not once per learner. The recipe key combines the lesson schema version,
+  the research and writer prompt fingerprints and both models; changing any of them
+  makes new content. A claim row makes sure one worker writes it while the others
+  wait; a dead worker's claim is taken over after `CONTENT_GENERATION_STALE_MINUTES`,
+  a failed attempt is retried after the same cool-down, and a topic whose
+  `JOB_MAX_ATTEMPTS` attempts all failed is skipped. Lessons sent before this
+  became content keyed `legacy` (migration 0005).
+- `lessons` — one per learner and day: status, Telegram message ids and the
+  `content_id` that was sent (the lesson JSON is still copied into `payload` too).
 
 - `items` — one core item per taught topic, `<topic_id>:core`, created when the
   lesson is sent ([items.py](src/english_agent/items.py)); the unit that reviews
@@ -255,15 +413,15 @@ The level chosen in the bot used to live in `.state/learner.json`; import it onc
 
 ```bash
 uv run python -m english_agent.storage import-learner-json            # local file
-docker compose run --rm --no-deps -T app python -m english_agent.storage import-learner-json - < .state/learner.json
+docker compose run --rm --no-deps -T worker python -m english_agent.storage import-learner-json - < .state/learner.json
 ```
 
 Lessons and answers stored before the learner model existed are brought in with
 two idempotent commands (run in this order; safe to rerun):
 
 ```bash
-docker compose run --rm --no-deps app python -m english_agent.storage backfill-items    # core items for sent lessons
-docker compose run --rm --no-deps app python -m english_agent.storage backfill-reviews  # link old polls, rate old answers
+docker compose run --rm --no-deps worker python -m english_agent.storage backfill-items    # core items for sent lessons
+docker compose run --rm --no-deps worker python -m english_agent.storage backfill-reviews  # link old polls, rate old answers
 ```
 
 ### Backups
@@ -310,10 +468,17 @@ release history.
 
 ```
 src/english_agent/
-  app.py           # server process: bot + daily lesson and practice scheduler
+  bot/             # the bot process: aiogram dispatcher, update handlers, polling or webhook
+  jobs/            # TaskIQ broker, scheduler tick, job bodies, de-duplication keys
+  planning.py      # when is what due (pure rules the scheduler applies)
+  health.py        # heartbeat file for container healthchecks
+  metrics.py       # Prometheus metrics; alerts.py: operational alerts to ADMIN_CHAT_ID
   config.py        # runtime settings (env / .env)
+  content.py       # shared lesson content: recipe key, claim owner
   grader.py        # learner's translation -> validated TranslationGrade
+  grading.py       # grade a stored answer, save it, show it (bot or job)
   items.py         # sent lesson -> core item in the `items` table (+ backfill)
+  logs.py          # logging setup: text or JSON, bound context fields, trace ids
   profile.py       # learner profile: computed from answers, errors and cards; versioned
   srs.py           # spaced repetition (FSRS-6 via py-fsrs): ratings, scheduling
   paths.py         # repo-relative paths
@@ -326,10 +491,10 @@ src/english_agent/
   prompts/         # system prompts
   research/        # research agent, tools, sitemaps, sources
   storage/         # PostgreSQL: SQLAlchemy mappings, repositories
-  telegram/        # HTML rendering, Bot API client, the bot's update handlers
+  telegram/        # HTML rendering, the aiogram sender, outgoing rate limits
 migrations/        # Alembic migrations
 deploy/systemd/    # backup timer units
-scripts/           # pg_backup.sh
+scripts/           # pg_backup.sh, fake_telegram.py and soak.py (load test)
 curriculum/        # A2 / B1 topic definitions
 evals/datasets/    # evaluation goldens
 tests/             # test suite

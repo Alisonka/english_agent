@@ -5,7 +5,7 @@ Keep in sync with the Alembic migrations in `migrations/versions/`.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from typing import Any
 
 from sqlalchemy import (
@@ -20,6 +20,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    Time,
     UniqueConstraint,
     func,
     text,
@@ -50,6 +51,7 @@ class Base(DeclarativeBase):
 
 class LearnerRow(Base):
     __tablename__ = "learners"
+    __table_args__ = (CheckConstraint("quiz_delay_minutes >= 0", name="quiz_delay_minutes"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_chat_id: Mapped[str] = mapped_column(String(64), unique=True)
@@ -58,6 +60,15 @@ class LearnerRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, server_default=func.now()
     )
+    # The learner's own schedule (see `models.schedule`); new learners get the settings' defaults.
+    timezone: Mapped[str] = mapped_column(String(64), server_default=text("'Europe/Moscow'"))
+    lesson_send_time: Mapped[time] = mapped_column(Time, server_default=text("'09:00'"))
+    translation_send_time: Mapped[time] = mapped_column(Time, server_default=text("'18:00'"))
+    quiz_delay_minutes: Mapped[int] = mapped_column(Integer, server_default=text("60"))
+    curriculum_started_on: Mapped[date | None] = mapped_column(Date)
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deactivated_reason: Mapped[str | None] = mapped_column(String(64))
 
 
 class LessonRow(Base):
@@ -65,7 +76,10 @@ class LessonRow(Base):
     __table_args__ = (
         # One lesson per learner per day: a restart or a manual run must not send it twice.
         UniqueConstraint("learner_id", "lesson_date"),
-        CheckConstraint("status IN ('sent', 'failed')", name="status"),
+        CheckConstraint("status IN ('pending', 'sending', 'sent', 'failed', 'skipped')", name="status"),
+        Index(
+            "ix_lessons_unfinished", "lesson_date", postgresql_where=text("status IN ('pending', 'sending', 'failed')")
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -82,6 +96,36 @@ class LessonRow(Base):
     telegram_message_ids: Mapped[list[int]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
     created_at: Mapped[datetime] = _created_at()
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    content_id: Mapped[int | None] = mapped_column(ForeignKey("lesson_contents.id", ondelete="RESTRICT"), index=True)
+    # Who is delivering it: set when a worker claims the day, cleared when it lets go; see `LessonRepo.claim`.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+
+
+class LessonContentRow(Base):
+    """A lesson written once and sent to every learner of the topic and level (see `models.storage`)."""
+
+    __tablename__ = "lesson_contents"
+    __table_args__ = (
+        # One piece of content per recipe: the claim that prevents two workers writing it at once.
+        UniqueConstraint("topic_id", "cefr", "curriculum_version", "content_key"),
+        CheckConstraint("status IN ('generating', 'ready', 'failed')", name="status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    topic_id: Mapped[str] = mapped_column(String(100))
+    cefr: Mapped[str] = mapped_column(String(2))
+    curriculum_version: Mapped[int] = mapped_column(Integer)
+    content_key: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(16))
+    schema_version: Mapped[int] = mapped_column(Integer)
+    lesson: Mapped[dict[str, Any] | None] = mapped_column("payload", JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_by: Mapped[str | None] = mapped_column(String(64))
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created_at()
 
 
 class ItemRow(Base):
@@ -215,6 +259,7 @@ class TranslationAnswerRow(Base):
         # One graded attempt per task; a failed grading is retried on the same row.
         UniqueConstraint("delivery_id"),
         CheckConstraint("status IN ('pending', 'graded', 'failed')", name="status"),
+        Index("ix_translation_answers_pending", "created_at", postgresql_where=text("status = 'pending'")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -229,3 +274,5 @@ class TranslationAnswerRow(Base):
     disputed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     created_at: Mapped[datetime] = _created_at()
     graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    grading_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    grading_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
