@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
-from sqlalchemy import func, select, tuple_, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import cast, func, select, tuple_, update
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from english_agent.config import Settings
@@ -33,8 +33,10 @@ from english_agent.models.storage import (
     ItemRecord,
     LearnerProfileRecord,
     LearnerRecord,
+    LessonClaim,
     LessonContentRecord,
     LessonRecord,
+    LessonState,
     LessonStatus,
     OpenTranslationTask,
     PracticeDeliveryRecord,
@@ -116,6 +118,33 @@ class LessonStore(Protocol):
 
     async def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]: ...
 
+    async def states(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonState]: ...
+
+    async def claim(
+        self,
+        learner_id: int,
+        day: date,
+        *,
+        topic_id: str,
+        cefr: Cefr,
+        curriculum_version: int,
+        now: datetime,
+        stale_after: timedelta,
+        max_attempts: int,
+    ) -> tuple[LessonClaim, LessonRecord]: ...
+
+    async def release(self, lesson_id: int) -> None: ...
+
+    async def start_sending(self, lesson_id: int, content_id: int, lesson: Lesson) -> LessonRecord: ...
+
+    async def add_message_id(self, lesson_id: int, message_id: int) -> None: ...
+
+    async def finish_sending(self, lesson_id: int) -> LessonRecord: ...
+
+    async def fail(self, lesson_id: int, reason: str, *, final: bool) -> LessonRecord: ...
+
+    async def close_past(self, before: date) -> int: ...
+
 
 class LessonContentStore(Protocol):
     async def claim(
@@ -181,6 +210,12 @@ class PracticeStore(Protocol):
     async def set_progress_message(self, answer_id: int, message_id: int) -> None: ...
 
     async def translation_for_grading(self, answer_id: int) -> GradingTask | None: ...
+
+    async def begin_grading(self, answer_id: int, now: datetime) -> GradingTask | None: ...
+
+    async def stale_gradings(self, started_before: datetime, *, limit: int = 200) -> list[tuple[int, int]]: ...
+
+    async def delivered_kinds(self, lesson_ids: list[int]) -> dict[int, set[PracticeKind]]: ...
 
     async def finish_translation_answer(self, answer_id: int, grade: TranslationGrade) -> TranslationAnswerRecord: ...
 
@@ -491,6 +526,149 @@ class LessonRepo:
                 )
             )
             return set(rows)
+
+    async def states(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonState]:
+        """The rows of these (learner id, day) keys without their payload, one query."""
+        if not keys:
+            return {}
+        async with session_scope(self._sessions) as session:
+            rows = await session.execute(
+                select(
+                    LessonRow.learner_id,
+                    LessonRow.lesson_date,
+                    LessonRow.id,
+                    LessonRow.status,
+                    LessonRow.attempts,
+                    LessonRow.claimed_at,
+                    LessonRow.sent_at,
+                ).where(tuple_(LessonRow.learner_id, LessonRow.lesson_date).in_(keys))
+            )
+            return {
+                (learner_id, day): LessonState(
+                    lesson_id=lesson_id, status=status, attempts=attempts, claimed_at=claimed_at, sent_at=sent_at
+                )
+                for learner_id, day, lesson_id, status, attempts, claimed_at, sent_at in rows
+            }
+
+    async def claim(
+        self,
+        learner_id: int,
+        day: date,
+        *,
+        topic_id: str,
+        cefr: Cefr,
+        curriculum_version: int,
+        now: datetime,
+        stale_after: timedelta,
+        max_attempts: int,
+    ) -> tuple[LessonClaim, LessonRecord]:
+        """Take the day's delivery, in one transaction.
+
+        - "claimed": the caller delivers it now (a new day, a released one, a stale "pending", or a
+          "failed" one with attempts left);
+        - "resume": a worker died while sending: the caller sends the rest (the ids of the messages
+          already sent are in `telegram_message_ids`) and keeps the row's topic;
+        - "busy": another worker holds it right now;
+        - "done": sent, skipped, or out of attempts.
+        """
+        new = (
+            insert(LessonRow)
+            .values(
+                learner_id=learner_id,
+                lesson_date=day,
+                topic_id=topic_id,
+                cefr=cefr,
+                curriculum_version=curriculum_version,
+                schema_version=SCHEMA_VERSIONS["lesson"],
+                status="pending",
+                attempts=1,
+                claimed_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=["learner_id", "lesson_date"])
+            .returning(LessonRow.id)
+        )
+        async with session_scope(self._sessions) as session:
+            created_id = (await session.execute(new)).scalar_one_or_none()
+            row = await session.scalar(
+                select(LessonRow)
+                .where(LessonRow.learner_id == learner_id, LessonRow.lesson_date == day)
+                .with_for_update()
+            )
+            assert row is not None
+            if created_id is not None:
+                return "claimed", LessonRecord.model_validate(row)
+            fresh = row.claimed_at is not None and row.claimed_at > now - stale_after
+            outcome: LessonClaim
+            if row.status in ("sent", "skipped"):
+                outcome = "done"
+            elif row.status in ("pending", "sending") and fresh:
+                outcome = "busy"
+            elif row.attempts >= max_attempts:
+                row.status, row.error = "skipped", row.error or f"gave up after {row.attempts} attempts"
+                outcome = "done"
+            else:
+                # Every claim counts as an attempt; `release` takes it back when nothing was tried.
+                outcome = "resume" if row.status == "sending" else "claimed"
+                if outcome == "claimed":
+                    row.topic_id, row.cefr, row.curriculum_version = topic_id, cefr, curriculum_version
+                    row.status = "pending"
+                row.attempts, row.claimed_at = row.attempts + 1, now
+            await session.flush()
+            return outcome, LessonRecord.model_validate(row)
+
+    async def release(self, lesson_id: int) -> None:
+        """Give the day back without counting an attempt (the content is still being written elsewhere)."""
+        async with session_scope(self._sessions) as session:
+            await session.execute(
+                update(LessonRow)
+                .where(LessonRow.id == lesson_id, LessonRow.status == "pending")
+                .values(claimed_at=None, attempts=func.greatest(LessonRow.attempts - 1, 0))
+            )
+
+    async def start_sending(self, lesson_id: int, content_id: int, lesson: Lesson) -> LessonRecord:
+        async with session_scope(self._sessions) as session:
+            row = await session.get_one(LessonRow, lesson_id, with_for_update=True)
+            row.status, row.content_id, row.error = "sending", content_id, None
+            # The payload is still copied next to content_id: practice and older code read it from here.
+            row.lesson, row.schema_version = lesson.model_dump(mode="json"), SCHEMA_VERSIONS["lesson"]
+            row.topic_id, row.cefr = lesson.topic_id, lesson.cefr
+            await session.flush()
+            return LessonRecord.model_validate(row)
+
+    async def add_message_id(self, lesson_id: int, message_id: int) -> None:
+        """Record one sent chunk right away, so a crash mid-lesson resumes after it instead of repeating it."""
+        appended = LessonRow.telegram_message_ids.op("||")(cast([message_id], JSONB))
+        async with session_scope(self._sessions) as session:
+            await session.execute(
+                update(LessonRow).where(LessonRow.id == lesson_id).values(telegram_message_ids=appended)
+            )
+
+    async def finish_sending(self, lesson_id: int) -> LessonRecord:
+        async with session_scope(self._sessions) as session:
+            row = await session.get_one(LessonRow, lesson_id, with_for_update=True)
+            row.status, row.sent_at, row.claimed_at = "sent", datetime.now(UTC), None
+            await session.flush()
+            return LessonRecord.model_validate(row)
+
+    async def fail(self, lesson_id: int, reason: str, *, final: bool) -> LessonRecord:
+        """A failed attempt: "failed" is retried later by the planner, a final one is "skipped" for the day."""
+        async with session_scope(self._sessions) as session:
+            row = await session.get_one(LessonRow, lesson_id, with_for_update=True)
+            if row.status != "sent":
+                # claimed_at stays: the planner waits a backoff after the last attempt before the next one.
+                row.status, row.error = ("skipped" if final else "failed"), reason
+            await session.flush()
+            return LessonRecord.model_validate(row)
+
+    async def close_past(self, before: date) -> int:
+        """Mark unfinished rows of days before `before` as skipped; returns how many."""
+        async with session_scope(self._sessions) as session:
+            result = await session.execute(
+                update(LessonRow)
+                .where(LessonRow.lesson_date < before, LessonRow.status.in_(("pending", "sending", "failed")))
+                .values(status="skipped", claimed_at=None, error=func.coalesce(LessonRow.error, "not sent that day"))
+            )
+            return int(result.rowcount or 0)
 
     async def _save(self, learner_id: int, day: date, **values: Any) -> LessonRecord:
         """Insert the day's row, or overwrite an earlier failed attempt; a sent lesson is final."""
@@ -1078,6 +1256,43 @@ class PracticeRepo:
                 lesson=Lesson.model_validate(lesson),
                 telegram_chat_id=chat_id,
             )
+
+    async def begin_grading(self, answer_id: int, now: datetime) -> GradingTask | None:
+        """Start one grading attempt of a pending answer (counted); None if it is not pending any more."""
+        async with session_scope(self._sessions) as session:
+            row = await session.get(TranslationAnswerRow, answer_id, with_for_update=True)
+            if row is None or row.status != "pending":
+                return None
+            row.grading_attempts, row.grading_started_at = row.grading_attempts + 1, now
+            await session.flush()
+        return await self.translation_for_grading(answer_id)
+
+    async def stale_gradings(self, started_before: datetime, *, limit: int = 200) -> list[tuple[int, int]]:
+        """(answer id, attempts) of pending answers whose last grading attempt (or arrival) is older than that."""
+        started = func.coalesce(TranslationAnswerRow.grading_started_at, TranslationAnswerRow.created_at)
+        async with session_scope(self._sessions) as session:
+            rows = await session.execute(
+                select(TranslationAnswerRow.id, TranslationAnswerRow.grading_attempts)
+                .where(TranslationAnswerRow.status == "pending", started < started_before)
+                .order_by(TranslationAnswerRow.created_at)
+                .limit(limit)
+            )
+            return [(answer_id, attempts) for answer_id, attempts in rows]
+
+    async def delivered_kinds(self, lesson_ids: list[int]) -> dict[int, set[PracticeKind]]:
+        """Which practice blocks each lesson has claimed already (sent or being sent)."""
+        if not lesson_ids:
+            return {}
+        async with session_scope(self._sessions) as session:
+            rows = await session.execute(
+                select(PracticeDeliveryRow.lesson_id, PracticeDeliveryRow.kind).where(
+                    PracticeDeliveryRow.lesson_id.in_(lesson_ids)
+                )
+            )
+            kinds: dict[int, set[PracticeKind]] = {}
+            for lesson_id, kind in rows:
+                kinds.setdefault(lesson_id, set()).add(kind)
+            return kinds
 
     async def finish_translation_answer(self, answer_id: int, grade: TranslationGrade) -> TranslationAnswerRecord:
         """Save the grade, close the task, log every corrected sentence in `errors` and rate the lesson's item.

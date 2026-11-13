@@ -44,7 +44,8 @@ class NoLimit:
 class FakeTelegram(BaseSession):
     def __init__(self, *, fail: Failure | None = None) -> None:
         super().__init__()
-        self.calls: list[TelegramMethod[Any]] = []
+        self.calls: list[TelegramMethod[Any]] = []  # every request, failed ones included
+        self.delivered: list[TelegramMethod[Any]] = []  # the requests Telegram accepted
         self.fail = fail
         self.updates: list[dict[str, Any]] = []
         self._next_id = 0
@@ -71,7 +72,9 @@ class FakeTelegram(BaseSession):
             status, body = failure
             return self.check_response(bot, method, status, json.dumps({"ok": False, **body})).result
         result = self._result(method)
-        return self.check_response(bot, method, 200, json.dumps({"ok": True, "result": result})).result
+        response = self.check_response(bot, method, 200, json.dumps({"ok": True, "result": result})).result
+        self.delivered.append(method)
+        return response
 
     def _message(self, chat_id: Any, **extra: Any) -> dict[str, Any]:
         self._next_id += 1

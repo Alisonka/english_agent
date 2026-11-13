@@ -23,6 +23,7 @@ from aiogram.client.session.middlewares.base import BaseRequestMiddleware, NextR
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.methods import GetUpdates, Response, TelegramMethod
 from aiogram.methods.base import TelegramType
+from redis.asyncio import Redis
 
 log = logging.getLogger(__name__)
 
@@ -120,3 +121,39 @@ class ThrottlingMiddleware(BaseRequestMiddleware):
                 delay = min(error.retry_after, MAX_RETRY_AFTER_SECONDS)
                 log.warning("telegram flood control on %s, retrying in %ss", type(method).__name__, delay)
                 await _sleep(delay)
+
+
+class RedisRateLimiter:
+    """The same budget shared by every process (bot and workers), in one-second Redis counters.
+
+    Fixed windows can let up to twice the rate through at a window boundary; the defaults (25 a
+    second against Telegram's ~30, one per chat) leave room for that.
+    """
+
+    def __init__(
+        self,
+        redis: Redis,
+        *,
+        global_per_second: float,
+        chat_per_second: float,
+        prefix: str = "tg:rate",
+        clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._redis, self._prefix, self._clock, self._sleep = redis, prefix, clock, sleep
+        self._global = max(1, int(global_per_second))
+        self._chat = max(1, int(chat_per_second))
+
+    async def acquire(self, chat_id: str | None) -> None:
+        while True:
+            now = self._clock()
+            second = int(now)
+            keys = [f"{self._prefix}:all:{second}"] + ([f"{self._prefix}:chat:{chat_id}:{second}"] if chat_id else [])
+            pipe = self._redis.pipeline(transaction=False)
+            for key in keys:
+                pipe.incr(key)
+                pipe.expire(key, 2)
+            counts = (await pipe.execute())[::2]
+            if counts[0] <= self._global and (len(counts) == 1 or counts[1] <= self._chat):
+                return
+            await self._sleep(second + 1 - now + 0.01)  # the next window

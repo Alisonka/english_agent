@@ -1,22 +1,41 @@
-# The server stack: PostgreSQL, a one-shot migration, the app (bot + daily lesson) and Jaeger.
-# Every port is published on 127.0.0.1 only: the server has a public IP, and Docker's
-# published ports bypass the host firewall. Reach them from a laptop over SSH, e.g.
+# The server stack: PostgreSQL, Redis, a one-shot migration, the bot, the job worker, the job
+# scheduler and Jaeger. Every port is published on 127.0.0.1 only: the server has a public IP,
+# and Docker's published ports bypass the host firewall. Reach them from a laptop over SSH, e.g.
 # `ssh -L 5432:localhost:5432 -L 16686:localhost:16686 vpn`.
 #
-#   docker compose up -d --build         # postgres -> migrate -> app, plus jaeger
-#   docker compose logs -f app
-#   open http://localhost:16686          # the Jaeger UI
+#   docker compose up -d --build --remove-orphans   # postgres, redis -> migrate -> bot, worker, scheduler
+#   docker compose logs -f bot worker scheduler
+#   docker compose up -d --scale worker=2            # more lesson throughput (Claude rate limits permitting)
+#   open http://localhost:16686                      # the Jaeger UI
 #
-# Locally, `docker compose up -d jaeger` starts only the tracing backend:
-#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-#     uv run python -m english_agent.pipeline --topic there_is_are --no-send
+# PostgreSQL holds every piece of state; Redis only the queue, de-duplication keys, the shared
+# Telegram rate budget and the sitemap cache, so it needs no backup.
 x-app: &app
   build: .
   image: english-agent:latest
   env_file: .env
   environment:
     DATABASE_URL: postgresql+psycopg://english_agent:${POSTGRES_PASSWORD}@postgres:5432/english_agent
+    REDIS_URL: redis://redis:6379/0
     OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+    LOG_FORMAT: json
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+x-healthcheck: &heartbeat
+  test: ["CMD", "python", "-m", "english_agent.health", "/tmp/heartbeat", "120"]
+  interval: 30s
+  timeout: 5s
+  retries: 3
+  start_period: 60s
+
+x-after-migrate: &after-migrate
+  migrate:
+    condition: service_completed_successfully
+  redis:
+    condition: service_healthy
 
 services:
   postgres:
@@ -37,6 +56,23 @@ services:
       retries: 10
     restart: unless-stopped
 
+  redis:
+    image: redis:7.4-alpine
+    container_name: english-agent-redis
+    # appendonly: queued jobs survive a Redis restart (nothing is lost without it either: the
+    # scheduler re-enqueues from PostgreSQL); noeviction: never drop queue entries under memory pressure.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   migrate:
     <<: *app
     command: ["alembic", "upgrade", "head"]
@@ -45,18 +81,42 @@ services:
         condition: service_healthy
     restart: "no"
 
-  app:
+  bot:
     <<: *app
-    container_name: english-agent-app
-    volumes:
-      - appcache:/app/.cache # sitemap cache
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      jaeger:
-        condition: service_started
-    restart: unless-stopped
-    stop_grace_period: 2m # let a lesson in progress finish on `docker compose stop`
+    container_name: english-agent-bot
+    command: ["python", "-m", "english_agent.bot"]
+    depends_on: *after-migrate
+    healthcheck: *heartbeat
+    stop_grace_period: 30s # finish the updates being handled
+
+  worker:
+    <<: *app
+    command:
+      - taskiq
+      - worker
+      - english_agent.jobs.broker:broker
+      - english_agent.jobs.tasks
+      - --workers=1
+      - --max-async-tasks=16
+      - --wait-tasks-timeout=240
+      - --shutdown-timeout=250
+    environment:
+      DATABASE_URL: postgresql+psycopg://english_agent:${POSTGRES_PASSWORD}@postgres:5432/english_agent
+      REDIS_URL: redis://redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      LOG_FORMAT: json
+      DB_POOL_SIZE: "10" # up to 16 jobs at once
+    depends_on: *after-migrate
+    healthcheck: *heartbeat
+    stop_grace_period: 5m # let a lesson being written or sent finish
+
+  scheduler:
+    <<: *app
+    container_name: english-agent-scheduler
+    # Exactly one: it only enqueues (every minute), the worker does the work.
+    command: ["taskiq", "scheduler", "english_agent.jobs.broker:scheduler", "english_agent.jobs.tasks"]
+    depends_on: *after-migrate
+    stop_grace_period: 10s
 
   jaeger:
     image: jaegertracing/all-in-one:1.62.0
@@ -71,4 +131,4 @@ services:
 
 volumes:
   pgdata:
-  appcache:
+  redisdata:

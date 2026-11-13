@@ -19,8 +19,10 @@ from english_agent.models.storage import (
     ItemRecord,
     LearnerProfileRecord,
     LearnerRecord,
+    LessonClaim,
     LessonContentRecord,
     LessonRecord,
+    LessonState,
     LessonStatus,
     OpenTranslationTask,
     PracticeDeliveryRecord,
@@ -163,6 +165,105 @@ class FakeLessons:
 
     async def statuses(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonStatus]:
         return {key: self.rows[key].status for key in keys if key in self.rows}
+
+    async def states(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonState]:
+        return {
+            key: LessonState(
+                lesson_id=r.id, status=r.status, attempts=r.attempts, claimed_at=r.claimed_at, sent_at=r.sent_at
+            )
+            for key in keys
+            if (r := self.rows.get(key)) is not None
+        }
+
+    def _by_id(self, lesson_id: int) -> tuple[tuple[int, date], LessonRecord]:
+        return next((key, r) for key, r in self.rows.items() if r.id == lesson_id)
+
+    def _set(self, lesson_id: int, **changes: Any) -> LessonRecord:
+        key, row = self._by_id(lesson_id)
+        self.rows[key] = row.model_copy(update=changes)
+        return self.rows[key]
+
+    async def claim(
+        self,
+        learner_id: int,
+        day: date,
+        *,
+        topic_id: str,
+        cefr: Cefr,
+        curriculum_version: int,
+        now: datetime,
+        stale_after: timedelta,
+        max_attempts: int,
+    ) -> tuple[LessonClaim, LessonRecord]:
+        row = self.rows.get((learner_id, day))
+        if row is None:
+            row = LessonRecord(
+                id=max((r.id for r in self.rows.values()), default=0) + 1,
+                learner_id=learner_id,
+                lesson_date=day,
+                topic_id=topic_id,
+                cefr=cefr,
+                curriculum_version=curriculum_version,
+                schema_version=SCHEMA_VERSIONS["lesson"],
+                status="pending",
+                lesson=None,
+                error=None,
+                telegram_message_ids=[],
+                created_at=now,
+                sent_at=None,
+                claimed_at=now,
+                attempts=1,
+            )
+            self.rows[(learner_id, day)] = row
+            return "claimed", row
+        fresh = row.claimed_at is not None and row.claimed_at > now - stale_after
+        if row.status in ("sent", "skipped"):
+            return "done", row
+        if row.status in ("pending", "sending") and fresh:
+            return "busy", row
+        if row.attempts >= max_attempts:
+            return "done", self._set(row.id, status="skipped")
+        outcome: LessonClaim = "resume" if row.status == "sending" else "claimed"
+        changes: dict[str, Any] = {"attempts": row.attempts + 1, "claimed_at": now}
+        if outcome == "claimed":
+            changes |= {
+                "topic_id": topic_id,
+                "cefr": cefr,
+                "curriculum_version": curriculum_version,
+                "status": "pending",
+            }
+        return outcome, self._set(row.id, **changes)
+
+    async def release(self, lesson_id: int) -> None:
+        _, row = self._by_id(lesson_id)
+        if row.status == "pending":
+            self._set(lesson_id, claimed_at=None, attempts=max(row.attempts - 1, 0))
+
+    async def start_sending(self, lesson_id: int, content_id: int, lesson: Lesson) -> LessonRecord:
+        return self._set(
+            lesson_id, status="sending", content_id=content_id, lesson=lesson, topic_id=lesson.topic_id, error=None
+        )
+
+    async def add_message_id(self, lesson_id: int, message_id: int) -> None:
+        _, row = self._by_id(lesson_id)
+        self._set(lesson_id, telegram_message_ids=[*row.telegram_message_ids, message_id])
+
+    async def finish_sending(self, lesson_id: int) -> LessonRecord:
+        return self._set(lesson_id, status="sent", sent_at=datetime.now(UTC), claimed_at=None)
+
+    async def fail(self, lesson_id: int, reason: str, *, final: bool) -> LessonRecord:
+        _, row = self._by_id(lesson_id)
+        if row.status == "sent":
+            return row
+        return self._set(lesson_id, status="skipped" if final else "failed", error=reason)
+
+    async def close_past(self, before: date) -> int:
+        stale = [
+            r for r in self.rows.values() if r.lesson_date < before and r.status in ("pending", "sending", "failed")
+        ]
+        for row in stale:
+            self._set(row.id, status="skipped", claimed_at=None)
+        return len(stale)
 
     async def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]:
         return {
@@ -528,6 +629,27 @@ class FakePractice:
         if record.lesson is None:
             return None
         return GradingTask(answer=answer, lesson=record.lesson, telegram_chat_id=learner.telegram_chat_id)
+
+    async def begin_grading(self, answer_id: int, now: datetime) -> GradingTask | None:
+        answer = self.translation_answers.get(answer_id)
+        if answer is None or answer.status != "pending":
+            return None
+        self._update_answer(answer_id, grading_attempts=answer.grading_attempts + 1, grading_started_at=now)
+        return await self.translation_for_grading(answer_id)
+
+    async def stale_gradings(self, started_before: datetime, *, limit: int = 200) -> list[tuple[int, int]]:
+        return [
+            (a.id, a.grading_attempts)
+            for a in sorted(self.translation_answers.values(), key=lambda a: a.created_at)
+            if a.status == "pending" and (a.grading_started_at or a.created_at) < started_before
+        ][:limit]
+
+    async def delivered_kinds(self, lesson_ids: list[int]) -> dict[int, set[PracticeKind]]:
+        kinds: dict[int, set[PracticeKind]] = {}
+        for delivery in self.deliveries.values():
+            if delivery.lesson_id in lesson_ids:
+                kinds.setdefault(delivery.lesson_id, set()).add(delivery.kind)
+        return kinds
 
     async def finish_translation_answer(self, answer_id: int, grade: TranslationGrade) -> TranslationAnswerRecord:
         record = self._update_answer(answer_id, status="graded", grade=grade, graded_at=datetime.now(UTC))

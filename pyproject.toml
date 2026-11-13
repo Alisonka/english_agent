@@ -17,7 +17,6 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0",
     "psycopg[binary]>=3.2",
     "alembic>=1.14",
-    "apscheduler>=3.11,<4",
     "fsrs>=6.3.2",
     "aiogram>=3.22",
     "taskiq>=0.11",
@@ -61,6 +60,10 @@ src = ["src", "tests"]
 # SIM: flake8-simplify, C4: flake8-comprehensions.
 select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4"]
 
+[tool.ruff.lint.flake8-bugbear]
+# TaskIQ injects job dependencies through default arguments, like FastAPI's Depends.
+extend-immutable-calls = ["taskiq.TaskiqDepends"]
+
 [tool.ruff.format]
 # Defaults are fine; declared explicitly so the config is self-documenting.
 quote-style = "double"
@@ -75,8 +78,3 @@ warn_unused_configs = true
 no_implicit_optional = true
 disallow_untyped_defs = true
 check_untyped_defs = true
-
-[[tool.mypy.overrides]]
-# APScheduler 3.x ships without type information (no py.typed).
-module = ["apscheduler.*"]
-ignore_missing_imports = true

@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # Webhook mode (off when empty): the public HTTPS URL Telegram posts updates to.
     telegram_webhook_url: str = ""
     telegram_webhook_secret: SecretStr = Field(default=SecretStr(""))
+    telegram_webhook_port: int = Field(default=8080, ge=1, le=65535)
     # Outgoing rate limits, below Telegram's ~30 msg/s per bot and 1 msg/s per chat.
     telegram_global_rate_per_second: float = Field(default=25.0, gt=0)
     telegram_chat_rate_per_second: float = Field(default=1.0, gt=0)

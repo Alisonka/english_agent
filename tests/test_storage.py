@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -453,3 +454,105 @@ async def test_sent_lesson_points_at_its_content(sessions: SessionFactory, lesso
         learner.id, DAY, lesson, [1], curriculum_version=1, content_id=content_id
     )
     assert (record.content_id, record.lesson) == (content_id, lesson)
+
+
+# --- delivering a day's lesson ---------------------------------------------------------------
+
+NOW = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+
+
+async def claim_day(lessons: LessonRepo, learner_id: int, now: datetime, max_attempts: int = 3) -> tuple[str, Any]:
+    return await lessons.claim(
+        learner_id,
+        DAY,
+        topic_id="there_is_are",
+        cefr="A2",
+        curriculum_version=1,
+        now=now,
+        stale_after=timedelta(minutes=10),
+        max_attempts=max_attempts,
+    )
+
+
+async def test_a_day_is_claimed_once_sent_in_chunks_and_then_done(sessions: SessionFactory, lesson: Lesson) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    lessons = LessonRepo(sessions)
+    outcome, row = await claim_day(lessons, learner.id, NOW)
+    assert (outcome, row.status, row.attempts) == ("claimed", "pending", 1)
+    assert (await claim_day(lessons, learner.id, NOW + timedelta(minutes=1)))[0] == "busy"
+
+    _, content_id, _ = await claim(LessonContentRepo(sessions), "a", AT)
+    await lessons.start_sending(row.id, content_id, lesson)
+    await lessons.add_message_id(row.id, 10)
+    await lessons.add_message_id(row.id, 11)
+    sent = await lessons.finish_sending(row.id)
+    assert (sent.status, sent.telegram_message_ids, sent.content_id, sent.lesson) == (
+        "sent",
+        [10, 11],
+        content_id,
+        lesson,
+    )
+    assert (await claim_day(lessons, learner.id, NOW + timedelta(hours=1)))[0] == "done"
+
+
+async def test_a_dead_senders_day_is_resumed_and_a_failed_one_retried_until_out_of_attempts(
+    sessions: SessionFactory, lesson: Lesson
+) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    lessons = LessonRepo(sessions)
+    _, row = await claim_day(lessons, learner.id, NOW)
+    _, content_id, _ = await claim(LessonContentRepo(sessions), "a", AT)
+    await lessons.start_sending(row.id, content_id, lesson)
+    await lessons.add_message_id(row.id, 10)
+
+    outcome, resumed = await claim_day(lessons, learner.id, NOW + timedelta(minutes=11))
+    assert (outcome, resumed.telegram_message_ids, resumed.attempts) == ("resume", [10], 2)
+
+    failed = await lessons.fail(row.id, "telegram: Bad Gateway", final=False)
+    assert (failed.status, failed.claimed_at) == ("failed", resumed.claimed_at)  # the backoff counts from here
+    assert (await claim_day(lessons, learner.id, NOW + timedelta(minutes=20)))[0] == "claimed"
+    assert (await claim_day(lessons, learner.id, NOW + timedelta(minutes=40)))[0] == "done"  # 3 attempts used
+    [state] = (await lessons.states([(learner.id, DAY)])).values()
+    assert state.status == "skipped"
+
+
+async def test_a_released_day_does_not_count_an_attempt(sessions: SessionFactory) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    lessons = LessonRepo(sessions)
+    _, row = await claim_day(lessons, learner.id, NOW)
+    await lessons.release(row.id)
+    [state] = (await lessons.states([(learner.id, DAY)])).values()
+    assert (state.status, state.claimed_at, state.attempts) == ("pending", None, 0)
+    outcome, again = await claim_day(lessons, learner.id, NOW + timedelta(minutes=1))
+    assert (outcome, again.attempts) == ("claimed", 1)
+
+
+async def test_unfinished_past_days_are_closed(sessions: SessionFactory) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    lessons = LessonRepo(sessions)
+    await claim_day(lessons, learner.id, NOW)
+    assert await lessons.close_past(DAY) == 0
+    assert await lessons.close_past(DAY + timedelta(days=1)) == 1
+    [state] = (await lessons.states([(learner.id, DAY)])).values()
+    assert state.status == "skipped"
+
+
+async def test_grading_attempts_are_counted_and_stale_ones_found(sessions: SessionFactory, lesson: Lesson) -> None:
+    practice, lesson_id, _ = await _quiz_setup(sessions, lesson)
+    delivery = await practice.claim_delivery(lesson_id, "translation", 3)
+    assert delivery is not None
+    await practice.mark_sent(delivery.id, [20])
+    learner = await LearnerRepo(sessions).get("42")
+    assert learner is not None
+    answer = await practice.start_translation_answer(delivery.id, learner.id, "my answer")
+    assert answer is not None
+    assert await practice.delivered_kinds([lesson_id]) == {lesson_id: {"quiz", "translation"}}
+
+    task = await practice.begin_grading(answer.id, NOW)
+    assert task is not None and task.answer.grading_attempts == 1 and task.telegram_chat_id == "42"
+    assert await practice.stale_gradings(NOW) == []
+    assert await practice.stale_gradings(NOW + timedelta(minutes=1)) == [(answer.id, 1)]
+    assert await practice.delivered_kinds([1_000_000]) == {}
+
+    await practice.fail_translation_answer(answer.id, "x")
+    assert await practice.begin_grading(answer.id, NOW) is None  # not pending any more

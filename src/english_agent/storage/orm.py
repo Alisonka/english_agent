@@ -76,7 +76,10 @@ class LessonRow(Base):
     __table_args__ = (
         # One lesson per learner per day: a restart or a manual run must not send it twice.
         UniqueConstraint("learner_id", "lesson_date"),
-        CheckConstraint("status IN ('sent', 'failed')", name="status"),
+        CheckConstraint("status IN ('pending', 'sending', 'sent', 'failed', 'skipped')", name="status"),
+        Index(
+            "ix_lessons_unfinished", "lesson_date", postgresql_where=text("status IN ('pending', 'sending', 'failed')")
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -94,6 +97,9 @@ class LessonRow(Base):
     created_at: Mapped[datetime] = _created_at()
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     content_id: Mapped[int | None] = mapped_column(ForeignKey("lesson_contents.id", ondelete="RESTRICT"), index=True)
+    # Who is delivering it: set when a worker claims the day, cleared when it lets go; see `LessonRepo.claim`.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
 
 
 class LessonContentRow(Base):
@@ -253,6 +259,7 @@ class TranslationAnswerRow(Base):
         # One graded attempt per task; a failed grading is retried on the same row.
         UniqueConstraint("delivery_id"),
         CheckConstraint("status IN ('pending', 'graded', 'failed')", name="status"),
+        Index("ix_translation_answers_pending", "created_at", postgresql_where=text("status = 'pending'")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -267,3 +274,5 @@ class TranslationAnswerRow(Base):
     disputed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     created_at: Mapped[datetime] = _created_at()
     graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    grading_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    grading_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

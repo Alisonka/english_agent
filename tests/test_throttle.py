@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import fakeredis
 import pytest
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.methods import SendMessage, TelegramMethod
 
 from english_agent.telegram import throttle
 from english_agent.telegram.sender import Sender
-from english_agent.telegram.throttle import LocalRateLimiter
+from english_agent.telegram.throttle import LocalRateLimiter, RedisRateLimiter
 from telegram_fake import FakeTelegram, fake_bot
 
 
@@ -85,3 +86,17 @@ async def test_endless_flood_control_gives_up(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(TelegramRetryAfter):
         await Sender(fake_bot(always)).send_text("42", "hi")
     assert len(always.calls) == throttle.RETRIES_ON_FLOOD + 1
+
+
+async def test_the_redis_budget_is_shared_by_every_limiter_on_the_same_redis() -> None:
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    clock = Clock()
+    clock.now = 1_000.2
+    bot_side = RedisRateLimiter(redis, global_per_second=30, chat_per_second=1, clock=clock, sleep=clock.sleep)
+    worker_side = RedisRateLimiter(redis, global_per_second=30, chat_per_second=1, clock=clock, sleep=clock.sleep)
+
+    await bot_side.acquire("42")
+    await worker_side.acquire("42")  # same chat, same second: waits for the next window
+    assert clock.slept == [0.81]
+    await worker_side.acquire("43")
+    assert clock.slept == [0.81]

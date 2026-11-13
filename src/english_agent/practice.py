@@ -24,6 +24,7 @@ from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion
 from english_agent.models.schedule import local_now
 from english_agent.models.storage import LearnerRecord, LessonRecord, PracticeDeliveryRecord, PracticeKind
+from english_agent.planning import practice_due
 from english_agent.storage.repositories import PracticeStore, Stores
 from english_agent.telegram.render import render_quiz_intro, render_translation_task
 from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError
@@ -150,15 +151,16 @@ async def deliver_practice_for(
     return kind
 
 
-async def _deliver_one(
+async def deliver_practice_to(
     sender: Sender,
     settings: Settings,
     stores: Stores,
     learner: LearnerRecord,
     day: date,
     now: datetime,
-    rng: random.Random | None,
+    rng: random.Random | None = None,
 ) -> PracticeKind | None:
+    """One learner's due practice block of `day`, every failure handled: a job's whole body."""
     with bind(chat_id=learner.telegram_chat_id):
         try:
             record = await stores.lessons.get(learner.id, day)
@@ -185,16 +187,26 @@ async def deliver_due_practice(
     *,
     rng: random.Random | None = None,
 ) -> list[tuple[str, PracticeKind]]:
-    """Send every learner the practice block that is due at `now`; returns (chat id, kind) of each one sent."""
+    """Send, in this process, every learner the practice block due at `now` (local runs and tests).
+
+    The server does the same through the job queue: the scheduler enqueues one `deliver_practice`
+    job per learner `planning.practice_due` lets through. Returns (chat id, kind) of each block sent.
+    """
     learners = await stores.learners.list_active()
     today = {learner.id: local_now(learner.timezone, now).date() for learner in learners}
-    statuses = await stores.lessons.statuses([(learner.id, today[learner.id]) for learner in learners])
-    due = [learner for learner in learners if statuses.get((learner.id, today[learner.id])) == "sent"]
+    states = await stores.lessons.states([(learner.id, today[learner.id]) for learner in learners])
+    claimed = await stores.practice.delivered_kinds([state.lesson_id for state in states.values()])
+    due = []
+    for learner in learners:
+        state = states.get((learner.id, today[learner.id]))
+        kinds = claimed.get(state.lesson_id, set()) if state is not None else set()
+        if practice_due(learner, state, kinds, now, settings):
+            due.append(learner)
     gate = asyncio.Semaphore(_CONCURRENT_LEARNERS)
 
     async def one(learner: LearnerRecord) -> PracticeKind | None:
         async with gate:
-            return await _deliver_one(sender, settings, stores, learner, today[learner.id], now, rng)
+            return await deliver_practice_to(sender, settings, stores, learner, today[learner.id], now, rng)
 
-    kinds = await asyncio.gather(*(one(learner) for learner in due))
-    return [(learner.telegram_chat_id, kind) for learner, kind in zip(due, kinds, strict=True) if kind is not None]
+    kinds_sent = await asyncio.gather(*(one(learner) for learner in due))
+    return [(learner.telegram_chat_id, kind) for learner, kind in zip(due, kinds_sent, strict=True) if kind is not None]

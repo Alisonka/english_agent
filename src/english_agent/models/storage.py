@@ -15,7 +15,8 @@ from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
 from english_agent.models.schedule import LearnerSchedule
 
-LessonStatus = Literal["sent", "failed"]
+LessonStatus = Literal["pending", "sending", "sent", "failed", "skipped"]
+LessonClaim = Literal["claimed", "resume", "busy", "done"]
 ContentStatus = Literal["generating", "ready", "failed"]
 ClaimOutcome = Literal["ready", "claimed", "busy", "exhausted"]
 ErrorKind = Literal["quiz", "text"]
@@ -75,6 +76,18 @@ class LessonRecord(BaseModel):
     created_at: datetime
     sent_at: datetime | None
     content_id: int | None = None  # the shared `LessonContentRecord` that was sent; None for older lessons
+    claimed_at: datetime | None = None  # a worker is delivering it since then (None: nobody holds it)
+    attempts: int = 0  # delivery attempts so far
+
+
+class LessonState(BaseModel):
+    """A day's row without the payload: what the planner needs to decide whether to (re)run it."""
+
+    lesson_id: int
+    status: LessonStatus
+    attempts: int
+    claimed_at: datetime | None
+    sent_at: datetime | None
 
 
 class LessonContentRecord(BaseModel):
@@ -232,6 +245,8 @@ class TranslationAnswerRecord(BaseModel):
     disputed: bool
     created_at: datetime
     graded_at: datetime | None
+    grading_attempts: int = 0
+    grading_started_at: datetime | None = None
 
 
 class OpenTranslationTask(BaseModel):

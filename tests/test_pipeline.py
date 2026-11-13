@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,7 @@ from english_agent.models.storage import LearnerRecord
 from english_agent.research.models import ResearchResult
 from english_agent.storage import Stores, open_stores
 from english_agent.telegram import Sender, make_bot
+from english_agent.telegram import sender as sender_module
 from fakes import FakeLearners, FakeLessons, fake_contents, fake_items, fake_stores
 from telegram_fake import FakeTelegram, blocked_by, fake_sender
 
@@ -58,7 +59,8 @@ class Sent:
         self._telegram = telegram
 
     def _all(self) -> list[dict[str, Any]]:
-        return [{"chat_id": str(m.chat_id), "text": m.text} for m in self._telegram.of(SendMessage)]
+        delivered = [m for m in self._telegram.delivered if isinstance(m, SendMessage)]
+        return [{"chat_id": str(m.chat_id), "text": m.text} for m in delivered]
 
     def __len__(self) -> int:
         return len(self._all())
@@ -383,60 +385,11 @@ def test_start_date_from_env(monkeypatch: pytest.MonkeyPatch, raw: str, expected
     assert make_settings().curriculum_start_date == expected
 
 
-# --- when is a learner's lesson due -------------------------------------------
-
 MSK = ZoneInfo("Europe/Moscow")
-
-
-def learner_record(**changes: Any) -> LearnerRecord:
-    now = datetime(2026, 11, 1, tzinfo=UTC)
-    values: dict[str, Any] = {
-        "id": 1,
-        "telegram_chat_id": "42",
-        "cefr": "A2",
-        "created_at": now,
-        "updated_at": now,
-        "curriculum_started_on": START,
-    }
-    return LearnerRecord.model_validate(values | changes)
 
 
 def msk(hour: int, minute: int = 0, day: date = START) -> datetime:
     return datetime.combine(day, time(hour, minute), tzinfo=MSK)
-
-
-def test_lesson_is_due_from_send_time_until_the_catch_up_window_closes() -> None:
-    settings, learner = make_settings(lesson_catch_up_hours=6), learner_record()
-    assert not pipeline.lesson_due(learner, None, msk(8, 59), settings)
-    assert pipeline.lesson_due(learner, None, msk(9, 0), settings)
-    assert pipeline.lesson_due(learner, None, msk(14, 59), settings)
-    assert not pipeline.lesson_due(learner, None, msk(15, 0), settings)
-
-
-def test_lesson_is_not_due_twice_a_day_nor_retried_after_a_failure() -> None:
-    settings, learner = make_settings(), learner_record()
-    assert not pipeline.lesson_due(learner, "sent", msk(10), settings)
-    assert not pipeline.lesson_due(learner, "failed", msk(10), settings)
-
-
-def test_lesson_follows_the_learners_own_time_zone_and_send_time() -> None:
-    learner = learner_record(timezone="Asia/Vladivostok", lesson_send_time=time(7, 30))
-    # 07:30 in Vladivostok is 00:30 in Moscow.
-    assert pipeline.lesson_due(learner, None, msk(0, 30, START + timedelta(days=1)), make_settings())
-    assert not pipeline.lesson_due(learner, None, msk(9, 0), make_settings())
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"curriculum_started_on": None},
-        {"curriculum_started_on": START + timedelta(days=1)},
-        {"paused_at": datetime(2026, 10, 30, tzinfo=UTC)},
-        {"is_active": False, "deactivated_reason": "blocked"},
-    ],
-)
-def test_no_lesson_before_the_start_nor_while_paused_or_inactive(changes: dict[str, Any]) -> None:
-    assert not pipeline.lesson_due(learner_record(**changes), None, msk(10), make_settings())
 
 
 # --- the lesson tick ------------------------------------------------------------
@@ -506,7 +459,7 @@ async def test_failed_day_keeps_its_topic_for_the_next_day(
     monkeypatch.setattr(pipeline, "generate_lesson", fake_generate)
 
     await run_tick(stores, msk(9, 0))
-    assert lessons.rows[(learner.id, START)].status == "failed"
+    assert lessons.rows[(learner.id, START)].status == "skipped"  # the topic comes again tomorrow
     assert lessons.rows[(learner.id, START)].error == "boom"
     await run_tick(stores, msk(9, 1))  # not retried every minute
 
@@ -634,7 +587,8 @@ async def test_content_being_written_elsewhere_is_retried_on_the_next_tick(
     assert outcome == "claimed"
 
     assert await run_tick(stores, msk(9, 0), settings) == 0
-    assert (learner.id, START) not in lessons.rows and sent == []  # nothing recorded: retried next tick
+    released = lessons.rows[(learner.id, START)]
+    assert (released.status, released.claimed_at, sent) == ("pending", None, [])  # let go: retried next tick
 
     await fake_contents(stores).finish(record.id, lesson)
     assert await run_tick(stores, msk(9, 1), settings) == 1
@@ -664,3 +618,70 @@ async def test_a_topic_whose_every_attempt_failed_is_skipped(
     await run_tick(stores, msk(9, 0), settings)
     assert generated == [ordered[1]]
     assert lessons.rows[(learner.id, START)].topic_id == ordered[1]
+
+
+# --- interrupted deliveries ----------------------------------------------------------
+
+
+def three_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every lesson renders as three messages, so a send can be cut short in the middle."""
+    monkeypatch.setattr(sender_module, "render_messages", lambda lesson: ["part 1", "part 2", "part 3"])
+
+
+async def test_a_send_cut_short_by_telegram_is_retried_after_a_backoff_without_repeats(
+    lesson: Lesson, monkeypatch: pytest.MonkeyPatch, telegram: FakeTelegram, run_tick: Tick, sent: Sent
+) -> None:
+    stores, learners, lessons = fake_stores()
+    learner = started(learners)
+    three_messages(monkeypatch)
+    monkeypatch.setattr(pipeline, "generate_lesson", echo_topic(lesson))
+    outage = {"calls": 0}
+
+    def second_message_fails(method: Any) -> tuple[int, dict[str, Any]] | None:
+        if isinstance(method, SendMessage):
+            outage["calls"] += 1
+            if outage["calls"] == 2:
+                return 502, {"error_code": 502, "description": "Bad Gateway"}
+        return None
+
+    telegram.fail = second_message_fails
+    await run_tick(stores, msk(9, 0))
+    row = lessons.rows[(learner.id, START)]
+    assert (row.status, len(row.telegram_message_ids)) == ("failed", 1)
+
+    await run_tick(stores, msk(9, 1))  # inside the backoff: nothing happens
+    assert lessons.rows[(learner.id, START)].status == "failed"
+
+    await run_tick(stores, msk(9, 10))
+    row = lessons.rows[(learner.id, START)]
+    assert row.status == "sent"
+    texts = [message["text"] for message in sent]
+    assert len(texts) == len(set(texts)) == len(row.telegram_message_ids)  # every chunk exactly once
+
+
+async def test_a_worker_that_died_mid_send_is_taken_over_and_resumed(
+    lesson: Lesson, monkeypatch: pytest.MonkeyPatch, run_tick: Tick, sent: Sent
+) -> None:
+    three_messages(monkeypatch)
+    stores, learners, lessons = fake_stores()
+    learner = started(learners)
+    version = load_curriculum().version
+    _, row = await lessons.claim(
+        learner.id,
+        START,
+        topic_id=lesson.topic_id,
+        cefr="A2",
+        curriculum_version=version,
+        now=msk(9, 0),
+        stale_after=timedelta(minutes=10),
+        max_attempts=5,
+    )
+    await lessons.start_sending(row.id, 1, lesson)
+    await lessons.add_message_id(row.id, 77)  # the first chunk went out, then the worker died
+
+    await run_tick(stores, msk(9, 5))  # the claim is still fresh: nobody takes over
+    assert sent == []
+    await run_tick(stores, msk(9, 11))
+    done = lessons.rows[(learner.id, START)]
+    assert done.status == "sent" and done.telegram_message_ids[0] == 77
+    assert [message["text"] for message in sent] == ["part 2", "part 3"]  # only what had not arrived

@@ -38,8 +38,9 @@ from english_agent.logs import bind, configure_logging
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
 from english_agent.models.lesson import Lesson
-from english_agent.models.schedule import in_daily_window, local_now
-from english_agent.models.storage import LearnerRecord, LessonContentRecord, LessonStatus
+from english_agent.models.schedule import local_now
+from english_agent.models.storage import LearnerRecord, LessonContentRecord
+from english_agent.planning import lesson_due
 from english_agent.research.agent import ResearchAgent
 from english_agent.research.models import ResearchResult
 from english_agent.research.sitemaps import FileSitemapCache, SitemapCache, SitemapIndex
@@ -162,31 +163,20 @@ async def notify(sender: Sender, chat_id: str, text: str) -> None:
         log.warning("telegram error: %s", error)
 
 
-def lesson_due(learner: LearnerRecord, today_status: LessonStatus | None, now: datetime, settings: Settings) -> bool:
-    """Whether the learner's lesson should be sent at `now`.
-
-    Inside [send time, send time + LESSON_CATCH_UP_HOURS) of the learner's local day, once the
-    course has started, while the learner is active and not paused, and only if today has no
-    row yet: a failed day is not retried every minute (the topic comes again tomorrow).
-    """
-    if not learner.receives_lessons or learner.curriculum_started_on is None or today_status is not None:
-        return False
-    local = local_now(learner.timezone, now)
-    if local.date() < learner.curriculum_started_on:
-        return False
-    return in_daily_window(local, learner.lesson_send_time, settings.lesson_catch_up_hours)
-
-
 async def run_lesson_tick(runtime: Runtime, now: datetime) -> int:
-    """Run the lesson of every learner it is due for at `now`; returns how many runs ended without error."""
+    """Run, in this process, the lesson of every learner it is due for at `now` (local runs and tests).
+
+    The server does the same through the job queue: the scheduler enqueues one `deliver_lesson`
+    job per due learner. Returns how many runs ended without error.
+    """
     stores = runtime.stores
     learners = await stores.learners.list_active()
     days = {learner.id: local_now(learner.timezone, now).date() for learner in learners}
-    statuses = await stores.lessons.statuses([(learner.id, days[learner.id]) for learner in learners])
+    states = await stores.lessons.states([(learner.id, days[learner.id]) for learner in learners])
     due = [
         learner
         for learner in learners
-        if lesson_due(learner, statuses.get((learner.id, days[learner.id])), now, runtime.settings)
+        if lesson_due(learner, states.get((learner.id, days[learner.id])), now, runtime.settings)
     ]
     gate = asyncio.Semaphore(_CONCURRENT_LESSONS)
 
@@ -292,45 +282,69 @@ async def run_lesson_for_learner(
                 return OK
         span.set_attribute("topic.id", topic.id)
 
-        if await stores.lessons.sent_on(learner.id, today):
-            log.info("lesson for %s is already sent", today.isoformat())
+        now = now or datetime.now(UTC)
+        claim, row = await stores.lessons.claim(
+            learner.id,
+            today,
+            topic_id=topic.id,
+            cefr=level,
+            curriculum_version=curriculum.version,
+            now=now,
+            stale_after=timedelta(minutes=settings.lesson_claim_stale_minutes),
+            max_attempts=settings.job_max_attempts,
+        )
+        span.set_attribute("lesson.claim", claim)
+        if claim == "done":
+            log.info("lesson for %s is already done (%s)", today.isoformat(), row.status)
             return OK
-
-        async def record_failed(reason: str) -> None:
-            await stores.lessons.record_failed(
-                learner.id, today, topic_id=topic.id, cefr=level, reason=reason, curriculum_version=curriculum.version
-            )
-
-        content = await ensure_content(runtime, topic, level, curriculum.version, now=now)
-        if content is None:
-            log.info("the lesson for %s is being written elsewhere; next tick", topic.id)
+        if claim == "busy":
             return RETRY_LATER
-        lesson = content.lesson
-        if content.status != "ready" or lesson is None:
-            reason = content.error or "the lesson could not be written"
-            log.error("lesson for %s failed: %s", topic.id, reason)
-            span.set_status(Status(StatusCode.ERROR, reason))
-            await record_failed(reason)
-            if send:
-                await notify(sender, chat_id, LESSON_FAILED.format(title=topic.title_ru))
-            return FAILED
+
+        # A send that was cut short (a crash, a Telegram outage) goes on with the same lesson
+        # after the messages that did arrive, so the learner never gets a chunk twice.
+        skip = len(row.telegram_message_ids) if row.lesson is not None else 0
+        if skip and row.lesson is not None and row.content_id is not None:
+            lesson, content_id = row.lesson, row.content_id
+            log.info("resuming the lesson after %d sent message(s)", skip)
+        else:
+            content = await ensure_content(runtime, topic, level, curriculum.version, now=now)
+            if content is None:
+                log.info("the lesson for %s is being written elsewhere; next tick", topic.id)
+                await stores.lessons.release(row.id)
+                return RETRY_LATER
+            if content.status != "ready" or content.lesson is None:
+                reason = content.error or "the lesson could not be written"
+                log.error("lesson for %s failed: %s", topic.id, reason)
+                span.set_status(Status(StatusCode.ERROR, reason))
+                await stores.lessons.fail(row.id, reason, final=True)  # the topic comes again tomorrow
+                if send:
+                    await notify(sender, chat_id, LESSON_FAILED.format(title=topic.title_ru))
+                return FAILED
+            lesson, content_id, skip = content.lesson, content.id, 0
         if not send:
             print(lesson.model_dump_json(indent=2, ensure_ascii=False))
+            await stores.lessons.release(row.id)
             return OK
 
+        await stores.lessons.start_sending(row.id, content_id, lesson)
+
+        async def recorded(message_id: int) -> None:
+            await stores.lessons.add_message_id(row.id, message_id)
+
         try:
-            message_ids = await deliver_lesson(sender, lesson, chat_id)
+            message_ids = await sender.send_lesson(chat_id, lesson, skip=skip, on_sent=recorded)
+        except TelegramForbiddenError as error:
+            log.info("chat blocked the bot, deactivating: %s", error)
+            await stores.lessons.fail(row.id, f"telegram: {error}", final=True)
+            await stores.learners.deactivate(chat_id, "blocked")
+            return FAILED
         except TelegramError as error:
             log.error("telegram error: %s", error)
             span.set_status(Status(StatusCode.ERROR, str(error)))
-            await record_failed(f"telegram: {error}")
-            if isinstance(error, TelegramForbiddenError):
-                await stores.learners.deactivate(chat_id, "blocked")
+            await stores.lessons.fail(row.id, f"telegram: {error}", final=False)  # retried after a backoff
             return FAILED
         log.info("sent %d message(s) to Telegram chat %s", len(message_ids), chat_id)
-        record = await stores.lessons.record_sent(
-            learner.id, today, lesson, message_ids, curriculum_version=curriculum.version, content_id=content.id
-        )
+        record = await stores.lessons.finish_sending(row.id)
         await record_core_item(stores.items, lesson, record.id)
         return OK
 

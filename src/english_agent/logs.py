@@ -30,7 +30,7 @@ _JSON_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
 # Libraries that are chatty at INFO, or worse: httpx logs every request URL at INFO, and a
 # Telegram Bot API URL embeds the bot token.
-_QUIET_LOGGERS = ("httpx", "httpcore", "aiogram.event", "taskiq.receiver.receiver", "apscheduler.executors")
+_QUIET_LOGGERS = ("httpx", "httpcore", "aiogram.event", "taskiq.receiver.receiver")
 
 
 @contextmanager

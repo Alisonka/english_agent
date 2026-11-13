@@ -177,7 +177,7 @@ Configuration is read from environment variables or a local `.env` file (see
 | `TELEGRAM_GLOBAL_RATE_PER_SECOND` | no | `25` | Outgoing Telegram messages per second, all chats together |
 | `TELEGRAM_CHAT_RATE_PER_SECOND` | no | `1` | Outgoing Telegram messages per second to one chat |
 | `TELEGRAM_API_BASE` | no | `https://api.telegram.org` | Bot API server (a fake one in load tests) |
-| `TELEGRAM_WEBHOOK_URL` / `TELEGRAM_WEBHOOK_SECRET` | no | – | Receive updates by webhook instead of long polling |
+| `TELEGRAM_WEBHOOK_URL` / `TELEGRAM_WEBHOOK_SECRET` / `TELEGRAM_WEBHOOK_PORT` | no | – / – / `8080` | Receive updates by webhook instead of long polling |
 | `ADMIN_CHAT_ID` | no | – | Chat that receives operational alerts |
 | `LESSON_CATCH_UP_HOURS` | no | `6` | A lesson not sent this long after its send time is not sent that day |
 | `JOB_MAX_ATTEMPTS` | no | `5` | Attempts of a failing background job |
@@ -245,39 +245,54 @@ Everything runs on the server (`ssh vpn`) as one docker compose stack, see
 [docker-compose.yml](docker-compose.yml):
 
 - `postgres` — PostgreSQL 17, data in the `pgdata` volume, published on `127.0.0.1:5432` only;
-- `migrate` — runs `alembic upgrade head` once, before the app starts;
-- `app` — `python -m english_agent.app`: one long-running process that answers
-  the bot's commands, quiz answers and translation answers (long polling), checks
-  every minute whose lesson is due on their own schedule and every 5 minutes whose
-  practice is due; that state is in the database, so a restart neither loses nor
-  repeats it;
-- `jaeger` — traces from `app`.
+- `redis` — Redis 7: the job queue (a Redis Stream), de-duplication keys, the Telegram
+  rate budget shared by all processes and the sitemap cache. No state lives only here;
+- `migrate` — runs `alembic upgrade head` once, before the others start;
+- `bot` — `python -m english_agent.bot`: answers commands, quiz answers and
+  translations (aiogram 3, long polling, updates handled concurrently) and hands
+  gradings to the queue;
+- `worker` — `taskiq worker`: runs the jobs (lessons, practice, gradings, profile
+  refreshes, writing lessons ahead), up to 16 at once; scale it with
+  `docker compose up -d --scale worker=2`;
+- `scheduler` — `taskiq scheduler`: exactly one; every minute it enqueues the job
+  `schedule_tick`, which works out from PostgreSQL what is due and enqueues it;
+  every six hours `prewarm_content` writes the next lesson of every active learner
+  ahead of time;
+- `jaeger` — traces from the bot and the workers.
 
 ```bash
 cd ~/english_agent && git pull
-docker compose up -d --build      # migrate applies new migrations, then app restarts
-docker compose logs -f app
-docker compose run --rm --no-deps app python -m english_agent.pipeline --topic there_is_are   # manual run
+docker compose up -d --build --remove-orphans   # migrate applies new migrations, then the rest restarts
+docker compose logs -f bot worker scheduler
+docker compose run --rm --no-deps worker python -m english_agent.pipeline --topic there_is_are   # manual run
 ```
 
-The app must be the bot's only `getUpdates` consumer: do not run
-`python -m english_agent.telegram chats` against the same bot while it is up.
+The bot must be the only `getUpdates` consumer: do not run
+`python -m english_agent.telegram chats` against the same bot while it is up. With
+`TELEGRAM_WEBHOOK_URL` set the bot serves a webhook on `TELEGRAM_WEBHOOK_PORT`
+instead (behind an HTTPS proxy), which also allows more than one bot process.
 
-Inside the app everything runs on one asyncio event loop: the bot (aiogram 3, long
-polling, updates handled concurrently), the lesson and practice ticks (APScheduler's
-asyncio scheduler), the database (async SQLAlchemy over psycopg 3) and the Claude
-API (one `AsyncAnthropic` client). A slow model call never blocks a reply. Limits:
+How the jobs stay correct (PostgreSQL is the source of truth, Redis Streams deliver
+at least once, and every job may run twice):
 
-- at most `LLM_MAX_CONCURRENCY` Claude requests in flight, with SDK retries and a
-  per-request timeout;
-- outgoing Telegram messages at `TELEGRAM_GLOBAL_RATE_PER_SECOND` in total and
-  `TELEGRAM_CHAT_RATE_PER_SECOND` per chat; a 429 is waited out (`retry_after`) and
-  retried;
-- `DB_POOL_SIZE` + `DB_MAX_OVERFLOW` database connections.
+| Work | Claimed in PostgreSQL by | If a worker dies |
+| --- | --- | --- |
+| A learner's lesson of the day | the `lessons` row: `pending` → `sending` → `sent`, with `claimed_at` and `attempts` | after `LESSON_CLAIM_STALE_MINUTES` the next tick takes it over and sends only the messages that had not arrived (each sent message id is recorded at once) |
+| The shared lesson content | the `lesson_contents` row (`generating`) | taken over after `CONTENT_GENERATION_STALE_MINUTES` |
+| A quiz or a translation task | the `practice_deliveries` row (lesson, kind) | stays claimed, not resent (a duplicate quiz is worse than a missing one) |
+| A translation grade | the answer row while `pending`, `grading_attempts` | regraded after 15 minutes, up to 3 attempts; then the learner is asked to send it again |
 
-Translation grading runs as a background task of the app; on SIGTERM the app stops
-polling, waits up to 90 s for ticks and gradings in progress, then closes the bot,
-the Claude client and the pool. A grading cut short stays pending.
+A failed lesson send (a Telegram outage) is retried after 2, 4, 8 … minutes up to
+`JOB_MAX_ATTEMPTS`; a lesson that could not be written is skipped for the day and its
+topic comes the next day. Each process keeps its own limits: `LLM_MAX_CONCURRENCY`
+Claude requests in flight with SDK retries and a timeout, `DB_POOL_SIZE` +
+`DB_MAX_OVERFLOW` connections; the Telegram budget (`TELEGRAM_GLOBAL_RATE_PER_SECOND`,
+`TELEGRAM_CHAT_RATE_PER_SECOND`) is shared through Redis, and a 429 is waited out and
+retried. On SIGTERM the bot finishes the updates in progress and the worker waits up
+to four minutes for running jobs; a job cut short is taken over as above.
+
+`bot` and `worker` write a heartbeat file every 30 seconds; their healthcheck fails
+(and Docker restarts them) when it is older than two minutes.
 
 From a laptop, reach the database and the Jaeger UI through an SSH tunnel:
 
@@ -333,15 +348,15 @@ The level chosen in the bot used to live in `.state/learner.json`; import it onc
 
 ```bash
 uv run python -m english_agent.storage import-learner-json            # local file
-docker compose run --rm --no-deps -T app python -m english_agent.storage import-learner-json - < .state/learner.json
+docker compose run --rm --no-deps -T worker python -m english_agent.storage import-learner-json - < .state/learner.json
 ```
 
 Lessons and answers stored before the learner model existed are brought in with
 two idempotent commands (run in this order; safe to rerun):
 
 ```bash
-docker compose run --rm --no-deps app python -m english_agent.storage backfill-items    # core items for sent lessons
-docker compose run --rm --no-deps app python -m english_agent.storage backfill-reviews  # link old polls, rate old answers
+docker compose run --rm --no-deps worker python -m english_agent.storage backfill-items    # core items for sent lessons
+docker compose run --rm --no-deps worker python -m english_agent.storage backfill-reviews  # link old polls, rate old answers
 ```
 
 ### Backups
@@ -388,8 +403,10 @@ release history.
 
 ```
 src/english_agent/
-  app.py           # server process: bot + lesson and practice ticks on one event loop
-  bot/             # aiogram dispatcher, update handlers, background jobs of the bot
+  bot/             # the bot process: aiogram dispatcher, update handlers, polling or webhook
+  jobs/            # TaskIQ broker, scheduler tick, job bodies, de-duplication keys
+  planning.py      # when is what due (pure rules the scheduler applies)
+  health.py        # heartbeat file for container healthchecks
   config.py        # runtime settings (env / .env)
   content.py       # shared lesson content: recipe key, claim owner
   grader.py        # learner's translation -> validated TranslationGrade

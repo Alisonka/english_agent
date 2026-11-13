@@ -4,9 +4,10 @@ import json
 import time
 from pathlib import Path
 
+import fakeredis
 import httpx
 
-from english_agent.research.sitemaps import FileSitemapCache, SitemapIndex
+from english_agent.research.sitemaps import FileSitemapCache, RedisSitemapCache, SitemapIndex
 from english_agent.research.sites import ENGLEX, SKYSMART
 
 INDEX_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -92,3 +93,12 @@ async def test_an_unreadable_cache_file_counts_as_missing(tmp_path: Path) -> Non
     (tmp_path / "sitemaps").mkdir()
     (tmp_path / "sitemaps" / "skysmart.json").write_text("{not json")
     assert await FileSitemapCache(tmp_path).get("skysmart") is None
+
+
+async def test_the_redis_cache_is_shared_and_expires() -> None:
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    cache = RedisSitemapCache(redis, ttl_days=7)
+    assert await cache.get("skysmart") is None
+    await cache.put("skysmart", ["https://skysmart.ru/articles/english/a"])
+    assert await RedisSitemapCache(redis).get("skysmart") == ["https://skysmart.ru/articles/english/a"]
+    assert 0 < await redis.ttl("sitemaps:skysmart") <= 7 * 24 * 3600

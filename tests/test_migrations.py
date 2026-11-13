@@ -92,3 +92,24 @@ def test_sent_lessons_become_legacy_content_in_0005(database_url: str) -> None:
 
         run_alembic(engine, "downgrade", "0004")  # lessons.payload is untouched, so nothing is lost
         assert "lesson_contents" not in inspect(engine).get_table_names()
+
+
+def test_0006_downgrade_turns_unfinished_days_into_failed_ones(database_url: str) -> None:
+    with schema_engine(database_url) as engine:
+        run_alembic(engine, "upgrade", "0006")
+        with engine.begin() as connection:
+            learner = connection.execute(
+                text("INSERT INTO learners (telegram_chat_id, cefr) VALUES ('1', 'A2') RETURNING id")
+            ).scalar_one()
+            for day, status in (("2026-11-01", "sent"), ("2026-11-02", "sending"), ("2026-11-03", "skipped")):
+                connection.execute(
+                    text(
+                        "INSERT INTO lessons (learner_id, lesson_date, topic_id, cefr, schema_version, status)"
+                        " VALUES (:learner, :day, 'there_is_are', 'A2', 3, :status)"
+                    ),
+                    {"learner": learner, "day": day, "status": status},
+                )
+        run_alembic(engine, "downgrade", "0005")
+        with engine.connect() as connection:
+            statuses = [row[0] for row in connection.execute(text("SELECT status FROM lessons ORDER BY lesson_date"))]
+        assert statuses == ["sent", "failed", "failed"]

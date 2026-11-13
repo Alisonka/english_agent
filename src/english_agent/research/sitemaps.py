@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Protocol
 
 import httpx
+from redis.asyncio import Redis
 
 from english_agent.research.sites import Site
 
@@ -73,6 +74,25 @@ class FileSitemapCache:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             json.dump({"fetched_at": time.time(), "urls": urls}, file)
         os.replace(tmp, self._dir / f"{site}.json")
+
+
+class RedisSitemapCache:
+    """`sitemaps:<site>` with a TTL: one copy for every worker process, rebuilt by whoever finds it missing."""
+
+    def __init__(self, redis: Redis, ttl_days: int = 7, prefix: str = "sitemaps") -> None:
+        self._redis, self._ttl_seconds, self._prefix = redis, ttl_days * 24 * 3600, prefix
+
+    async def get(self, site: str) -> list[str] | None:
+        raw = await self._redis.get(f"{self._prefix}:{site}")
+        if raw is None:
+            return None
+        try:
+            return list(json.loads(raw))
+        except ValueError:
+            return None
+
+    async def put(self, site: str, urls: list[str]) -> None:
+        await self._redis.set(f"{self._prefix}:{site}", json.dumps(urls), ex=self._ttl_seconds)
 
 
 class SitemapIndex:
