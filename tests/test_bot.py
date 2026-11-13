@@ -95,7 +95,8 @@ class Harness:
     async def tap(self, data: str, *, message_id: int | None = 7) -> None:
         callback: dict[str, Any] = {"id": "cq", "from": user(), "chat_instance": "ci", "data": data}
         if message_id is not None:
-            callback["message"] = {"message_id": message_id, "date": 0, "chat": {"id": 42, "type": "private"}}
+            # A non-zero date: aiogram treats date == 0 as an InaccessibleMessage, which handlers skip.
+            callback["message"] = {"message_id": message_id, "date": 1700000000, "chat": {"id": 42, "type": "private"}}
         await self.feed(callback_query=callback)
 
     async def vote(self, poll_id: str, *options: int) -> None:

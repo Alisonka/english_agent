@@ -50,7 +50,7 @@ async def test_backfill_creates_missing_core_items_and_is_idempotent(lesson: Les
     await lessons.record_sent(learner.id, DAY, lesson, [1], curriculum_version=1)
     await lessons.record_sent(learner.id, DAY + timedelta(days=1), other, [2], curriculum_version=1)
     await lessons.record_sent(learner.id, DAY + timedelta(days=2), lesson, [3], curriculum_version=1)
-    lessons.record_failed(
+    await lessons.record_failed(
         learner.id, DAY + timedelta(days=3), topic_id="x", cefr="A2", reason="boom", curriculum_version=1
     )
 

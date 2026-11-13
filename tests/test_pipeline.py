@@ -416,7 +416,7 @@ async def test_tick_sends_and_records_once_per_day(
     assert len(sent) == 1
     record = lessons.rows[(learner.id, START)]
     assert (record.status, record.telegram_message_ids) == ("sent", [1])
-    item = fake_items(stores).get_by_key(f"{generated[0]}:core")
+    item = await fake_items(stores).get_by_key(f"{generated[0]}:core")
     assert item is not None and item.source_lesson_id == record.id
 
 

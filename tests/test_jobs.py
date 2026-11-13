@@ -126,7 +126,22 @@ async def test_a_failed_send_frees_the_key_for_the_next_tick() -> None:
 
 def research(topic_id: str) -> ResearchResult:
     return ResearchResult.model_validate(
-        {"topic_id": topic_id, "status": "found", "message": "ok", "sites_checked": [], "steps": 0, "trajectory": []}
+        {
+            "topic_id": topic_id,
+            "status": "found",
+            "message": "ok",
+            "notes": {
+                "site": "skysmart",
+                "source": {"url": "https://skysmart.ru/x", "title": "t", "accessed_at": "2026-10-16"},
+                "page_title": "t",
+                "summary_ru": "Короткая сводка по теме для теста доставки урока агентом.",
+                "rule_points": ["правило один", "правило два", "правило три"],
+                "examples": [{"en": "There is a cat."}, {"en": "There are cats."}],
+            },
+            "sites_checked": [],
+            "steps": 0,
+            "trajectory": [],
+        }
     )
 
 
