@@ -36,6 +36,7 @@ from anthropic import AsyncAnthropic
 from english_agent.config import Settings
 from english_agent.llm.base import AssistantTurn, LLMRejected, LLMUnavailable, ToolCall
 from english_agent.llm.pricing import estimate_cost_usd
+from english_agent.metrics import LLM_COST, LLM_ERRORS, LLM_TOKENS
 from english_agent.tracing import get_tracer, record_model_output
 
 _CONNECT_TIMEOUT_SECONDS = 10.0
@@ -166,6 +167,7 @@ class AnthropicLLM:
                     )
             except anthropic.APIError as error:
                 classified = classify_error(error)
+                LLM_ERRORS.labels(type(classified).__name__).inc()
                 span.record_exception(error)
                 span.set_attribute("error.type", type(classified).__name__)
                 raise classified from error
@@ -173,6 +175,10 @@ class AnthropicLLM:
                 usage = response.usage
                 cache_write = usage.cache_creation_input_tokens or 0
                 cache_read = usage.cache_read_input_tokens or 0
+                LLM_TOKENS.labels(self.model, "input").inc(usage.input_tokens)
+                LLM_TOKENS.labels(self.model, "output").inc(usage.output_tokens)
+                LLM_TOKENS.labels(self.model, "cache_read").inc(cache_read)
+                LLM_TOKENS.labels(self.model, "cache_write").inc(cache_write)
                 span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
                 span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
                 if cache_write or cache_read:
@@ -186,6 +192,7 @@ class AnthropicLLM:
                     cache_read_tokens=cache_read,
                 )
                 if cost is not None:
+                    LLM_COST.labels(self.model).inc(cost)
                     span.set_attribute("gen_ai.usage.cost_usd", round(cost, 6))
             if response.stop_reason is not None:
                 span.set_attribute("gen_ai.response.finish_reason", response.stop_reason)

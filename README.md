@@ -185,6 +185,7 @@ Configuration is read from environment variables or a local `.env` file (see
 | `CONTENT_GENERATION_STALE_MINUTES` | no | `20` | A lesson being written this long ago by a dead worker is taken over |
 | `LOG_FORMAT` | no | `text` | `json` for one JSON object per line (the server) |
 | `LOG_LEVEL` | no | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
+| `METRICS_PORT` | no | `0` | Port of this process's Prometheus `/metrics` (0 = off; compose sets 9100) |
 
 See [.env.example](.env.example) for the full template.
 
@@ -301,6 +302,70 @@ ssh -N -L 5432:localhost:5432 -L 16686:localhost:16686 vpn
 psql postgresql://english_agent:<pw>@localhost:5432/english_agent
 ```
 
+### Operations
+
+**Logs.** Every service logs one JSON object per line (`LOG_FORMAT=json`) with
+`chat_id`, `job`, `job_id` and the OpenTelemetry `trace_id` where they apply, so one
+learner's or one job's lines can be filtered and joined with its trace in Jaeger:
+
+```bash
+docker compose logs worker | grep '"chat_id": "42"'
+docker compose logs worker | grep '"job": "deliver_lesson"' | grep ERROR
+```
+
+**Traces.** Jaeger shows each job as `job.<name>`, continuing the trace of whatever
+enqueued it, with the database queries, Redis calls, Claude calls (`llm.chat`, tokens
+and estimated cost) and Telegram requests (bot token redacted) inside.
+
+**Metrics.** The bot and each worker serve Prometheus metrics on port 9100 of the
+compose network (`bot:9100`, `worker:9100`); what to watch:
+
+| Metric | Watch for |
+| --- | --- |
+| `english_agent_jobs_total{outcome="error"}` | a rising rate: jobs failing |
+| `english_agent_job_duration_seconds{task="deliver_lesson"}` | lessons taking minutes: content not prewarmed, Claude slow |
+| `english_agent_lessons_sent_total`, `english_agent_lessons_failed_total` | sent per day vs. learners due |
+| `english_agent_llm_errors_total`, `english_agent_llm_cost_usd_total` | Claude outages and spend |
+| `english_agent_telegram_requests_total{outcome!="ok"}`, `english_agent_telegram_retry_after_seconds_total` | blocked chats, flood control |
+| `english_agent_alerts_total` | anything that also went to `ADMIN_CHAT_ID` |
+
+**Alerts.** With `ADMIN_CHAT_ID` set, the workers send a message there when a job fails
+for good (no retry left, or a failure retrying cannot fix) and when a lesson could not
+be written; the same kind of alert at most once per ten minutes per worker.
+
+**Common tasks.**
+
+```bash
+# a learner's state
+docker compose exec postgres psql -U english_agent -c "SELECT * FROM learners WHERE telegram_chat_id = '42'"
+# today's unfinished lessons
+docker compose exec postgres psql -U english_agent -c \
+  "SELECT learner_id, status, attempts, claimed_at, error FROM lessons WHERE status <> 'sent' AND lesson_date >= current_date - 1"
+# send one learner's lesson now (the same claim rules: never twice)
+docker compose run --rm --no-deps worker python -m english_agent.pipeline --chat 42
+# pause a learner
+docker compose exec postgres psql -U english_agent -c "UPDATE learners SET paused_at = now() WHERE telegram_chat_id = '42'"
+# what is queued
+docker compose exec redis redis-cli XLEN english_agent
+```
+
+To rotate the bot token, change `TELEGRAM_BOT_TOKEN` in `.env` and run
+`docker compose up -d bot worker`. Restore a backup with `pg_restore` into a stopped
+stack (see Backups); Redis needs nothing, the scheduler rebuilds the queue.
+
+**Load test.** `scripts/soak.py` puts N learners on the same minute and runs the
+real scheduler, worker and bot against a fake Telegram (`scripts/fake_telegram.py`,
+which answers 429 like Telegram does above its limits) in a compose project of its
+own, then checks that every learner got the lesson exactly once:
+
+```bash
+export POSTGRES_PORT=15432 REDIS_PORT=16379 JAEGER_UI_PORT=26686 JAEGER_GRPC_PORT=24317 JAEGER_OTLP_PORT=24318
+docker compose -p english-agent-soak -f docker-compose.yml -f docker-compose.soak.yml up -d --build
+docker compose -p english-agent-soak -f docker-compose.yml -f docker-compose.soak.yml \
+    run --rm soak python scripts/soak.py --learners 500
+docker compose -p english-agent-soak -f docker-compose.yml -f docker-compose.soak.yml down -v
+```
+
 ### Database
 
 Storage is PostgreSQL through SQLAlchemy 2.0 (async, psycopg 3), see
@@ -407,6 +472,7 @@ src/english_agent/
   jobs/            # TaskIQ broker, scheduler tick, job bodies, de-duplication keys
   planning.py      # when is what due (pure rules the scheduler applies)
   health.py        # heartbeat file for container healthchecks
+  metrics.py       # Prometheus metrics; alerts.py: operational alerts to ADMIN_CHAT_ID
   config.py        # runtime settings (env / .env)
   content.py       # shared lesson content: recipe key, claim owner
   grader.py        # learner's translation -> validated TranslationGrade
@@ -428,7 +494,7 @@ src/english_agent/
   telegram/        # HTML rendering, the aiogram sender, outgoing rate limits
 migrations/        # Alembic migrations
 deploy/systemd/    # backup timer units
-scripts/           # pg_backup.sh
+scripts/           # pg_backup.sh, fake_telegram.py and soak.py (load test)
 curriculum/        # A2 / B1 topic definitions
 evals/datasets/    # evaluation goldens
 tests/             # test suite

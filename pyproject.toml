@@ -23,6 +23,10 @@ dependencies = [
     "taskiq-redis>=1.1",
     "redis>=5.2",
     "python-json-logger>=3.2",
+    "opentelemetry-instrumentation-sqlalchemy>=0.51b0",
+    "opentelemetry-instrumentation-aiohttp-client>=0.51b0",
+    "opentelemetry-instrumentation-redis>=0.51b0",
+    "prometheus-client>=0.21",
 ]
 
 [dependency-groups]
@@ -78,3 +82,8 @@ warn_unused_configs = true
 no_implicit_optional = true
 disallow_untyped_defs = true
 check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# Ships without type information (no py.typed).
+module = ["opentelemetry.instrumentation.sqlalchemy.*"]
+ignore_missing_imports = true

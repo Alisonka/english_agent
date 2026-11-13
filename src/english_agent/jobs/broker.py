@@ -13,11 +13,14 @@ from taskiq_redis import RedisStreamBroker
 
 from english_agent.config import Settings, get_settings
 from english_agent.jobs.deps import open_worker_deps
+from english_agent.jobs.middleware import JobMiddleware
 from english_agent.llm import LLMUnavailable
 from english_agent.logs import configure_logging
+from english_agent.metrics import serve_metrics
 from english_agent.tracing import configure_tracing
 
 QUEUE = "english_agent"
+RETRYABLE = (LLMUnavailable, ConnectionError, TimeoutError)
 # A lesson can take ~10 minutes of research and writing; a message is re-delivered only after this.
 JOB_IDLE_TIMEOUT_MS = 30 * 60 * 1000
 
@@ -25,7 +28,7 @@ JOB_IDLE_TIMEOUT_MS = 30 * 60 * 1000
 def make_broker(settings: Settings) -> AsyncBroker:
     url = settings.redis_url.get_secret_value()
     if not url:
-        return InMemoryBroker()
+        return InMemoryBroker().with_middlewares(JobMiddleware(RETRYABLE))
     broker = RedisStreamBroker(
         url=url,
         queue_name=QUEUE,
@@ -41,9 +44,9 @@ def make_broker(settings: Settings) -> AsyncBroker:
         use_jitter=True,
         use_delay_exponent=True,
         max_delay_exponent=300,
-        types_of_exceptions=(LLMUnavailable, ConnectionError, TimeoutError),
+        types_of_exceptions=RETRYABLE,
     )
-    return broker.with_middlewares(retries)
+    return broker.with_middlewares(retries, JobMiddleware(RETRYABLE))
 
 
 broker = make_broker(get_settings())
@@ -57,6 +60,7 @@ async def _startup(state: TaskiqState) -> None:
         return  # the in-memory broker: whoever runs jobs in-process sets `state.deps` itself (tests)
     configure_logging(settings)
     state.tracing = configure_tracing(settings)
+    serve_metrics(settings.metrics_port)
     state.deps = await open_worker_deps(settings)
 
 

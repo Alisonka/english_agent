@@ -10,14 +10,16 @@ from collections.abc import Iterator
 
 import pytest
 from opentelemetry import trace
+from opentelemetry.instrumentation.aiohttp_client import AioHttpClientInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.redis import RedisInstrumentor
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
 from english_agent.config import Settings
-from english_agent.tracing import _redact, configure_tracing, get_tracer, record_model_output
+from english_agent.tracing import _aiohttp_request_hook, _redact, configure_tracing, get_tracer, record_model_output
 from test_research_agent import (
     ENGLEX_URL,
     GOOD_NOTES,
@@ -71,6 +73,8 @@ def test_configure_tracing_enabled_with_endpoint() -> None:
         if provider is not None:
             provider.shutdown()
         HTTPXClientInstrumentor().uninstrument()
+        AioHttpClientInstrumentor().uninstrument()
+        RedisInstrumentor().uninstrument()
 
 
 # -- spans from the research loop ----------------------------------------------------
@@ -163,3 +167,14 @@ def test_redact_strips_telegram_token() -> None:
 def test_redact_leaves_other_urls_untouched() -> None:
     url = "https://englex.ru/present-perfect/"
     assert _redact(url) == url
+
+
+def test_the_bot_token_never_lands_on_an_aiohttp_span(spans: InMemorySpanExporter) -> None:
+    from types import SimpleNamespace
+
+    with get_tracer().start_as_current_span("POST") as span:
+        params = SimpleNamespace(url="https://api.telegram.org/bot123:SECRET/sendMessage")
+        _aiohttp_request_hook(span, params)  # type: ignore[arg-type]
+    [finished] = spans.get_finished_spans()
+    assert finished.attributes is not None
+    assert finished.attributes["url.full"] == "https://api.telegram.org/bot<redacted>/sendMessage"

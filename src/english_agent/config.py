@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     lesson_claim_stale_minutes: int = Field(default=10, ge=1)
     content_generation_stale_minutes: int = Field(default=20, ge=1)
 
+    # Prometheus /metrics of this process (the bot, each worker); 0 turns it off.
+    metrics_port: int = Field(default=0, ge=0, le=65535)
+
     log_format: Literal["text", "json"] = "text"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 

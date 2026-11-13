@@ -30,11 +30,13 @@ from anthropic import AsyncAnthropic
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
+from english_agent.alerts import Alerter
 from english_agent.config import Settings, get_settings
 from english_agent.content import content_key, worker_id
 from english_agent.items import record_core_item
 from english_agent.llm import AnthropicLLM, make_client
 from english_agent.logs import bind, configure_logging
+from english_agent.metrics import LESSONS_FAILED, LESSONS_SENT
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
 from english_agent.models.lesson import Lesson
@@ -70,6 +72,7 @@ class Runtime:
     sender: Sender
     client: AsyncAnthropic | None = None  # None: each generation opens its own
     sitemaps: SitemapCache | None = None  # None: sitemaps cached on disk
+    alerts: Alerter | None = None  # None: problems are only logged
 
 
 def _research_http(settings: Settings) -> httpx.AsyncClient:
@@ -317,6 +320,9 @@ async def run_lesson_for_learner(
                 log.error("lesson for %s failed: %s", topic.id, reason)
                 span.set_status(Status(StatusCode.ERROR, reason))
                 await stores.lessons.fail(row.id, reason, final=True)  # the topic comes again tomorrow
+                LESSONS_FAILED.labels("true").inc()
+                if runtime.alerts is not None:
+                    await runtime.alerts.alert("lesson not written", f"{topic.id} ({level}): {reason}")
                 if send:
                     await notify(sender, chat_id, LESSON_FAILED.format(title=topic.title_ru))
                 return FAILED
@@ -342,9 +348,11 @@ async def run_lesson_for_learner(
             log.error("telegram error: %s", error)
             span.set_status(Status(StatusCode.ERROR, str(error)))
             await stores.lessons.fail(row.id, f"telegram: {error}", final=False)  # retried after a backoff
+            LESSONS_FAILED.labels("false").inc()
             return FAILED
         log.info("sent %d message(s) to Telegram chat %s", len(message_ids), chat_id)
         record = await stores.lessons.finish_sending(row.id)
+        LESSONS_SENT.labels(level).inc()
         await record_core_item(stores.items, lesson, record.id)
         return OK
 

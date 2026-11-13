@@ -13,7 +13,7 @@ import logging
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Any, TextIO
 
 from opentelemetry import trace
@@ -41,6 +41,15 @@ def bind(**fields: Any) -> Iterator[None]:
         yield
     finally:
         _BOUND.reset(token)
+
+
+def push(**fields: Any) -> Token[dict[str, Any] | None]:
+    """`bind` for code that cannot wrap a block (middleware hooks); undo with `pop(token)`."""
+    return _BOUND.set({**(_BOUND.get() or {}), **fields})
+
+
+def pop(token: Token[dict[str, Any] | None]) -> None:
+    _BOUND.reset(token)
 
 
 def bound_fields() -> dict[str, Any]:

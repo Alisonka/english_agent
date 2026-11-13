@@ -28,13 +28,14 @@ from english_agent.grading import make_grader
 from english_agent.health import beat
 from english_agent.llm import make_client
 from english_agent.logs import configure_logging
+from english_agent.metrics import serve_metrics
 from english_agent.paths import available_cefr_levels
 from english_agent.srs import make_scheduler
 from english_agent.storage.db import make_engine, make_session_factory
 from english_agent.storage.repositories import Stores, sql_stores
 from english_agent.telegram.sender import Sender, make_bot
 from english_agent.telegram.throttle import RateLimiter, RedisRateLimiter
-from english_agent.tracing import configure_tracing
+from english_agent.tracing import configure_tracing, instrument_engine
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +93,8 @@ async def serve(settings: Settings) -> int:
     async with AsyncExitStack() as stack:
         engine = make_engine(settings)
         stack.push_async_callback(engine.dispose)
+        instrument_engine(engine)
+        serve_metrics(settings.metrics_port)
         redis_url = settings.redis_url.get_secret_value()
         redis = Redis.from_url(redis_url, decode_responses=True) if redis_url else None
         limiter: RateLimiter | None = None

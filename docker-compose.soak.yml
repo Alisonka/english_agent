@@ -1,0 +1,57 @@
+# Load test overlay: the whole stack, but talking to scripts/fake_telegram.py instead of Telegram.
+# Run it as a separate compose project, so it has its own database and Redis (never production),
+# on host ports of its own so it can run next to the production stack:
+#
+#   export POSTGRES_PORT=15432 REDIS_PORT=16379 JAEGER_UI_PORT=26686 JAEGER_GRPC_PORT=24317 JAEGER_OTLP_PORT=24318
+#   docker compose -p english-agent-soak -f docker-compose.yml -f docker-compose.soak.yml up -d --build
+#   docker compose -p english-agent-soak -f docker-compose.yml -f docker-compose.soak.yml \
+#       run --rm soak python scripts/soak.py --learners 500
+#   docker compose -p english-agent-soak -f docker-compose.yml -f docker-compose.soak.yml down -v
+x-soak-env: &soak-env
+  TELEGRAM_API_BASE: http://fake-telegram:8081
+  TELEGRAM_BOT_TOKEN: "123456:soak"
+  ADMIN_CHAT_ID: ""
+
+services:
+  postgres:
+    container_name: english-agent-soak-postgres
+  redis:
+    container_name: english-agent-soak-redis
+  jaeger:
+    container_name: english-agent-soak-jaeger
+
+  fake-telegram:
+    image: english-agent:latest
+    command: ["python", "scripts/fake_telegram.py", "--port", "8081"]
+    volumes:
+      - ./scripts:/app/scripts:ro
+    restart: unless-stopped
+
+  # environment and depends_on are merged into the base file's: only the Telegram endpoint changes.
+  bot:
+    container_name: english-agent-soak-bot
+    environment: *soak-env
+    depends_on:
+      fake-telegram:
+        condition: service_started
+  worker:
+    environment: *soak-env
+    depends_on:
+      fake-telegram:
+        condition: service_started
+  scheduler:
+    container_name: english-agent-soak-scheduler
+
+  soak:
+    image: english-agent:latest
+    env_file: .env
+    environment:
+      <<: *soak-env
+      DATABASE_URL: postgresql+psycopg://english_agent:${POSTGRES_PASSWORD}@postgres:5432/english_agent
+    volumes:
+      - ./scripts:/app/scripts:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    profiles: ["soak"]
+    restart: "no"

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from redis.asyncio import Redis
 from taskiq import Context, TaskiqDepends
 
+from english_agent.alerts import Alerter
 from english_agent.config import Settings
 from english_agent.grading import Grader, make_grader
 from english_agent.health import beat
@@ -21,6 +22,7 @@ from english_agent.storage.db import make_engine, make_session_factory
 from english_agent.storage.repositories import sql_stores
 from english_agent.telegram.sender import Sender, make_bot
 from english_agent.telegram.throttle import RedisRateLimiter
+from english_agent.tracing import instrument_engine
 
 
 @dataclass
@@ -53,12 +55,15 @@ async def open_worker_deps(settings: Settings) -> WorkerDeps:
         stack.push_async_callback(client.close)
         heartbeat = asyncio.create_task(beat(), name="heartbeat")
         stack.callback(heartbeat.cancel)
+        instrument_engine(engine)
+        sender = Sender(bot)
         runtime = Runtime(
             settings,
             sql_stores(make_session_factory(engine), make_scheduler(settings)),
-            Sender(bot),
+            sender,
             client=client,
             sitemaps=RedisSitemapCache(redis, ttl_days=settings.sitemap_ttl_days),
+            alerts=Alerter(sender, settings.admin_chat_id),
         )
         return WorkerDeps(runtime, RedisDeduper(redis), make_grader(settings, client), stack)
     except BaseException:

@@ -25,6 +25,8 @@ from aiogram.methods import GetUpdates, Response, TelegramMethod
 from aiogram.methods.base import TelegramType
 from redis.asyncio import Redis
 
+from english_agent.metrics import TELEGRAM_FLOOD_WAIT, TELEGRAM_REQUESTS
+
 log = logging.getLogger(__name__)
 
 MAX_RETRY_AFTER_SECONDS = 60
@@ -109,18 +111,27 @@ class ThrottlingMiddleware(BaseRequestMiddleware):
     ) -> Response[TelegramType]:
         if isinstance(method, GetUpdates):
             return await make_request(bot, method)
+        name = method.__api_method__
         attempt = 0
         while True:
             await self._limiter.acquire(_chat_of(method))
             try:
-                return await make_request(bot, method)
+                response = await make_request(bot, method)
             except TelegramRetryAfter as error:
+                TELEGRAM_REQUESTS.labels(name, "retry_after").inc()
                 attempt += 1
                 if attempt > RETRIES_ON_FLOOD:
                     raise
                 delay = min(error.retry_after, MAX_RETRY_AFTER_SECONDS)
+                TELEGRAM_FLOOD_WAIT.inc(delay)
                 log.warning("telegram flood control on %s, retrying in %ss", type(method).__name__, delay)
                 await _sleep(delay)
+                continue
+            except Exception as error:
+                TELEGRAM_REQUESTS.labels(name, type(error).__name__).inc()
+                raise
+            TELEGRAM_REQUESTS.labels(name, "ok").inc()
+            return response
 
 
 class RedisRateLimiter:
