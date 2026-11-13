@@ -1,55 +1,42 @@
 """write_lesson: TopicNotes in, validated Lesson out.
 
-One forced tool call. The model fills the pedagogical fields; the code owns
-provenance (`topic_id`, `cefr`, `sources`) so the lesson can never cite a page
-the research step did not actually read. A validation failure is fed back to the
-model once; a second failure raises.
+One forced tool call. The model fills the pedagogical fields; the code owns provenance
+(`topic_id`, `cefr`, `sources`) so the lesson can never cite a page the research step did not
+actually read. A validation failure is fed back to the model once; a second failure raises.
+
+Legacy: superseded by the step-based generation (`english_agent.topic_writer`); kept while
+stored lessons of schema v3 are still served and graded.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
-from opentelemetry.trace import Status, StatusCode
-from pydantic import ValidationError
-
-from english_agent.llm import ChatLLM
+from english_agent.llm import ChatLLM, LLMWriteError, submit_model, tool_schema
 from english_agent.models.cefr import Cefr
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QUIZ_SIZE, TRANSLATION_SIZE
 from english_agent.research.models import TopicNotes
-from english_agent.tracing import get_tracer
 from english_agent.versions import SCHEMA_VERSIONS, build_provenance
 
 _PROMPT = (Path(__file__).resolve().parent / "prompts" / "write_lesson_system.md").read_text(encoding="utf-8")
 _OWNED_BY_CODE = ("topic_id", "cefr", "sources", "provenance")
 
 
-class LessonWriteError(Exception):
+class LessonWriteError(LLMWriteError):
     pass
 
 
 def _submit_tool() -> dict[str, Any]:
-    schema = Lesson.model_json_schema()
-    for field in _OWNED_BY_CODE:
-        schema["properties"].pop(field, None)
-    schema["required"] = [name for name in schema.get("required", []) if name not in _OWNED_BY_CODE]
-    # Optional in the model (old stored lessons have none), required from the writer.
-    for field, size in (("quiz", QUIZ_SIZE), ("translation", TRANSLATION_SIZE)):
-        schema["properties"][field].pop("default", None)
-        schema["properties"][field].update(minItems=size, maxItems=size)
-        schema["required"].append(field)
-    return {
-        "type": "function",
-        "function": {
-            "name": "submit_lesson",
-            "description": "Submit the finished lesson.",
-            "parameters": schema,
-        },
-    }
+    return tool_schema(
+        Lesson,
+        name="submit_lesson",
+        description="Submit the finished lesson.",
+        owned=_OWNED_BY_CODE,
+        required_sizes={"quiz": QUIZ_SIZE, "translation": TRANSLATION_SIZE},
+    )
 
 
 def _practice_problem(lesson: Lesson) -> str:
@@ -71,8 +58,6 @@ async def write_lesson(
     attempts: int = 2,
     curriculum_version: int | None = None,
 ) -> Lesson:
-    tool = _submit_tool()
-    tool_choice = {"type": "function", "function": {"name": "submit_lesson"}}
     provenance = build_provenance(
         component="writer",
         schema_version=SCHEMA_VERSIONS["lesson"],
@@ -91,40 +76,26 @@ async def write_lesson(
         },
     ]
 
-    with get_tracer().start_as_current_span("writer.write_lesson") as span:
-        span.set_attribute("topic.id", topic.id)
-        last_error = "model did not call submit_lesson"
-        for attempt in range(1, attempts + 1):
-            turn = await llm.chat(messages, [tool], tool_choice=tool_choice)
-            messages.append(turn.to_message())
-            call = next((c for c in turn.tool_calls if c.name == "submit_lesson"), None)
-            if call is None:
-                messages.append({"role": "user", "content": "Call submit_lesson with the lesson."})
-                continue
+    def build(arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **arguments,
+            "topic_id": topic.id,
+            "cefr": cefr,
+            "sources": [notes.source.model_dump()],
+            "provenance": provenance,
+        }
 
-            payload = {
-                **call.arguments,
-                "topic_id": topic.id,
-                "cefr": cefr,
-                "sources": [notes.source.model_dump()],
-                "provenance": provenance,
-            }
-            try:
-                lesson = Lesson.model_validate(payload)
-                last_error = _practice_problem(lesson)
-                if not last_error:
-                    span.set_attribute("writer.attempts", attempt)
-                    return lesson
-            except ValidationError as error:
-                last_error = json.dumps(error.errors(include_url=False)[:5], ensure_ascii=False, default=str)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": f"Lesson rejected, fix these problems and call submit_lesson again: {last_error}",
-                }
-            )
-
-        span.set_attribute("writer.attempts", attempts)
-        span.set_status(Status(StatusCode.ERROR, last_error))
-        raise LessonWriteError(f"could not produce a valid lesson after {attempts} attempts: {last_error}")
+    try:
+        return await submit_model(
+            llm,
+            Lesson,
+            tool=_submit_tool(),
+            messages=messages,
+            build=build,
+            problem=_practice_problem,
+            span_name="writer.write_lesson",
+            span_attrs={"topic.id": topic.id},
+            attempts=attempts,
+        )
+    except LLMWriteError as error:
+        raise LessonWriteError(str(error)) from error
