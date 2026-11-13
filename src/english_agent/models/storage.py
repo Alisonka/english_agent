@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson, Source
-from english_agent.models.practice import QuizQuestion, TranslationGrade
+from english_agent.models.practice import QuizQuestion, TranslationGrade, TranslationTask
 from english_agent.models.profile import LearnerProfile
 from english_agent.models.schedule import LearnerSchedule
 
@@ -225,6 +225,41 @@ class PracticeDeliveryRecord(BaseModel):
     telegram_message_ids: list[int]
     completed_at: datetime | None
     payload: dict[str, Any] | None = None  # the assembled PracticeBlock (typed in the practice group)
+
+
+PracticeSource = Literal["today", "previous", "review"]
+
+
+class AssembledQuestion(BaseModel):
+    """One quiz question chosen for a day, tagged with the item it checks and where it came from."""
+
+    question: QuizQuestion
+    item_id: int | None
+    item_key: str
+    source: PracticeSource
+
+
+class AssembledSentence(BaseModel):
+    """One translation sentence chosen for a day, with the context the grader needs."""
+
+    task: TranslationTask
+    item_id: int | None
+    item_key: str
+    title_en: str
+    key_idea_ru: str | None = None
+    form: str | None = None
+    source: PracticeSource
+
+
+class PracticeBlock(BaseModel):
+    """The day's assembled practice set, stored in `practice_deliveries.payload`.
+
+    A quiz block carries `questions`, a translation block carries `sentences`; the other list is empty.
+    """
+
+    kind: Literal["quiz", "translation"]
+    questions: list[AssembledQuestion] = Field(default_factory=list)
+    sentences: list[AssembledSentence] = Field(default_factory=list)
 
 
 class SentStep(BaseModel):
