@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1](https://github.com/Alisonka/english_agent/compare/v0.1.0...v0.1.1) (2026-11-13)
+
+
+### Added
+
+* **content:** write each lesson once per topic and level, share it with every learner ([aca8f20](https://github.com/Alisonka/english_agent/commit/aca8f202031ac86a4681c34617e355a81e903a82))
+* **jobs:** TaskIQ worker and scheduler over Redis; bot, worker, scheduler services ([49546b8](https://github.com/Alisonka/english_agent/commit/49546b8a44435b4981eb0bf2a6a03c762351f918))
+* **observability:** job traces, Prometheus metrics, admin alerts, load test ([00d45fa](https://github.com/Alisonka/english_agent/commit/00d45fa906c219b96639b405ea237ccc6ec59940))
+* **schedule:** per-learner schedule and next-unsent-topic progression ([67b0862](https://github.com/Alisonka/english_agent/commit/67b0862ac572dffc71f9d1ff89a915814d687963))
+* **storage:** learner model with core items, FSRS reviews and a vers… ([967ff8e](https://github.com/Alisonka/english_agent/commit/967ff8edede20e03ba4dbb8dbba1b062bea3f773))
+* **storage:** learner model with core items, FSRS reviews and a versioned profile ([548a4cf](https://github.com/Alisonka/english_agent/commit/548a4cfe117f7d1bd4790378b547912c3bde141a))
+
+
+### Changed
+
+* **llm:** async Claude client, research, writer and grader ([a273b8e](https://github.com/Alisonka/english_agent/commit/a273b8e220e27b9ca931e49d6eed3fd43ebf0ba7))
+* **runtime:** async storage and an aiogram bot on one event loop ([a70b1d8](https://github.com/Alisonka/english_agent/commit/a70b1d82c47174520b53ba2391ceed74e5f79c99))
+
 ## [0.1.0] - 2026-11-11
 
 ### Added
