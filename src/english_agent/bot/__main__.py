@@ -30,6 +30,7 @@ from english_agent.llm import make_client
 from english_agent.logs import configure_logging
 from english_agent.metrics import serve_metrics
 from english_agent.paths import available_cefr_levels
+from english_agent.reflector import make_reflector
 from english_agent.srs import make_scheduler
 from english_agent.storage.db import make_engine, make_session_factory
 from english_agent.storage.repositories import Stores, sql_stores
@@ -50,7 +51,7 @@ async def _jobs(
     if redis is None:
         client = make_client(settings)
         stack.push_async_callback(client.close)
-        jobs = InProcessJobs(stores, sender, make_grader(settings, client))
+        jobs = InProcessJobs(stores, sender, make_grader(settings, client), reflect=make_reflector(settings, client))
         stack.push_async_callback(jobs.drain, SHUTDOWN_GRACE_SECONDS)
         return jobs
     from english_agent.jobs.broker import broker  # imported only with a queue to talk to

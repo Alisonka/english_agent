@@ -10,6 +10,9 @@ review accuracy, so the rules are tested without a database. Today's step itself
 - translation: 2 sentences on today's step and 1 on what needs it most: an item missed in today's
   quiz, else an item due for review, else the topic's earlier step, else the least recalled.
 
+An item of one of the Reflector's current focus points (`focus`) goes first among the reviews
+whenever it is due or weak: what keeps going wrong for this learner is practised before the rest.
+
 The caller resolves each pick to a practice bank (an item taught long ago may have none) and takes
 the first ones it can ask, so the ranked lists are longer than the slots.
 """
@@ -76,35 +79,50 @@ def _urgency(candidate: Candidate, now: datetime) -> tuple[int, float]:
     return 1, candidate.retrievability
 
 
-def _reason(candidate: Candidate, now: datetime) -> PlanReason:
+def _focused(candidate: Candidate, now: datetime, focus: frozenset[str]) -> bool:
+    """A Reflector focus item that needs practice now (due or weak), not one merely named."""
+    return candidate.item_key in focus and (candidate.is_due(now) or candidate.is_weak)
+
+
+def _reason(candidate: Candidate, now: datetime, focus: frozenset[str]) -> PlanReason:
+    if _focused(candidate, now, focus):
+        return "focus"
     if candidate.is_due(now):
         return "due"
     return "weak" if candidate.is_weak else "least_recalled"
 
 
-def plan_quiz(candidates: list[Candidate], now: datetime) -> QuizPlan:
+def plan_quiz(candidates: list[Candidate], now: datetime, *, focus: frozenset[str] = frozenset()) -> QuizPlan:
     """What the day's quiz reviews besides today's two questions."""
     earlier = [candidate for candidate in candidates if candidate.same_topic]
     previous = min(earlier, key=lambda candidate: candidate.retrievability) if earlier else None
-    others = sorted((c for c in candidates if not c.same_topic), key=lambda c: _urgency(c, now))
+    others = sorted(
+        (c for c in candidates if not c.same_topic),
+        key=lambda c: (not _focused(c, now, focus), *_urgency(c, now)),
+    )
     due = sum(1 for candidate in others if candidate.is_due(now))
     return QuizPlan(
         previous=Pick(previous, "previous") if previous is not None else None,
-        reviews=[Pick(candidate, _reason(candidate, now)) for candidate in others],
+        reviews=[Pick(candidate, _reason(candidate, now, focus)) for candidate in others],
         review_slots=min(len(others), max(1, min(due, MAX_REVIEW_SLOTS))),
     )
 
 
-def plan_translation(candidates: list[Candidate], now: datetime, *, wrong_today: set[int]) -> list[Pick]:
+def plan_translation(
+    candidates: list[Candidate], now: datetime, *, wrong_today: set[int], focus: frozenset[str] = frozenset()
+) -> list[Pick]:
     """The choices for the one sentence that is not today's, best first."""
     missed = sorted((c for c in candidates if c.item_id in wrong_today), key=lambda c: _urgency(c, now))
     rest = [candidate for candidate in candidates if candidate.item_id not in wrong_today]
+    focused = sorted((c for c in rest if _focused(c, now, focus)), key=lambda c: _urgency(c, now))
+    rest = [candidate for candidate in rest if not _focused(candidate, now, focus)]
     due = sorted((c for c in rest if not c.same_topic and c.is_due(now)), key=lambda c: _urgency(c, now))
     earlier = sorted((c for c in rest if c.same_topic), key=lambda c: c.retrievability)
     later = sorted((c for c in rest if not c.same_topic and not c.is_due(now)), key=lambda c: _urgency(c, now))
     return (
         [Pick(candidate, "wrong_today") for candidate in missed]
+        + [Pick(candidate, "focus") for candidate in focused]
         + [Pick(candidate, "due") for candidate in due]
         + [Pick(candidate, "previous") for candidate in earlier]
-        + [Pick(candidate, _reason(candidate, now)) for candidate in later]
+        + [Pick(candidate, _reason(candidate, now, focus)) for candidate in later]
     )

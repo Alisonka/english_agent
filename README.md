@@ -181,6 +181,8 @@ Configuration is read from environment variables or a local `.env` file (see
 | `CRITIC_EFFORT` | no | `medium` | Claude API `output_config.effort` for the Critic |
 | `CRITIC_MAX_REVISIONS` | no | `1` | Rewrites the Critic may ask for per step before the run fails |
 | `CONTENT_RUN_MAX_CALLS` / `CONTENT_RUN_MAX_COST_USD` | no | `60` / `2.0` | Limits of one topic's content run (research, writing, reviews) |
+| `REFLECTOR_MODEL` | no | `claude-sonnet-5-5` | Model that reads a learner's new errors and names what keeps going wrong; empty turns the Reflector off |
+| `REFLECTOR_EFFORT` | no | `medium` | Claude API `output_config.effort` for the Reflector |
 | `LLM_MAX_TOKENS` | no | `8192` | Max tokens per LLM call |
 | `RESEARCH_MAX_STEPS` | no | `12` | Max research agent steps |
 | `RESEARCH_MAX_FETCHES_PER_SITE` | no | `2` | Max page fetches per site |
@@ -348,6 +350,7 @@ compose network (`bot:9100`, `worker:9100`); what to watch:
 | `english_agent_lessons_sent_total`, `english_agent_lessons_failed_total` | sent per day vs. learners due |
 | `english_agent_llm_errors_total`, `english_agent_llm_cost_usd_total` | Claude outages and spend |
 | `english_agent_content_runs_total{outcome}`, `english_agent_reviews_total{verdict="revise"}`, `english_agent_review_issues_total{kind}` | failing content runs, how often and why the Critic sends steps back |
+| `english_agent_reflections_total{outcome="failed"}` | the Reflector failing (the previous reflection is kept) |
 | `english_agent_telegram_requests_total{outcome!="ok"}`, `english_agent_telegram_retry_after_seconds_total` | blocked chats, flood control |
 | `english_agent_alerts_total` | anything that also went to `ADMIN_CHAT_ID` |
 
@@ -421,8 +424,13 @@ schedule), `lesson_contents`, `lessons`, the practice tables, and the learner mo
 - `learner_profiles` — append-only versions of the profile
   ([models/profile.py](src/english_agent/models/profile.py)): weak items, error
   patterns and 7-day accuracy, recomputed by code after a finished quiz or a graded
-  translation ([profile.py](src/english_agent/profile.py)); `notes_ru` is reserved
-  for the Reflector.
+  translation ([profile.py](src/english_agent/profile.py)). The same refresh runs the
+  Reflector ([reflector.py](src/english_agent/reflector.py), `REFLECTOR_MODEL`) when the learner
+  has new errors (three, or one after a quiet week; at most about once a day): it names up to
+  three recurring mistakes, each tied to the items and the error rows it rests on, plus a note for
+  the grader. For 14 days that `reflection` steers the learner's practice (a focus item that is
+  due or weak gets the first review slot), the grader's explanations (never its verdicts) and the
+  hints in the cheat sheet.
 
 Migrations are managed by [Alembic](migrations/):
 
@@ -507,6 +515,7 @@ src/english_agent/
   pipeline.py      # topic -> research -> lesson -> Telegram -> lessons table
   practice.py      # quiz and translation task after the lesson (scheduling, sending)
   planner.py       # what a day's practice reviews, from the learner's cards (pure rules)
+  reflector.py     # a learner's recurring mistakes, from their new errors (LLM, in the profile refresh)
   topic_planner.py # research notes -> the topic's 1-4 steps (LLM)
   tracing.py       # OpenTelemetry setup (opt-in OTLP export)
   session_runner.py # research -> topic plan -> steps -> Critic -> cheat sheet (TopicContent), budget, report

@@ -49,12 +49,15 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "card_record": 2,  # v2: last_reviewed_at, reviews
     "review_log_record": 2,  # v2: source_ref
     "practice_delivery_record": 2,  # v2: payload (the day's assembled practice set)
-    "practice_block": 2,  # the day's assembled quiz/translation set in that payload; v2: reason per item, provenance
+    # The day's assembled quiz/translation set in that payload; v2: reason per item, provenance;
+    # v3: profile_version and the "focus" reason.
+    "practice_block": 3,
     "quiz_poll_record": 2,  # v2: item_id
     "translation_answer_record": 2,  # v2: grading_attempts, grading_started_at
     "translation_grade": 1,
-    "grading_input": 1,  # what the grader sees: the day's sentences and their per-step context
-    "learner_profile": 1,
+    "grading_input": 2,  # what the grader sees: the day's sentences, their context; v2: learner (Reflection)
+    "learner_profile": 2,  # v2: reflection (the Reflector's focus points and notes) replaces notes_ru
+    "reflection": 1,
 }
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
@@ -68,6 +71,7 @@ PROMPT_FILES: dict[str, Path] = {
     "write_summary_system": _PROMPTS_DIR / "write_summary_system.md",
     "review_step_system": _PROMPTS_DIR / "review_step_system.md",
     "review_summary_system": _PROMPTS_DIR / "review_summary_system.md",
+    "reflect_system": _PROMPTS_DIR / "reflect_system.md",
 }
 
 

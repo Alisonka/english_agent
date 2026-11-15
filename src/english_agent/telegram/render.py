@@ -300,4 +300,6 @@ def _weak_points_block(weak_points: list[TopicWeakPoint]) -> str:
     for point in weak_points:
         accuracy = f" ({round(point.accuracy * 100)}%)" if point.accuracy is not None else ""
         lines.append(f"• {_e(point.title_ru)}{accuracy} — {_e(point.key_idea_ru)}")
+        if point.contrast_ru:
+            lines.append(f"  💡 <i>{_e(point.contrast_ru)}</i>")
     return "\n".join(lines)

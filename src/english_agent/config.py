@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     critic_model: str = "claude-sonnet-5-5"
     critic_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     critic_max_revisions: int = Field(default=1, ge=0, le=3)  # rewrites per step before the run fails
+    # The Reflector reads a learner's new errors about once a day and names what keeps going wrong;
+    # the grader, the Planner and the cheat sheet use it. Empty REFLECTOR_MODEL turns it off.
+    reflector_model: str = "claude-sonnet-5-5"
+    reflector_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     # One content run (research + plan + steps + reviews + cheat sheet) stops past these limits.
     content_run_max_calls: int = Field(default=60, ge=10)
     content_run_max_cost_usd: float = Field(default=2.0, gt=0)

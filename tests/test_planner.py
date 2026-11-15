@@ -61,6 +61,28 @@ def test_an_item_the_learner_keeps_getting_wrong_is_marked_weak() -> None:
     assert plan.reviews[0].reason == "weak"
 
 
+def test_a_reflector_focus_item_that_needs_practice_takes_the_first_review_slot() -> None:
+    weak_focus = older(5, due_in_days=6, recall=0.7, checks=4, correct=2)
+    named_only = older(6, due_in_days=6, recall=0.1)  # a focus item that is neither due nor weak
+    plan = plan_quiz([older(1, due_in_days=-3), weak_focus, named_only], NOW, focus=frozenset({"old:5", "old:6"}))
+    assert [(pick.candidate.item_id, pick.reason) for pick in plan.reviews] == [
+        (5, "focus"),
+        (1, "due"),
+        (6, "least_recalled"),
+    ]
+    assert plan.review_slots == 1
+
+
+def test_translation_after_todays_misses_practises_the_focus() -> None:
+    ranked = plan_translation(
+        [older(1, due_in_days=-2), older(2, due_in_days=-1), older(3, due_in_days=5)],
+        NOW,
+        wrong_today={3},
+        focus=frozenset({"old:2"}),
+    )
+    assert [(pick.candidate.item_id, pick.reason) for pick in ranked] == [(3, "wrong_today"), (2, "focus"), (1, "due")]
+
+
 def test_translation_prefers_what_went_wrong_today_then_due_then_the_previous_step() -> None:
     candidates = [older(1, due_in_days=-2), older(2, due_in_days=5), earlier(3), older(4, due_in_days=1)]
     ranked = plan_translation(candidates, NOW, wrong_today={4})

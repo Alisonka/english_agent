@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from english_agent.llm import LLMUnavailable
 from english_agent.models.practice import TranslationGrade
+from english_agent.models.profile import FocusPoint, Reflection
 from english_agent.models.storage import ErrorRecord, ItemRecord, ProfileInputs
-from english_agent.profile import build_profile, refresh_profile
+from english_agent.profile import build_profile, current_reflection, refresh_profile
+from english_agent.reflector import ReflectionRequest
 from fakes import fake_profiles, fake_stores
 
 NOW = datetime(2026, 11, 11, 20, 0, tzinfo=UTC)
@@ -91,27 +94,98 @@ async def test_refresh_appends_only_when_something_changed() -> None:
     learner = await learners.get_or_create("42", "A2")
     profiles = fake_profiles(stores)
 
-    first = await refresh_profile(profiles, learner.id, NOW)
+    first = await refresh_profile(stores, learner.id, NOW)
     assert first is not None and first.version == 1
-    assert await refresh_profile(profiles, learner.id, NOW) is None  # nothing new
+    assert await refresh_profile(stores, learner.id, NOW) is None  # nothing new
 
     profiles.next_inputs = ProfileInputs(cefr="A2", window_days=7, quiz_answers=3, quiz_correct=2)
-    second = await refresh_profile(profiles, learner.id, NOW)
+    second = await refresh_profile(stores, learner.id, NOW)
     assert second is not None and second.version == 2
     assert second.profile.stats.quiz_accuracy == 0.667
 
 
-async def test_refresh_keeps_the_reflectors_notes() -> None:
+def reflection(at: datetime, until_error_id: int = 0) -> Reflection:
+    point = FocusPoint(
+        item_keys=["there_is_are:core"],
+        pattern_ru="Путает there is и it is.",
+        contrast_ru="There is — что-то есть где-то.",
+        error_type="target_form",
+        evidence_error_ids=[1],
+    )
+    return Reflection(focus_points=[point], based_on_errors=3, until_error_id=until_error_id, reflected_at=at)
+
+
+def errors_on_one_item(count: int, first_id: int = 1) -> ProfileInputs:
+    return ProfileInputs(
+        cefr="A2",
+        window_days=7,
+        errors=[error(first_id + n, 7, "target_form", hours_ago=n + 1) for n in range(count)],
+        items={7: item(7, "there_is_are")},
+    )
+
+
+async def test_refresh_keeps_the_reflection_when_none_is_due() -> None:
     stores, learners, _ = fake_stores()
     learner = await learners.get_or_create("42", "A2")
     profiles = fake_profiles(stores)
-    first = await refresh_profile(profiles, learner.id, NOW)
+    first = await refresh_profile(stores, learner.id, NOW)
     assert first is not None
+    kept = reflection(NOW - timedelta(hours=2))
     profiles.versions[learner.id][-1] = first.model_copy(
-        update={"profile": first.profile.model_copy(update={"notes_ru": "Путает there is и it is."})}
+        update={"profile": first.profile.model_copy(update={"reflection": kept})}
     )
 
-    profiles.next_inputs = ProfileInputs(cefr="A2", window_days=7, lessons_sent=1)
-    updated = await refresh_profile(profiles, learner.id, NOW)
+    async def must_not_run(request: ReflectionRequest) -> Reflection:
+        raise AssertionError("a reflection two hours old is not redone")
 
-    assert updated is not None and updated.profile.notes_ru == "Путает there is и it is."
+    profiles.next_inputs = errors_on_one_item(5)
+    updated = await refresh_profile(stores, learner.id, NOW, reflect=must_not_run)
+
+    assert updated is not None and updated.profile.reflection == kept
+
+
+async def test_new_errors_get_a_reflection_that_lands_in_the_profile() -> None:
+    stores, learners, _ = fake_stores()
+    learner = await learners.get_or_create("42", "A2")
+    profiles = fake_profiles(stores)
+    profiles.next_inputs = errors_on_one_item(3)
+    seen: list[ReflectionRequest] = []
+
+    async def reflect(request: ReflectionRequest) -> Reflection:
+        seen.append(request)
+        return reflection(request.now, until_error_id=3)
+
+    record = await refresh_profile(stores, learner.id, NOW, reflect=reflect)
+
+    assert record is not None and record.profile.reflection is not None
+    assert record.profile.reflection.focus_keys == {"there_is_are:core"}
+    [request] = seen
+    assert request.previous is None and len(request.inputs.errors) == 3
+
+
+async def test_a_failed_reflection_keeps_the_previous_one() -> None:
+    stores, learners, _ = fake_stores()
+    learner = await learners.get_or_create("42", "A2")
+    profiles = fake_profiles(stores)
+    first = await refresh_profile(stores, learner.id, NOW)
+    assert first is not None
+    old = reflection(NOW - timedelta(days=2))
+    profiles.versions[learner.id][-1] = first.model_copy(
+        update={"profile": first.profile.model_copy(update={"reflection": old})}
+    )
+
+    async def broken(request: ReflectionRequest) -> Reflection:
+        raise LLMUnavailable("overloaded")
+
+    profiles.next_inputs = errors_on_one_item(4, first_id=10)
+    updated = await refresh_profile(stores, learner.id, NOW, reflect=broken)
+
+    assert updated is not None and updated.profile.reflection == old
+
+
+def test_only_a_current_reflection_steers_anything() -> None:
+    profile = build_profile(ProfileInputs(cefr="A2", window_days=7, reflection=reflection(NOW - timedelta(days=15))))
+    assert current_reflection(profile, NOW) is None
+    fresh = profile.model_copy(update={"reflection": reflection(NOW - timedelta(days=1))})
+    assert current_reflection(fresh, NOW) == fresh.reflection
+    assert current_reflection(None, NOW) is None

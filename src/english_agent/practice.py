@@ -45,6 +45,7 @@ from english_agent.practice_select import (
     bank_from_record,
     bank_from_step,
 )
+from english_agent.profile import current_reflection
 from english_agent.storage.repositories import PracticeStore, Stores
 from english_agent.telegram.render import render_quiz_intro, render_translation_task
 from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError
@@ -145,6 +146,8 @@ class _Day:
     today: StepBank
     earlier: dict[int, StepBank]  # the topic's earlier main steps, by item id
     candidates: list[Candidate]
+    focus: frozenset[str]  # item keys of the Reflector's current focus points
+    profile_version: int | None  # the profile version the focus comes from
 
 
 async def _day(stores: Stores, learner: LearnerRecord, record: LessonRecord, now: datetime) -> _Day | None:
@@ -198,7 +201,15 @@ async def _day(stores: Stores, learner: LearnerRecord, record: LessonRecord, now
         )
         for card in older
     ]
-    return _Day(today=today, earlier=earlier, candidates=candidates)
+    latest = await stores.profiles.latest(learner.id)
+    reflection = current_reflection(latest.profile if latest is not None else None, now)
+    return _Day(
+        today=today,
+        earlier=earlier,
+        candidates=candidates,
+        focus=reflection.focus_keys if reflection is not None else frozenset(),
+        profile_version=latest.version if latest is not None else None,
+    )
 
 
 async def _banks_for(
@@ -250,7 +261,7 @@ async def deliver_practice_for(
     rng = rng or random.Random()
     asked = await stores.practice.asked(learner.id, now - ASKED_WINDOW)
     if kind == "quiz":
-        plan = plan_quiz(day.candidates, now)
+        plan = plan_quiz(day.candidates, now, focus=day.focus)
         picks = [plan.previous] if plan.previous is not None else []
         chosen = await _banks_for(stores, learner, day, picks, len(picks), lambda bank: bool(bank.own_questions))
         chosen += await _banks_for(
@@ -260,12 +271,12 @@ async def deliver_practice_for(
         item_count = len(block.questions)
     else:
         wrong = await stores.practice.wrong_quiz_items(record.id)
-        ranked = plan_translation(day.candidates, now, wrong_today=wrong)
+        ranked = plan_translation(day.candidates, now, wrong_today=wrong, focus=day.focus)
         other = await _banks_for(stores, learner, day, ranked, 1, lambda bank: bool(bank.sentences))
         block = assemble_translation(today_bank, other[0] if other else None, asked=asked, rng=rng)
         item_count = len(block.sentences)
     provenance = build_provenance(component="planner", schema_version=SCHEMA_VERSIONS["practice_block"])
-    block = block.model_copy(update={"provenance": provenance})
+    block = block.model_copy(update={"provenance": provenance, "profile_version": day.profile_version})
     delivery = await stores.practice.claim_delivery(record.id, kind, item_count, payload=block.model_dump(mode="json"))
     if delivery is None:
         return None

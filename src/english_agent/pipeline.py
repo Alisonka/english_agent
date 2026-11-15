@@ -41,7 +41,7 @@ from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_cu
 from english_agent.models.schedule import local_now
 from english_agent.models.storage import ErrorRecord, ItemAccuracy, LearnerRecord, LessonContentRecord
 from english_agent.planning import lesson_due
-from english_agent.profile import weak_points_for_topic
+from english_agent.profile import current_reflection, weak_points_for_topic
 from english_agent.progression import NextStep, TopicProgress, is_done, next_step, reteach_candidate, topic_progress
 from english_agent.research.sitemaps import SitemapCache
 from english_agent.session_runner import run_topic_session
@@ -357,7 +357,10 @@ async def _send_cheat_sheet(runtime: Runtime, learner: LearnerRecord, level: Cef
         for error in await stores.practice.errors_for_items(learner.id, list(key_by_id)):
             if error.item_id is not None and error.item_id in key_by_id:
                 errors.setdefault(key_by_id[error.item_id], []).append(error)
-        weak = weak_points_for_topic(topic_content.steps, accuracy, errors)
+        latest = await stores.profiles.latest(learner.id)
+        reflection = current_reflection(latest.profile if latest is not None else None, datetime.now(UTC))
+        focus = reflection.focus_points if reflection is not None else []
+        weak = weak_points_for_topic(topic_content.steps, accuracy, errors, focus)
         message_ids = [
             await runtime.sender.send_text(learner.telegram_chat_id, message)
             for message in render_cheat_sheet(topic_content.summary, weak)

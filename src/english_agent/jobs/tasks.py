@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 LESSON_KEY_TTL = 30 * 60
 PRACTICE_KEY_TTL = 10 * 60
 GRADING_KEY_TTL = 10 * 60
-PROFILE_KEY_TTL = 60
+PROFILE_KEY_TTL = 5 * 60  # a refresh may include a Reflector call
 CONTENT_KEY_TTL = 40 * 60
 LESSON_TIMEOUT_SECONDS = 25 * 60  # research + writing + sending; past this the claim is taken over
 
@@ -108,13 +108,15 @@ async def deliver_practice(learner_id: int, day: str, deps: WorkerDeps = TaskiqD
 @broker.task(task_name="grade_translation", retry_on_error=True)
 async def grade_translation(answer_id: int, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> bool:
     async with _job(deps, grading_key(answer_id), answer_id=answer_id):
-        return await grade_answer(deps.runtime.stores, deps.runtime.sender, deps.grade, answer_id, retry_transient=True)
+        return await grade_answer(
+            deps.runtime.stores, deps.runtime.sender, deps.grade, answer_id, retry_transient=True, reflect=deps.reflect
+        )
 
 
 @broker.task(task_name="refresh_profile", retry_on_error=True)
 async def refresh_profile(learner_id: int, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> None:
     async with _job(deps, profile_key(learner_id), learner_id=learner_id):
-        await refresh_profile_safely(deps.runtime.stores.profiles, learner_id)
+        await refresh_profile_safely(deps.runtime.stores, learner_id, deps.reflect)
 
 
 @broker.task(task_name="prewarm_content", schedule=[{"cron": "17 */6 * * *"}])

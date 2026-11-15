@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson, Source
 from english_agent.models.practice import QuizQuestion, TranslationGrade, TranslationTask
-from english_agent.models.profile import LearnerProfile
+from english_agent.models.profile import LearnerProfile, Reflection
 from english_agent.models.run import RunReport
 from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.topic import LessonStep, TopicContent
@@ -262,8 +262,9 @@ class PracticeDeliveryRecord(BaseModel):
 
 PracticeSource = Literal["today", "previous", "review"]
 # Why the Planner chose an item: today's step, the topic's least-recalled earlier step, an item due
-# for review, one the learner keeps getting wrong, one missed in today's quiz, or the least recalled.
-PlanReason = Literal["today", "previous", "due", "weak", "wrong_today", "least_recalled"]
+# for review, one the learner keeps getting wrong, one missed in today's quiz, the least recalled,
+# or one of the Reflector's focus points (due or weak).
+PlanReason = Literal["today", "previous", "due", "weak", "wrong_today", "least_recalled", "focus"]
 
 
 class AssembledQuestion(BaseModel):
@@ -298,8 +299,9 @@ class PracticeBlock(BaseModel):
     kind: Literal["quiz", "translation"]
     questions: list[AssembledQuestion] = Field(default_factory=list)
     sentences: list[AssembledSentence] = Field(default_factory=list)
-    # Code-owned: the Planner that chose the items; None for blocks assembled before it.
+    # Code-owned: the Planner that chose the items, and the profile version whose focus it used.
     provenance: Provenance | None = None
+    profile_version: int | None = None
 
 
 class SentStep(BaseModel):
@@ -417,6 +419,7 @@ class GradingInput(BaseModel):
     cefr: Cefr
     topic_id: str
     sentences: list[GradingSentence]
+    learner: Reflection | None = None  # the Reflector's current reading of the learner, for the explanations
 
 
 class GradingTask(BaseModel):
@@ -453,4 +456,4 @@ class ProfileInputs(BaseModel):
     translation_grades: list[TranslationGrade] = Field(default_factory=list)  # graded inside the window
     cards: int = 0
     due_cards: int = 0
-    notes_ru: str = ""  # carried over from the latest stored version
+    reflection: Reflection | None = None  # carried over from the latest stored version, or a new one

@@ -1,29 +1,38 @@
 """Building and refreshing the learner profile from what the database already knows.
 
 `build_profile` is pure (inputs in, profile out) so the rules are unit-testable; `refresh_profile`
-reads the inputs through the store and appends a new version only when something changed, so the
-`learner_profiles` history stays meaningful.
+reads the inputs through the store, lets the Reflector read the new errors when a reflection is
+due, and appends a new version only when something changed, so the `learner_profiles` history
+stays meaningful.
 """
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from datetime import datetime
 
+from english_agent.llm import LLMError, LLMWriteError
+from english_agent.metrics import REFLECTIONS
 from english_agent.models.profile import (
     MAX_ERROR_PATTERNS,
     MAX_WEAK_POINTS,
     PROFILE_WINDOW_DAYS,
     ErrorPattern,
+    FocusPoint,
     LearnerProfile,
     ProfileStats,
+    Reflection,
     TopicWeakPoint,
     WeakPoint,
 )
 from english_agent.models.storage import ErrorRecord, ItemAccuracy, LearnerProfileRecord, ProfileInputs
 from english_agent.models.topic import LessonStep
-from english_agent.storage.repositories import ProfileStore
+from english_agent.reflector import ReflectionRequest, Reflector, reflection_due
+from english_agent.storage.repositories import Stores
 from english_agent.versions import SCHEMA_VERSIONS, build_provenance
+
+log = logging.getLogger(__name__)
 
 
 def _ratio(correct: int, total: int) -> float | None:
@@ -81,7 +90,7 @@ def build_profile(inputs: ProfileInputs) -> LearnerProfile:
             cards=inputs.cards,
             due_cards=inputs.due_cards,
         ),
-        notes_ru=inputs.notes_ru,
+        reflection=inputs.reflection,
         provenance=build_provenance(component="profile", schema_version=SCHEMA_VERSIONS["learner_profile"]),
     )
 
@@ -90,12 +99,15 @@ def weak_points_for_topic(
     steps: list[LessonStep],
     accuracy: dict[str, ItemAccuracy],
     errors: dict[str, list[ErrorRecord]],
+    focus: list[FocusPoint] | None = None,
 ) -> list[TopicWeakPoint]:
     """The steps of a finished topic the learner struggled with, weakest first (for the cheat sheet).
 
     A step counts as weak if it has any error or any wrong review. `accuracy` and `errors` are keyed
-    by item key (`<topic>:<slug>`). An empty result means the topic went without a stumble.
+    by item key (`<topic>:<slug>`); a current Reflector `focus` point on a step adds its hint. An
+    empty result means the topic went without a stumble.
     """
+    hints = {key: point.contrast_ru for point in reversed(focus or []) for key in point.item_keys}
     points: list[TopicWeakPoint] = []
     for step in steps:
         measured = accuracy.get(step.item_key)
@@ -109,20 +121,55 @@ def weak_points_for_topic(
             example = f"{latest.original} -> {latest.corrected}"
         points.append(
             TopicWeakPoint(
-                title_ru=step.title_ru, key_idea_ru=step.message.key_idea_ru, accuracy=ratio, example=example
+                title_ru=step.title_ru,
+                key_idea_ru=step.message.key_idea_ru,
+                accuracy=ratio,
+                example=example,
+                contrast_ru=hints.get(step.item_key),
             )
         )
     points.sort(key=lambda point: (point.accuracy is None, point.accuracy if point.accuracy is not None else 0.0))
     return points
 
 
-async def refresh_profile(profiles: ProfileStore, learner_id: int, now: datetime) -> LearnerProfileRecord | None:
-    """Recompute the profile; store it as a new version if it differs from the latest one."""
+async def refresh_profile(
+    stores: Stores, learner_id: int, now: datetime, *, reflect: Reflector | None = None
+) -> LearnerProfileRecord | None:
+    """Recompute the profile (and the reflection, when one is due); store it as a new version if it changed."""
+    profiles = stores.profiles
     latest = await profiles.latest(learner_id)
     inputs = await profiles.inputs(learner_id, now, window_days=PROFILE_WINDOW_DAYS)
-    if latest is not None:
-        inputs = inputs.model_copy(update={"notes_ru": latest.profile.notes_ru})
-    profile = build_profile(inputs)
+    reflection = latest.profile.reflection if latest is not None else None
+    if reflect is not None and reflection_due(reflection, inputs.errors, now):
+        reflection = await _reflect(stores, learner_id, inputs, reflection, now, reflect)
+    profile = build_profile(inputs.model_copy(update={"reflection": reflection}))
     if latest is not None and latest.profile.same_as(profile):
         return None
     return await profiles.append(learner_id, profile)
+
+
+async def _reflect(
+    stores: Stores,
+    learner_id: int,
+    inputs: ProfileInputs,
+    previous: Reflection | None,
+    now: datetime,
+    reflect: Reflector,
+) -> Reflection | None:
+    """A new reflection, or the previous one when the Reflector fails (logged, never raised)."""
+    accuracy = await stores.cards.item_accuracy(learner_id, list(inputs.items))
+    try:
+        reflection = await reflect(ReflectionRequest(inputs=inputs, accuracy=accuracy, previous=previous, now=now))
+    except (LLMError, LLMWriteError, ValueError) as error:
+        REFLECTIONS.labels("failed").inc()
+        log.warning("reflection failed for learner %s: %s: %s", learner_id, type(error).__name__, error)
+        return previous
+    REFLECTIONS.labels("written").inc()
+    log.info("reflection for learner %s: %d focus point(s)", learner_id, len(reflection.focus_points))
+    return reflection
+
+
+def current_reflection(profile: LearnerProfile | None, now: datetime) -> Reflection | None:
+    """The profile's reflection while it is current: what the grader, the Planner and the cheat sheet use."""
+    reflection = profile.reflection if profile is not None else None
+    return reflection if reflection is not None and reflection.is_current(now) else None
