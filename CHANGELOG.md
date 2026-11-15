@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2](https://github.com/Alisonka/english_agent/compare/v0.1.1...v0.1.2) (2026-11-15)
+
+
+### Added
+
+* **generation:** planner, step writer and summary writer ([1e212f6](https://github.com/Alisonka/english_agent/commit/1e212f6665e9a9c2be1ff337c139babe4f689a98))
+* **models:** topic plan, steps, summary and topic content ([8da7d50](https://github.com/Alisonka/english_agent/commit/8da7d5055abd0648dda7bf109a19b4afd7617165))
+* **pipeline:** teach topics in steps, with cumulative practice and a cheat sheet ([366c719](https://github.com/Alisonka/english_agent/commit/366c719a9f5669b8635b8ab65e0afadad8687428))
+* **practice:** cumulative quiz and translation selection from step banks ([401c2c5](https://github.com/Alisonka/english_agent/commit/401c2c55e88a3ce3be98dedffc210210e3a02033))
+* **progression:** step ordering, re-teach, step rendering and topic weak points ([a55c03d](https://github.com/Alisonka/english_agent/commit/a55c03dd4bf330c301fcaec344158365cc31815e))
+* **storage:** step columns, practice payload, progress and accuracy queries ([c92ead3](https://github.com/Alisonka/english_agent/commit/c92ead383369095be974b86c2eca02236e8b34aa))
+
 ## [0.1.1](https://github.com/Alisonka/english_agent/compare/v0.1.0...v0.1.1) (2026-11-13)
 
 
