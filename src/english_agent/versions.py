@@ -27,22 +27,29 @@ from english_agent import __version__
 # Schema versions. Bump the relevant entry whenever the corresponding model's
 # shape changes in a way that downstream consumers must notice.
 SCHEMA_VERSIONS: dict[str, int] = {
-    "lesson": 3,  # v3: added quiz and translation (practice sent after the lesson)
+    "lesson": 3,  # v3: added quiz and translation; frozen — legacy payloads only, superseded by topic steps
     "research_result": 1,
     "topic_notes": 1,
+    # A topic taught in steps (models/topic.py): plan, per-step message + bank, and the cheat sheet.
+    "topic_plan": 1,
+    "lesson_step": 1,
+    "topic_summary": 1,
+    "topic_content": 1,
     # Storage records (models/storage.py); the table shapes themselves are versioned by Alembic.
     "learner_record": 2,  # v2: schedule (timezone, send times, quiz delay), started_on, is_active, paused_at
     "learner_schedule": 1,
-    "lesson_record": 3,  # v2: content_id; v3: status pending/sending/skipped, claimed_at, attempts
-    "lesson_content_record": 1,
+    "lesson_record": 4,  # v2: content_id; v3: status/claim/attempts; v4: step columns + payload_kind
+    "lesson_content_record": 2,  # v2: payload_kind (lesson | topic)
     "item_record": 1,
     "error_record": 1,
     "card_record": 2,  # v2: last_reviewed_at, reviews
     "review_log_record": 2,  # v2: source_ref
-    "practice_delivery_record": 1,
+    "practice_delivery_record": 2,  # v2: payload (the day's assembled practice set)
+    "practice_block": 1,  # the day's assembled quiz/translation set stored in that payload
     "quiz_poll_record": 2,  # v2: item_id
     "translation_answer_record": 2,  # v2: grading_attempts, grading_started_at
     "translation_grade": 1,
+    "grading_input": 1,  # what the grader sees: the day's sentences and their per-step context
     "learner_profile": 1,
 }
 
@@ -53,6 +60,9 @@ PROMPT_FILES: dict[str, Path] = {
     "research_system": _PROMPTS_DIR / "research_system.md",
     "write_lesson_system": _PROMPTS_DIR / "write_lesson_system.md",
     "grade_translation_system": _PROMPTS_DIR / "grade_translation_system.md",
+    "plan_topic_system": _PROMPTS_DIR / "plan_topic_system.md",
+    "write_step_system": _PROMPTS_DIR / "write_step_system.md",
+    "write_summary_system": _PROMPTS_DIR / "write_summary_system.md",
 }
 
 

@@ -126,17 +126,34 @@ async def test_a_failed_send_frees_the_key_for_the_next_tick() -> None:
 
 def research(topic_id: str) -> ResearchResult:
     return ResearchResult.model_validate(
-        {"topic_id": topic_id, "status": "found", "message": "ok", "sites_checked": [], "steps": 0, "trajectory": []}
+        {
+            "topic_id": topic_id,
+            "status": "found",
+            "message": "ok",
+            "notes": {
+                "site": "skysmart",
+                "source": {"url": "https://skysmart.ru/x", "title": "t", "accessed_at": "2026-10-16"},
+                "page_title": "t",
+                "summary_ru": "Короткая сводка по теме для теста доставки урока агентом.",
+                "rule_points": ["правило один", "правило два", "правило три"],
+                "examples": [{"en": "There is a cat."}, {"en": "There are cats."}],
+            },
+            "sites_checked": [],
+            "steps": 0,
+            "trajectory": [],
+        }
     )
 
 
 async def test_deliver_lesson_sends_and_clears_its_key(monkeypatch: pytest.MonkeyPatch, lesson: Lesson) -> None:
+    from conftest import topic_content_payload
     from english_agent import pipeline
+    from english_agent.models.topic import TopicContent
 
-    async def generate(topic: Any, *args: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
-        return research(topic.id), lesson.model_copy(update={"topic_id": topic.id})
+    async def generate(topic: Any, *args: Any, **kwargs: Any) -> tuple[ResearchResult, TopicContent]:
+        return research(topic.id), TopicContent.model_validate(topic_content_payload(topic.id))
 
-    monkeypatch.setattr(pipeline, "generate_lesson", generate)
+    monkeypatch.setattr(pipeline, "generate_topic", generate)
     stores, learners, lessons = fake_stores()
     student = learners.started("42", date(2026, 11, 1))
     telegram = FakeTelegram()

@@ -7,7 +7,29 @@ import pytest
 from english_agent.grader import GradeError, _submit_tool, grade_translation
 from english_agent.llm import AssistantTurn, ToolCall
 from english_agent.models.lesson import Lesson
+from english_agent.models.storage import GradingInput, GradingSentence
 from fakes import ScriptedLLM
+
+
+def grading_input(lesson: Lesson) -> GradingInput:
+    return GradingInput(
+        title_en=lesson.title_en,
+        title_ru=lesson.title_ru,
+        cefr=lesson.cefr,
+        topic_id=lesson.topic_id,
+        sentences=[
+            GradingSentence(
+                n=index,
+                ru=task.ru,
+                reference_en=task.reference_en,
+                focus_ru=task.focus_ru,
+                key_idea_ru=lesson.key_idea_ru,
+                form=lesson.form,
+            )
+            for index, task in enumerate(lesson.translation, start=1)
+        ],
+    )
+
 
 GOOD: dict[str, Any] = {
     "sentences": [
@@ -39,7 +61,7 @@ def submit(args: dict[str, Any]) -> AssistantTurn:
 async def test_grade_has_code_owned_provenance_and_sees_the_task(lesson: Lesson) -> None:
     llm = ScriptedLLM([submit({**GOOD, "provenance": {"component": "fake"}})])
 
-    grade = await grade_translation(llm, lesson, "There is a window in my room.")
+    grade = await grade_translation(llm, grading_input(lesson), "There is a window in my room.")
 
     assert grade.correct_count == 1
     assert grade.provenance is not None and grade.provenance.component == "grader"
@@ -54,7 +76,7 @@ async def test_invalid_grade_is_fed_back_once(lesson: Lesson) -> None:
     bad = {**GOOD, "sentences": GOOD["sentences"][:2]}
     llm = ScriptedLLM([submit(bad), submit(GOOD)])
 
-    await grade_translation(llm, lesson, "answer")
+    await grade_translation(llm, grading_input(lesson), "answer")
 
     assert llm.transcripts[1][-1]["role"] == "tool"
     assert "sentences" in llm.transcripts[1][-1]["content"]
@@ -67,9 +89,10 @@ async def test_grader_gives_up_after_attempts(lesson: Lesson) -> None:
     }
     llm = ScriptedLLM([submit(fixed_without_reason), submit(fixed_without_reason)])
     with pytest.raises(GradeError):
-        await grade_translation(llm, lesson, "answer")
+        await grade_translation(llm, grading_input(lesson), "answer")
 
 
-async def test_lesson_without_translation_is_rejected(lesson: Lesson) -> None:
+async def test_task_without_sentences_is_rejected(lesson: Lesson) -> None:
+    empty = grading_input(lesson).model_copy(update={"sentences": []})
     with pytest.raises(GradeError):
-        await grade_translation(ScriptedLLM([]), lesson.model_copy(update={"translation": []}), "answer")
+        await grade_translation(ScriptedLLM([]), empty, "answer")

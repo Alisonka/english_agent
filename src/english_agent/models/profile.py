@@ -27,6 +27,15 @@ class WeakPoint(BaseModel):
     last_error_at: datetime
 
 
+class TopicWeakPoint(BaseModel):
+    """A step of a just-finished topic the learner struggled with, for the cheat sheet."""
+
+    title_ru: str
+    key_idea_ru: str
+    accuracy: float | None = Field(default=None, ge=0, le=1)  # None when the step was never reviewed
+    example: str | None = None  # the latest "<original> -> <corrected>" for the step, if any
+
+
 class ErrorPattern(BaseModel):
     """A kind of error (the grader's `error_type` or the quiz kind) and how often it happened."""
 

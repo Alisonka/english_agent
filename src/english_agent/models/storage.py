@@ -11,17 +11,20 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson, Source
-from english_agent.models.practice import QuizQuestion, TranslationGrade
+from english_agent.models.practice import QuizQuestion, TranslationGrade, TranslationTask
 from english_agent.models.profile import LearnerProfile
 from english_agent.models.schedule import LearnerSchedule
+from english_agent.models.topic import LessonStep, TopicContent
 
 LessonStatus = Literal["pending", "sending", "sent", "failed", "skipped"]
 LessonClaim = Literal["claimed", "resume", "busy", "done"]
 ContentStatus = Literal["generating", "ready", "failed"]
 ClaimOutcome = Literal["ready", "claimed", "busy", "exhausted"]
 ErrorKind = Literal["quiz", "text"]
-PracticeKind = Literal["quiz", "translation"]
+PracticeKind = Literal["quiz", "translation", "summary"]
 TranslationAnswerStatus = Literal["pending", "graded", "failed"]
+PayloadKind = Literal["lesson", "step"]
+StepVariant = Literal["main", "alt"]
 
 
 class LearnerRecord(BaseModel):
@@ -58,7 +61,11 @@ class LearnerRecord(BaseModel):
 
 
 class LessonRecord(BaseModel):
-    """One learner's lesson for one day; `lesson` is None when the run failed."""
+    """One learner's lesson for one day; `payload` is None when the run failed.
+
+    The `payload` JSONB holds a whole `Lesson` (legacy days, `payload_kind="lesson"`) or one
+    `LessonStep` (`payload_kind="step"`); read it through the `lesson` / `step` properties.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -68,16 +75,43 @@ class LessonRecord(BaseModel):
     topic_id: str
     cefr: Cefr
     curriculum_version: int | None
-    schema_version: int  # SCHEMA_VERSIONS["lesson"] the payload was written with
+    schema_version: int  # the schema version the payload was written with
     status: LessonStatus
-    lesson: Lesson | None
-    error: str | None
-    telegram_message_ids: list[int]
+    payload: dict[str, Any] | None = None
+    error: str | None = None
+    telegram_message_ids: list[int] = Field(default_factory=list)
     created_at: datetime
-    sent_at: datetime | None
+    sent_at: datetime | None = None
     content_id: int | None = None  # the shared `LessonContentRecord` that was sent; None for older lessons
     claimed_at: datetime | None = None  # a worker is delivering it since then (None: nobody holds it)
     attempts: int = 0  # delivery attempts so far
+    # Which step of the topic this day is. Legacy rows are step 1 of 1, slug "core", a main variant.
+    payload_kind: PayloadKind = "lesson"
+    step_index: int = 1
+    step_count: int = 1
+    step_slug: str = "core"
+    variant: StepVariant = "main"
+
+    @property
+    def lesson(self) -> "Lesson | None":
+        """The legacy whole-topic lesson, when this day holds one."""
+        if self.payload_kind != "lesson" or self.payload is None:
+            return None
+        return Lesson.model_validate(self.payload)
+
+    @property
+    def step(self) -> "LessonStep | None":
+        """The step this day teaches, when it holds one."""
+        if self.payload_kind != "step" or self.payload is None:
+            return None
+        return LessonStep.model_validate(self.payload)
+
+    @property
+    def item_key(self) -> str:
+        """The learnable item this day teaches: the topic core item, or the step item."""
+        if self.payload_kind == "lesson":
+            return core_item_key(self.topic_id)
+        return f"{self.topic_id}:{self.step_slug}"
 
 
 class LessonState(BaseModel):
@@ -106,13 +140,26 @@ class LessonContentRecord(BaseModel):
     content_key: str
     status: ContentStatus
     schema_version: int
-    lesson: Lesson | None
+    payload_kind: Literal["lesson", "topic"] = "lesson"  # "topic" holds a whole TopicContent
+    payload: dict[str, Any] | None = None
     error: str | None
     attempts: int
     claimed_at: datetime | None
     claimed_by: str | None
     generated_at: datetime | None
     created_at: datetime
+
+    @property
+    def lesson(self) -> "Lesson | None":
+        if self.payload_kind != "lesson" or self.payload is None:
+            return None
+        return Lesson.model_validate(self.payload)
+
+    @property
+    def topic(self) -> "TopicContent | None":
+        if self.payload_kind != "topic" or self.payload is None:
+            return None
+        return TopicContent.model_validate(self.payload)
 
 
 CORE_SLUG = "core"
@@ -207,6 +254,74 @@ class PracticeDeliveryRecord(BaseModel):
     sent_at: datetime | None
     telegram_message_ids: list[int]
     completed_at: datetime | None
+    payload: dict[str, Any] | None = None  # the assembled PracticeBlock (typed in the practice group)
+
+
+PracticeSource = Literal["today", "previous", "review"]
+
+
+class AssembledQuestion(BaseModel):
+    """One quiz question chosen for a day, tagged with the item it checks and where it came from."""
+
+    question: QuizQuestion
+    item_id: int | None
+    item_key: str
+    source: PracticeSource
+
+
+class AssembledSentence(BaseModel):
+    """One translation sentence chosen for a day, with the context the grader needs."""
+
+    task: TranslationTask
+    item_id: int | None
+    item_key: str
+    title_en: str
+    key_idea_ru: str | None = None
+    form: str | None = None
+    source: PracticeSource
+
+
+class PracticeBlock(BaseModel):
+    """The day's assembled practice set, stored in `practice_deliveries.payload`.
+
+    A quiz block carries `questions`, a translation block carries `sentences`; the other list is empty.
+    """
+
+    kind: Literal["quiz", "translation"]
+    questions: list[AssembledQuestion] = Field(default_factory=list)
+    sentences: list[AssembledSentence] = Field(default_factory=list)
+
+
+class SentStep(BaseModel):
+    """A sent step of a topic, for progression and re-teach decisions (no payload)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    lesson_id: int
+    topic_id: str
+    lesson_date: date
+    step_index: int
+    step_count: int
+    step_slug: str
+    variant: StepVariant
+    content_id: int | None = None
+
+    @property
+    def item_key(self) -> str:
+        return f"{self.topic_id}:{self.step_slug}"
+
+
+class ItemAccuracy(BaseModel):
+    """How a learner has done on one item across all its reviews: counts and distinct review days."""
+
+    item_id: int
+    checks: int
+    correct: int
+    days: int  # distinct calendar days the item was reviewed on (UTC)
+
+    @property
+    def ratio(self) -> float | None:
+        return self.correct / self.checks if self.checks else None
 
 
 class QuizPollRecord(BaseModel):
@@ -254,14 +369,34 @@ class OpenTranslationTask(BaseModel):
 
     learner_id: int
     delivery: PracticeDeliveryRecord
-    lesson: Lesson
+
+
+class GradingSentence(BaseModel):
+    """One sentence to grade, with the step context that tells the grader what it checks."""
+
+    n: int = Field(ge=1)
+    ru: str
+    reference_en: str
+    focus_ru: str
+    key_idea_ru: str | None = None
+    form: str | None = None
+
+
+class GradingInput(BaseModel):
+    """What the grader sees: the day's sentences and their per-step context (not a whole lesson)."""
+
+    title_en: str
+    title_ru: str
+    cefr: Cefr
+    topic_id: str
+    sentences: list[GradingSentence]
 
 
 class GradingTask(BaseModel):
-    """What grading one translation answer needs: the answer, its lesson and where to reply."""
+    """What grading one translation answer needs: the answer, its input and where to reply."""
 
     answer: TranslationAnswerRecord
-    lesson: Lesson
+    input: GradingInput
     telegram_chat_id: str
 
 

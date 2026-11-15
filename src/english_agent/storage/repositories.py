@@ -28,7 +28,10 @@ from english_agent.models.storage import (
     CardRecord,
     ClaimOutcome,
     ErrorRecord,
+    GradingInput,
+    GradingSentence,
     GradingTask,
+    ItemAccuracy,
     ItemDraft,
     ItemRecord,
     LearnerProfileRecord,
@@ -39,15 +42,18 @@ from english_agent.models.storage import (
     LessonState,
     LessonStatus,
     OpenTranslationTask,
+    PracticeBlock,
     PracticeDeliveryRecord,
     PracticeKind,
     ProfileInputs,
     QuizPollRecord,
     QuizResult,
+    SentStep,
     TranslationAnswerRecord,
     core_item_key,
 )
-from english_agent.srs import ReviewScheduler, due_at, make_scheduler, quiz_rating, translation_rating
+from english_agent.models.topic import LessonStep, TopicContent
+from english_agent.srs import GOOD, ReviewScheduler, due_at, make_scheduler, quiz_rating, translation_rating
 from english_agent.storage.db import SessionFactory, make_engine, make_session_factory, session_scope
 from english_agent.storage.orm import (
     CardRow,
@@ -101,7 +107,7 @@ class LessonStore(Protocol):
         self,
         learner_id: int,
         day: date,
-        lesson: Lesson,
+        taught: Lesson | LessonStep,
         message_ids: list[int],
         *,
         curriculum_version: int | None,
@@ -117,6 +123,10 @@ class LessonStore(Protocol):
     async def statuses(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonStatus]: ...
 
     async def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]: ...
+
+    async def sent_steps(self, learner_id: int, cefr: Cefr) -> list[SentStep]: ...
+
+    async def taught_step(self, learner_id: int, item_key: str) -> LessonRecord | None: ...
 
     async def states(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonState]: ...
 
@@ -135,7 +145,7 @@ class LessonStore(Protocol):
 
     async def release(self, lesson_id: int) -> None: ...
 
-    async def start_sending(self, lesson_id: int, content_id: int, lesson: Lesson) -> LessonRecord: ...
+    async def start_sending(self, lesson_id: int, content_id: int, taught: Lesson | LessonStep) -> LessonRecord: ...
 
     async def add_message_id(self, lesson_id: int, message_id: int) -> None: ...
 
@@ -160,9 +170,11 @@ class LessonContentStore(Protocol):
         max_attempts: int,
     ) -> tuple[ClaimOutcome, LessonContentRecord]: ...
 
-    async def finish(self, content_id: int, lesson: Lesson) -> LessonContentRecord: ...
+    async def finish(self, content_id: int, content: Lesson | TopicContent) -> LessonContentRecord: ...
 
     async def fail(self, content_id: int, reason: str) -> LessonContentRecord: ...
+
+    async def get(self, content_id: int) -> LessonContentRecord | None: ...
 
     async def unavailable_topics(
         self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
@@ -176,12 +188,14 @@ class ItemStore(Protocol):
         self, draft: ItemDraft, *, source_lesson_id: int | None = None
     ) -> tuple[ItemRecord, bool]: ...
 
+    async def ids_for_keys(self, keys: list[str]) -> dict[str, int]: ...
+
 
 class PracticeStore(Protocol):
     async def delivery(self, lesson_id: int, kind: PracticeKind) -> PracticeDeliveryRecord | None: ...
 
     async def claim_delivery(
-        self, lesson_id: int, kind: PracticeKind, item_count: int
+        self, lesson_id: int, kind: PracticeKind, item_count: int, *, payload: dict[str, Any] | None = None
     ) -> PracticeDeliveryRecord | None: ...
 
     async def mark_sent(self, delivery_id: int, message_ids: list[int]) -> PracticeDeliveryRecord: ...
@@ -226,6 +240,14 @@ class PracticeStore(Protocol):
 
 class CardStore(Protocol):
     async def get(self, learner_id: int, item_id: int) -> CardRecord | None: ...
+
+    async def for_items(self, learner_id: int, item_ids: list[int]) -> list[CardRecord]: ...
+
+    async def due_or_weakest(
+        self, learner_id: int, now: datetime, *, exclude_topic_id: str
+    ) -> tuple[CardRecord, ItemRecord] | None: ...
+
+    async def item_accuracy(self, learner_id: int, item_ids: list[int]) -> dict[int, ItemAccuracy]: ...
 
     async def due(self, learner_id: int, now: datetime, *, limit: int = 20) -> list[CardRecord]: ...
 
@@ -337,6 +359,79 @@ async def _review_card(
 
 async def _core_item(session: AsyncSession, topic_id: str) -> ItemRow | None:
     return await session.scalar(select(ItemRow).where(ItemRow.key == core_item_key(topic_id)))
+
+
+def _taught_columns(taught: Lesson | LessonStep) -> dict[str, Any]:
+    """The `lessons` columns for a day that taught a whole legacy `Lesson` or one `LessonStep`."""
+    payload = taught.model_dump(mode="json")
+    if isinstance(taught, LessonStep):
+        return {
+            "topic_id": taught.topic_id,
+            "cefr": taught.cefr,
+            "payload": payload,
+            "payload_kind": "step",
+            "step_index": taught.index,
+            "step_count": taught.total,
+            "step_slug": taught.slug,
+            "variant": taught.variant,
+            "schema_version": SCHEMA_VERSIONS["lesson_step"],
+        }
+    return {
+        "topic_id": taught.topic_id,
+        "cefr": taught.cefr,
+        "payload": payload,
+        "payload_kind": "lesson",
+        "step_index": 1,
+        "step_count": 1,
+        "step_slug": CORE_SLUG,
+        "variant": "main",
+        "schema_version": SCHEMA_VERSIONS["lesson"],
+    }
+
+
+def _grading_input(lesson_row: LessonRow, delivery_row: PracticeDeliveryRow) -> GradingInput | None:
+    """What the grader sees for a day's translation: step-based from the delivery, else the legacy lesson."""
+    record = LessonRecord.model_validate(lesson_row)
+    block = PracticeBlock.model_validate(delivery_row.payload) if delivery_row.payload else None
+    if block is not None and block.sentences:
+        step = record.step
+        return GradingInput(
+            title_en=step.title_en if step is not None else record.topic_id,
+            title_ru=step.title_ru if step is not None else record.topic_id,
+            cefr=record.cefr,
+            topic_id=record.topic_id,
+            sentences=[
+                GradingSentence(
+                    n=index,
+                    ru=chosen.task.ru,
+                    reference_en=chosen.task.reference_en,
+                    focus_ru=chosen.task.focus_ru,
+                    key_idea_ru=chosen.key_idea_ru,
+                    form=chosen.form,
+                )
+                for index, chosen in enumerate(block.sentences, start=1)
+            ],
+        )
+    lesson = record.lesson
+    if lesson is None or not lesson.translation:
+        return None
+    return GradingInput(
+        title_en=lesson.title_en,
+        title_ru=lesson.title_ru,
+        cefr=lesson.cefr,
+        topic_id=lesson.topic_id,
+        sentences=[
+            GradingSentence(
+                n=index,
+                ru=task.ru,
+                reference_en=task.reference_en,
+                focus_ru=task.focus_ru,
+                key_idea_ru=lesson.key_idea_ru,
+                form=lesson.form,
+            )
+            for index, task in enumerate(lesson.translation, start=1)
+        ],
+    )
 
 
 class LearnerRepo:
@@ -459,26 +554,22 @@ class LessonRepo:
         self,
         learner_id: int,
         day: date,
-        lesson: Lesson,
+        taught: Lesson | LessonStep,
         message_ids: list[int],
         *,
         curriculum_version: int | None,
         content_id: int | None = None,
     ) -> LessonRecord:
-        # The payload is still written next to content_id, so code that predates shared content
-        # (and a rollback to it) keeps reading lessons.payload.
         return await self._save(
             learner_id,
             day,
-            topic_id=lesson.topic_id,
-            cefr=lesson.cefr,
             curriculum_version=curriculum_version,
             status="sent",
-            lesson=lesson.model_dump(mode="json"),
             error=None,
             telegram_message_ids=message_ids,
             sent_at=datetime.now(UTC),
             content_id=content_id,
+            **_taught_columns(taught),
         )
 
     async def record_failed(
@@ -491,7 +582,9 @@ class LessonRepo:
             cefr=cefr,
             curriculum_version=curriculum_version,
             status="failed",
-            lesson=None,
+            payload=None,
+            payload_kind="lesson",
+            schema_version=SCHEMA_VERSIONS["lesson"],
             error=reason,
             telegram_message_ids=[],
             sent_at=None,
@@ -526,6 +619,55 @@ class LessonRepo:
                 )
             )
             return set(rows)
+
+    async def sent_steps(self, learner_id: int, cefr: Cefr) -> list[SentStep]:
+        """Every step the learner has been sent at this level, oldest first (no payloads)."""
+        async with session_scope(self._sessions) as session:
+            rows = await session.execute(
+                select(
+                    LessonRow.id,
+                    LessonRow.topic_id,
+                    LessonRow.lesson_date,
+                    LessonRow.step_index,
+                    LessonRow.step_count,
+                    LessonRow.step_slug,
+                    LessonRow.variant,
+                    LessonRow.content_id,
+                )
+                .where(LessonRow.learner_id == learner_id, LessonRow.cefr == cefr, LessonRow.status == "sent")
+                .order_by(LessonRow.lesson_date, LessonRow.id)
+            )
+            return [
+                SentStep(
+                    lesson_id=row.id,
+                    topic_id=row.topic_id,
+                    lesson_date=row.lesson_date,
+                    step_index=row.step_index,
+                    step_count=row.step_count,
+                    step_slug=row.step_slug,
+                    variant=row.variant,
+                    content_id=row.content_id,
+                )
+                for row in rows
+            ]
+
+    async def taught_step(self, learner_id: int, item_key: str) -> LessonRecord | None:
+        """The learner's own main-variant row that taught `item_key` (`<topic>:<slug>`); the review bank source."""
+        topic_id, _, slug = item_key.partition(":")
+        async with session_scope(self._sessions) as session:
+            row = await session.scalar(
+                select(LessonRow)
+                .where(
+                    LessonRow.learner_id == learner_id,
+                    LessonRow.topic_id == topic_id,
+                    LessonRow.step_slug == slug,
+                    LessonRow.variant == "main",
+                    LessonRow.status == "sent",
+                )
+                .order_by(LessonRow.lesson_date.desc(), LessonRow.id.desc())
+                .limit(1)
+            )
+            return None if row is None else LessonRecord.model_validate(row)
 
     async def states(self, keys: list[tuple[int, date]]) -> dict[tuple[int, date], LessonState]:
         """The rows of these (learner id, day) keys without their payload, one query."""
@@ -625,13 +767,13 @@ class LessonRepo:
                 .values(claimed_at=None, attempts=func.greatest(LessonRow.attempts - 1, 0))
             )
 
-    async def start_sending(self, lesson_id: int, content_id: int, lesson: Lesson) -> LessonRecord:
+    async def start_sending(self, lesson_id: int, content_id: int, taught: Lesson | LessonStep) -> LessonRecord:
         async with session_scope(self._sessions) as session:
             row = await session.get_one(LessonRow, lesson_id, with_for_update=True)
             row.status, row.content_id, row.error = "sending", content_id, None
-            # The payload is still copied next to content_id: practice and older code read it from here.
-            row.lesson, row.schema_version = lesson.model_dump(mode="json"), SCHEMA_VERSIONS["lesson"]
-            row.topic_id, row.cefr = lesson.topic_id, lesson.cefr
+            # The payload is copied onto the day's row: practice and grading read it from here.
+            for name, value in _taught_columns(taught).items():
+                setattr(row, name, value)
             await session.flush()
             return LessonRecord.model_validate(row)
 
@@ -672,7 +814,6 @@ class LessonRepo:
 
     async def _save(self, learner_id: int, day: date, **values: Any) -> LessonRecord:
         """Insert the day's row, or overwrite an earlier failed attempt; a sent lesson is final."""
-        values["schema_version"] = SCHEMA_VERSIONS["lesson"]
         async with session_scope(self._sessions) as session:
             row = await self._find(session, learner_id, day)
             if row is None:
@@ -767,11 +908,14 @@ class LessonContentRepo:
             return "busy"
         return "claimed"
 
-    async def finish(self, content_id: int, lesson: Lesson) -> LessonContentRecord:
+    async def finish(self, content_id: int, content: Lesson | TopicContent) -> LessonContentRecord:
+        is_topic = isinstance(content, TopicContent)
         async with session_scope(self._sessions) as session:
             row = await session.get_one(LessonContentRow, content_id, with_for_update=True)
-            row.status, row.lesson, row.error = "ready", lesson.model_dump(mode="json"), None
-            row.schema_version, row.generated_at = SCHEMA_VERSIONS["lesson"], datetime.now(UTC)
+            row.status, row.payload, row.error = "ready", content.model_dump(mode="json"), None
+            row.payload_kind = "topic" if is_topic else "lesson"
+            row.schema_version = SCHEMA_VERSIONS["topic_content" if is_topic else "lesson"]
+            row.generated_at = datetime.now(UTC)
             await session.flush()
             return LessonContentRecord.model_validate(row)
 
@@ -782,6 +926,12 @@ class LessonContentRepo:
                 row.status, row.error = "failed", reason
             await session.flush()
             return LessonContentRecord.model_validate(row)
+
+    async def get(self, content_id: int) -> LessonContentRecord | None:
+        """A content row by id; used to reuse the topic a learner is already partway through."""
+        async with session_scope(self._sessions) as session:
+            row = await session.get(LessonContentRow, content_id)
+            return None if row is None else LessonContentRecord.model_validate(row)
 
     async def unavailable_topics(
         self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
@@ -833,6 +983,14 @@ class ItemRepo:
             assert row is not None
             return ItemRecord.model_validate(row), created_id is not None
 
+    async def ids_for_keys(self, keys: list[str]) -> dict[str, int]:
+        """Map each existing item key to its id, in one query (for resolving per-step accuracy)."""
+        if not keys:
+            return {}
+        async with session_scope(self._sessions) as session:
+            rows = await session.execute(select(ItemRow.key, ItemRow.id).where(ItemRow.key.in_(keys)))
+            return dict(rows.all())
+
 
 class CardRepo:
     """FSRS cards, one per learner and item. Practice rates them itself; this is for readers and replays."""
@@ -883,6 +1041,61 @@ class CardRepo:
                 .limit(limit)
             )
             return [CardRecord.model_validate(row) for row in rows]
+
+    async def for_items(self, learner_id: int, item_ids: list[int]) -> list[CardRecord]:
+        """The learner's cards for `item_ids` (those that exist), any order."""
+        if not item_ids:
+            return []
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(CardRow).where(CardRow.learner_id == learner_id, CardRow.item_id.in_(item_ids))
+            )
+            return [CardRecord.model_validate(row) for row in rows]
+
+    async def due_or_weakest(
+        self, learner_id: int, now: datetime, *, exclude_topic_id: str
+    ) -> tuple[CardRecord, ItemRecord] | None:
+        """A card to interleave from an older topic: the most overdue, else the least-recalled.
+
+        Excludes the topic being taught today, so the review slot always reaches back. None when the
+        learner has no card outside that topic.
+        """
+        async with session_scope(self._sessions) as session:
+            base = (
+                select(CardRow, ItemRow)
+                .join(ItemRow, CardRow.item_id == ItemRow.id)
+                .where(CardRow.learner_id == learner_id, ItemRow.topic_id != exclude_topic_id)
+            )
+            due = (await session.execute(base.where(CardRow.due_at <= now).order_by(CardRow.due_at).limit(1))).first()
+            if due is not None:
+                return CardRecord.model_validate(due[0]), ItemRecord.model_validate(due[1])
+            rows = (await session.execute(base)).all()
+            if not rows:
+                return None
+            card, item = min(rows, key=lambda pair: self._scheduler.retrievability(pair[0].fsrs_state, now))
+            return CardRecord.model_validate(card), ItemRecord.model_validate(item)
+
+    async def item_accuracy(self, learner_id: int, item_ids: list[int]) -> dict[int, ItemAccuracy]:
+        """Per item: how many reviews, how many were correct (rating >= Good), on how many UTC days."""
+        if not item_ids:
+            return {}
+        day = func.date(func.timezone("UTC", ReviewLogRow.reviewed_at))
+        async with session_scope(self._sessions) as session:
+            rows = await session.execute(
+                select(
+                    CardRow.item_id,
+                    func.count(ReviewLogRow.id).label("checks"),
+                    func.count(ReviewLogRow.id).filter(ReviewLogRow.rating >= GOOD).label("correct"),
+                    func.count(func.distinct(day)).label("days"),
+                )
+                .join(ReviewLogRow, ReviewLogRow.card_id == CardRow.id)
+                .where(CardRow.learner_id == learner_id, CardRow.item_id.in_(item_ids))
+                .group_by(CardRow.item_id)
+            )
+            return {
+                row.item_id: ItemAccuracy(item_id=row.item_id, checks=row.checks, correct=row.correct, days=row.days)
+                for row in rows
+            }
 
 
 class ProfileRepo:
@@ -1063,12 +1276,12 @@ class PracticeRepo:
             return None if row is None else PracticeDeliveryRecord.model_validate(row)
 
     async def claim_delivery(
-        self, lesson_id: int, kind: PracticeKind, item_count: int
+        self, lesson_id: int, kind: PracticeKind, item_count: int, *, payload: dict[str, Any] | None = None
     ) -> PracticeDeliveryRecord | None:
         """Reserve the block before sending it; None when it is already claimed (never send twice)."""
         statement = (
             insert(PracticeDeliveryRow)
-            .values(lesson_id=lesson_id, kind=kind, item_count=item_count)
+            .values(lesson_id=lesson_id, kind=kind, item_count=item_count, payload=payload)
             .on_conflict_do_nothing(index_elements=["lesson_id", "kind"])
             .returning(PracticeDeliveryRow.id)
         )
@@ -1204,12 +1417,11 @@ class PracticeRepo:
             answer = await session.scalar(
                 select(TranslationAnswerRow).where(TranslationAnswerRow.delivery_id == delivery.id)
             )
-            if (answer is not None and answer.status != "failed") or lesson.lesson is None:
+            if (answer is not None and answer.status != "failed") or lesson.payload is None:
                 return None
             return OpenTranslationTask(
                 learner_id=lesson.learner_id,
                 delivery=PracticeDeliveryRecord.model_validate(delivery),
-                lesson=Lesson.model_validate(lesson.lesson),
             )
 
     async def start_translation_answer(
@@ -1237,23 +1449,26 @@ class PracticeRepo:
             (await session.get_one(TranslationAnswerRow, answer_id)).progress_message_id = message_id
 
     async def translation_for_grading(self, answer_id: int) -> GradingTask | None:
-        """The answer with its lesson and chat; None for an unknown answer or a lesson without payload."""
+        """The answer, the day's sentences with their context, and the chat; None if nothing to grade."""
         async with session_scope(self._sessions) as session:
             found = (
                 await session.execute(
-                    select(TranslationAnswerRow, LessonRow.lesson, LearnerRow.telegram_chat_id)
+                    select(TranslationAnswerRow, PracticeDeliveryRow, LessonRow, LearnerRow.telegram_chat_id)
                     .join(PracticeDeliveryRow, PracticeDeliveryRow.id == TranslationAnswerRow.delivery_id)
                     .join(LessonRow, LessonRow.id == PracticeDeliveryRow.lesson_id)
                     .join(LearnerRow, LearnerRow.id == TranslationAnswerRow.learner_id)
                     .where(TranslationAnswerRow.id == answer_id)
                 )
             ).first()
-            if found is None or found[1] is None:
+            if found is None:
                 return None
-            answer, lesson, chat_id = found
+            answer, delivery, lesson, chat_id = found
+            grading_input = _grading_input(lesson, delivery)
+            if grading_input is None:
+                return None
             return GradingTask(
                 answer=TranslationAnswerRecord.model_validate(answer),
-                lesson=Lesson.model_validate(lesson),
+                input=grading_input,
                 telegram_chat_id=chat_id,
             )
 
@@ -1305,11 +1520,20 @@ class PracticeRepo:
             row.status, row.grade, row.error, row.graded_at = "graded", grade.model_dump(mode="json"), None, now
             delivery = await session.get_one(PracticeDeliveryRow, row.delivery_id)
             delivery.completed_at = now
-            item = await _core_item(session, (await session.get_one(LessonRow, delivery.lesson_id)).topic_id)
+            lesson_row = await session.get_one(LessonRow, delivery.lesson_id)
+            block = PracticeBlock.model_validate(delivery.payload) if delivery.payload else None
+            # Step days rate each sentence's own item; legacy days rate the topic's core item.
+            core = None if block is not None else await _core_item(session, lesson_row.topic_id)
+
+            def item_for(n: int) -> int | None:
+                if block is not None:
+                    return block.sentences[n - 1].item_id if 1 <= n <= len(block.sentences) else None
+                return core.id if core is not None else None
+
             session.add_all(
                 ErrorRow(
                     learner_id=row.learner_id,
-                    item_id=None if item is None else item.id,
+                    item_id=item_for(sentence.n),
                     kind="text",
                     original=sentence.learner_text,
                     corrected=sentence.corrected,
@@ -1321,13 +1545,14 @@ class PracticeRepo:
             )
             for sentence in grade.sentences:
                 rating = translation_rating(sentence.verdict)
-                if item is None or rating is None:
+                item_id = item_for(sentence.n)
+                if item_id is None or rating is None:
                     continue
                 await _review_card(
                     session,
                     self._scheduler,
                     learner_id=row.learner_id,
-                    item_id=item.id,
+                    item_id=item_id,
                     rating=rating,
                     at=now,
                     source="translation",

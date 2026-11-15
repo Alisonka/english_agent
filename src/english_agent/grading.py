@@ -19,8 +19,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from english_agent.config import Settings
 from english_agent.grader import grade_translation
 from english_agent.llm import AnthropicLLM, LLMUnavailable
-from english_agent.models.lesson import Lesson
 from english_agent.models.practice import TranslationGrade
+from english_agent.models.storage import GradingInput
 from english_agent.profile import refresh_profile
 from english_agent.storage.repositories import ProfileStore, Stores
 from english_agent.telegram.render import render_grade
@@ -31,7 +31,7 @@ GRADE_FAILED = "Не получилось проверить перевод. П�
 MAX_GRADING_ATTEMPTS = 3
 DISPUTE_PREFIX = "dispute:"
 
-Grader = Callable[[Lesson, str], Awaitable[TranslationGrade]]
+Grader = Callable[[GradingInput, str], Awaitable[TranslationGrade]]
 
 log = logging.getLogger(__name__)
 
@@ -40,8 +40,8 @@ def make_grader(settings: Settings, client: AsyncAnthropic | None = None) -> Gra
     """Grade with GRADER_MODEL at GRADER_EFFORT through the process's Claude client."""
     llm = AnthropicLLM(settings, model=settings.grader_model, effort=settings.grader_effort, client=client)
 
-    async def grade(lesson: Lesson, text: str) -> TranslationGrade:
-        return await grade_translation(llm, lesson, text)
+    async def grade(task: GradingInput, text: str) -> TranslationGrade:
+        return await grade_translation(llm, task, text)
 
     return grade
 
@@ -72,7 +72,7 @@ async def grade_answer(
         return False
     chat_id, message_id = task.telegram_chat_id, task.answer.progress_message_id
     try:
-        result = await grade(task.lesson, task.answer.answer_text)
+        result = await grade(task.input, task.answer.answer_text)
     except LLMUnavailable:
         if retry_transient and task.answer.grading_attempts < MAX_GRADING_ATTEMPTS:
             raise

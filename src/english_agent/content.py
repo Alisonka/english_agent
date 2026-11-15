@@ -20,12 +20,14 @@ LEGACY_CONTENT_KEY = "legacy"  # lessons backfilled from before shared content (
 
 
 def content_key(settings: Settings) -> str:
-    """The generation recipe: lesson schema, research and writer prompt fingerprints, both models."""
+    """The generation recipe: topic-content schema, the research/plan/step/summary prompts, both models."""
     return ":".join(
         (
-            f"lesson{SCHEMA_VERSIONS['lesson']}",
+            f"topic{SCHEMA_VERSIONS['topic_content']}",
             prompt_fingerprint("research_system"),
-            prompt_fingerprint("write_lesson_system"),
+            prompt_fingerprint("plan_topic_system"),
+            prompt_fingerprint("write_step_system"),
+            prompt_fingerprint("write_summary_system"),
             settings.research_model,
             settings.writer_model,
         )

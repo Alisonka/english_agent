@@ -16,9 +16,16 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from english_agent.models.lesson import Lesson
 from english_agent.models.storage import ItemDraft, ItemRecord, core_item_key
+from english_agent.models.topic import LessonStep
 from english_agent.storage.repositories import ItemStore, Stores
 
-__all__ = ["backfill_core_items", "core_item_from_lesson", "core_item_key", "record_core_item"]
+__all__ = [
+    "backfill_core_items",
+    "core_item_from_lesson",
+    "core_item_key",
+    "record_core_item",
+    "step_item_from",
+]
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +39,19 @@ def core_item_from_lesson(lesson: Lesson) -> ItemDraft:
         function_ru=lesson.key_idea_ru,
         explanation_ru=lesson.rule_ru,
         sources=lesson.sources,
+    )
+
+
+def step_item_from(step: LessonStep, form: str | None) -> ItemDraft:
+    """The learnable item for a step: keyed `<topic>:<slug>`, with the form in force at this step."""
+    return ItemDraft(
+        key=step.item_key,
+        topic_id=step.topic_id,
+        cefr=step.cefr,
+        form=form or step.message.form or "—",
+        function_ru=step.message.key_idea_ru,
+        explanation_ru=step.message.key_idea_ru,
+        sources=step.sources,
     )
 
 
@@ -62,13 +82,19 @@ class BackfillResult:
 
 
 async def backfill_core_items(stores: Stores) -> BackfillResult:
-    """A core item for every sent lesson that lacks one. Idempotent: safe to run again any time."""
+    """An item for every sent day that lacks one: a step item for step rows, a core item for legacy
+    lessons. Idempotent: safe to run again any time."""
     result = BackfillResult()
     for record in await stores.lessons.list_sent():
-        if record.lesson is None:
+        step, lesson = record.step, record.lesson
+        if step is not None:
+            draft = step_item_from(step, step.message.form)
+        elif lesson is not None:
+            draft = core_item_from_lesson(lesson)
+        else:
             result.skipped += 1
             continue
-        _, created = await stores.items.get_or_create(core_item_from_lesson(record.lesson), source_lesson_id=record.id)
+        _, created = await stores.items.get_or_create(draft, source_lesson_id=record.id)
         if created:
             result.created += 1
         else:

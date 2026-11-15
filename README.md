@@ -19,26 +19,32 @@ flowchart LR
 - **Research** ([src/english_agent/research/](src/english_agent/research/)): an
   agent crawls sitemaps and reads grammar articles from three curated sources
   (`englex.ru`, `skyeng.ru`, `skysmart.ru`), returning structured notes.
-- **Writer** ([src/english_agent/writer.py](src/english_agent/writer.py)): turns
-  the notes into a validated `Lesson`. Provenance fields (`topic_id`, `cefr`,
-  `sources`) are owned by code, so a lesson can never cite a page the research
-  step did not read.
-- **Telegram** ([src/english_agent/telegram/](src/english_agent/telegram/)):
-  renders a `Lesson` as a scannable Telegram HTML message (emoji-anchored
-  sections, an always-visible key idea, the detailed theory in a collapsible
-  quote, highlighted constructions in bold, sources as links), packed into
-  several messages on section boundaries if it exceeds the 4096-character limit,
-  and sends it through the Bot API.
-- **Pipeline** ([src/english_agent/pipeline.py](src/english_agent/pipeline.py)):
-  wires topic -> research -> lesson -> Telegram together.
+- **Generation** ([src/english_agent/topic_writer.py](src/english_agent/topic_writer.py)):
+  a topic is taught over **1–4 short daily steps**, not one long lesson. The planner
+  ([planner.py](src/english_agent/planner.py)) splits the research notes into ordered
+  steps; the step writer ([step_writer.py](src/english_agent/step_writer.py)) turns each
+  into a `LessonStep` (a scannable message plus a practice bank, with an `alt` re-teach
+  variant); the summary writer ([summary_writer.py](src/english_agent/summary_writer.py))
+  builds the end-of-topic cheat sheet. The whole `TopicContent` is written once per
+  (topic, level) and shared. Provenance and `sources` are code-owned. The legacy
+  single-lesson writer ([writer.py](src/english_agent/writer.py)) still serves stored
+  lessons of the old schema.
+- **Telegram** ([src/english_agent/telegram/](src/english_agent/telegram/)): renders a
+  step as one short HTML message (a hook, one key idea, three examples with the Russian
+  behind a spoiler, a self-check, a progress bar and a "tomorrow" teaser) and the cheat
+  sheet with the learner's weak points, and sends them through the Bot API.
+- **Pipeline** ([src/english_agent/pipeline.py](src/english_agent/pipeline.py)): walks
+  the course one step a day ([progression.py](src/english_agent/progression.py)),
+  advancing by step, re-teaching a step whose accuracy stays below 60 % over two days,
+  and sending a topic's cheat sheet when the learner moves on.
 - **Practice** ([src/english_agent/practice.py](src/english_agent/practice.py),
-  [src/english_agent/grader.py](src/english_agent/grader.py)): the writer also
-  produces a 3-question quiz and 3 sentences to translate. The quiz goes out as
-  Telegram quiz polls `QUIZ_DELAY_MINUTES` after the lesson, the translation task
-  at `TRANSLATION_SEND_TIME`; poll answers and the learner's translation are
-  stored, wrong answers go to the `errors` table, and the translation is graded
-  by `GRADER_MODEL` (corrections and an explanation in Russian, with a button to
-  dispute the grade).
+  [src/english_agent/practice_select.py](src/english_agent/practice_select.py),
+  [src/english_agent/grader.py](src/english_agent/grader.py)): the day's quiz interleaves
+  today's step with an earlier step and an older topic (`QUIZ_DELAY_MINUTES` after the
+  step), the translation task mixes today with one earlier item (`TRANSLATION_SEND_TIME`).
+  Poll answers and the translation are stored, wrong answers go to the `errors` table, and
+  the translation is graded by `GRADER_MODEL` (corrections and an explanation in Russian,
+  with a button to dispute the grade).
 
 ## Reproducibility (provenance)
 
