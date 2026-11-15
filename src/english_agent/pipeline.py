@@ -39,7 +39,7 @@ from english_agent.metrics import LESSONS_FAILED, LESSONS_SENT
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
 from english_agent.models.schedule import local_now
-from english_agent.models.storage import ItemAccuracy, LearnerRecord, LessonContentRecord
+from english_agent.models.storage import ErrorRecord, ItemAccuracy, LearnerRecord, LessonContentRecord
 from english_agent.planning import lesson_due
 from english_agent.profile import weak_points_for_topic
 from english_agent.progression import NextStep, TopicProgress, is_done, next_step, reteach_candidate, topic_progress
@@ -350,8 +350,14 @@ async def _send_cheat_sheet(runtime: Runtime, learner: LearnerRecord, level: Cef
         if content is None or content.topic is None:
             return
         topic_content = content.topic
-        accuracy = await _step_accuracy(stores, learner.id, topic_content.item_keys())
-        weak = weak_points_for_topic(topic_content.steps, accuracy, {})
+        keys = topic_content.item_keys()
+        accuracy = await _step_accuracy(stores, learner.id, keys)
+        key_by_id = {item_id: key for key, item_id in (await stores.items.ids_for_keys(keys)).items()}
+        errors: dict[str, list[ErrorRecord]] = {}
+        for error in await stores.practice.errors_for_items(learner.id, list(key_by_id)):
+            if error.item_id is not None and error.item_id in key_by_id:
+                errors.setdefault(key_by_id[error.item_id], []).append(error)
+        weak = weak_points_for_topic(topic_content.steps, accuracy, errors)
         message_ids = [
             await runtime.sender.send_text(learner.telegram_chat_id, message)
             for message in render_cheat_sheet(topic_content.summary, weak)

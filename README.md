@@ -23,7 +23,7 @@ flowchart LR
   (`englex.ru`, `skyeng.ru`, `skysmart.ru`), returning structured notes.
 - **Generation** ([src/english_agent/session_runner.py](src/english_agent/session_runner.py)):
   a topic is taught over **1–4 short daily steps**, not one long lesson. The planner
-  ([planner.py](src/english_agent/planner.py)) splits the research notes into ordered
+  ([topic_planner.py](src/english_agent/topic_planner.py)) splits the research notes into ordered
   steps; the step writer ([step_writer.py](src/english_agent/step_writer.py)) turns each
   into a `LessonStep` (a scannable message plus a practice bank, with an `alt` re-teach
   variant); the summary writer ([summary_writer.py](src/english_agent/summary_writer.py))
@@ -46,9 +46,13 @@ flowchart LR
   and sending a topic's cheat sheet when the learner moves on.
 - **Practice** ([src/english_agent/practice.py](src/english_agent/practice.py),
   [src/english_agent/practice_select.py](src/english_agent/practice_select.py),
-  [src/english_agent/grader.py](src/english_agent/grader.py)): the day's quiz interleaves
-  today's step with an earlier step and an older topic (`QUIZ_DELAY_MINUTES` after the
-  step), the translation task mixes today with one earlier item (`TRANSLATION_SEND_TIME`).
+  [src/english_agent/grader.py](src/english_agent/grader.py)): what a day's practice reviews
+  besides today's step is decided by the Planner ([planner.py](src/english_agent/planner.py))
+  from the learner's own FSRS cards: the quiz (`QUIZ_DELAY_MINUTES` after the step) has two
+  questions on today's step, one on the topic's least-recalled earlier step and one to three
+  older items that are due (most overdue first, else the least recalled); the translation task
+  (`TRANSLATION_SEND_TIME`) adds to two sentences on today's step one on an item missed in that
+  morning's quiz, else a due one. Questions asked in the last 60 days are avoided.
   Poll answers and the translation are stored, wrong answers go to the `errors` table, and
   the translation is graded by `GRADER_MODEL` (corrections and an explanation in Russian,
   with a button to dispute the grade).
@@ -502,6 +506,8 @@ src/english_agent/
   paths.py         # repo-relative paths
   pipeline.py      # topic -> research -> lesson -> Telegram -> lessons table
   practice.py      # quiz and translation task after the lesson (scheduling, sending)
+  planner.py       # what a day's practice reviews, from the learner's cards (pure rules)
+  topic_planner.py # research notes -> the topic's 1-4 steps (LLM)
   tracing.py       # OpenTelemetry setup (opt-in OTLP export)
   session_runner.py # research -> topic plan -> steps -> Critic -> cheat sheet (TopicContent), budget, report
   critic.py        # second-model review of steps and cheat sheets

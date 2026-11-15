@@ -9,7 +9,7 @@ from english_agent.models.topic import LessonStep, TopicPlan
 from english_agent.step_writer import write_step
 from fakes import ScriptedLLM
 from samples import STEP_MESSAGE_SINGULAR, step_quiz, step_translation
-from test_planner import NOTES
+from test_topic_planner import NOTES
 
 PLAN = TopicPlan.model_validate(topic_content_payload()["plan"])
 

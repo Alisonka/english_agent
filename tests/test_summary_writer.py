@@ -7,7 +7,7 @@ from english_agent.llm import AssistantTurn, ToolCall
 from english_agent.models.topic import TopicContent, TopicPlan
 from english_agent.summary_writer import write_summary
 from fakes import ScriptedLLM
-from test_planner import NOTES
+from test_topic_planner import NOTES
 
 _CONTENT = TopicContent.model_validate(topic_content_payload())
 PLAN: TopicPlan = _CONTENT.plan

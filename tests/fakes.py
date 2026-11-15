@@ -13,8 +13,11 @@ from english_agent.models.profile import LearnerProfile
 from english_agent.models.run import RunReport
 from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import (
+    AskedHistory,
+    CardMemory,
     CardRecord,
     ClaimOutcome,
+    ErrorRecord,
     GradingInput,
     GradingSentence,
     GradingTask,
@@ -507,7 +510,7 @@ class FakeCards:
         self.by_key: dict[tuple[int, int], CardRecord] = {}
         # (learner id, item id, rating, source_ref, reviewed_at)
         self.reviews: list[tuple[int, int, int, str, datetime]] = []
-        self._items = items  # to resolve an item's topic for due_or_weakest
+        self._items = items  # to resolve a card's item for memory
 
     async def get(self, learner_id: int, item_id: int) -> CardRecord | None:
         return self.by_key.get((learner_id, item_id))
@@ -519,29 +522,28 @@ class FakeCards:
     async def for_items(self, learner_id: int, item_ids: list[int]) -> list[CardRecord]:
         return [c for c in self.by_key.values() if c.learner_id == learner_id and c.item_id in set(item_ids)]
 
-    def _topic_of(self, item_id: int) -> str | None:
+    async def memory(self, learner_id: int, now: datetime) -> list[CardMemory]:
+        """Like the repository's, with a stand-in recall probability: lower the more overdue, 0.9 when not due."""
         if self._items is None:
-            return None
-        return next((item.topic_id for item in self._items.by_key.values() if item.id == item_id), None)
-
-    async def due_or_weakest(
-        self, learner_id: int, now: datetime, *, exclude_topic_id: str
-    ) -> tuple[CardRecord, ItemRecord] | None:
-        if self._items is None:
-            return None
+            return []
         id_to_item = {item.id: item for item in self._items.by_key.values()}
-        cards = [
-            c
-            for c in self.by_key.values()
-            if c.learner_id == learner_id
-            and id_to_item.get(c.item_id) is not None
-            and id_to_item[c.item_id].topic_id != exclude_topic_id
-        ]
-        if not cards:
-            return None
-        due = sorted((c for c in cards if c.due_at <= now), key=lambda c: c.due_at)
-        chosen = due[0] if due else min(cards, key=lambda c: (c.reviews, c.due_at))
-        return chosen, id_to_item[chosen.item_id]
+        result: list[CardMemory] = []
+        for card in self.by_key.values():
+            item = id_to_item.get(card.item_id)
+            if card.learner_id != learner_id or item is None:
+                continue
+            overdue_days = (now - card.due_at).total_seconds() / 86400
+            recall = 0.9 if overdue_days < 0 else max(0.0, 0.8 - 0.1 * overdue_days)
+            result.append(
+                CardMemory(
+                    item_id=item.id,
+                    item_key=item.key,
+                    topic_id=item.topic_id,
+                    due_at=card.due_at,
+                    retrievability=recall,
+                )
+            )
+        return result
 
     async def item_accuracy(self, learner_id: int, item_ids: list[int]) -> dict[int, ItemAccuracy]:
         wanted = set(item_ids)
@@ -714,6 +716,32 @@ class FakePractice:
             completed=True,
             results=[(p.question, self.poll_answers[(p.id, telegram_chat_id)]) for p in answered],
         )
+
+    async def asked(self, learner_id: int, since: datetime) -> AskedHistory:
+        learner_of = {row.id: row.learner_id for row in self._lessons.rows.values()}
+        history = AskedHistory()
+        for delivery in self.deliveries.values():
+            if learner_of.get(delivery.lesson_id) != learner_id or delivery.claimed_at < since or not delivery.payload:
+                continue
+            block = PracticeBlock.model_validate(delivery.payload)
+            for question in block.questions:
+                history.questions.setdefault(question.item_key, set()).add(question.question.question)
+            for sentence in block.sentences:
+                history.sentences.setdefault(sentence.item_key, set()).add(sentence.task.ru)
+        return history
+
+    async def wrong_quiz_items(self, lesson_id: int) -> set[int]:
+        quiz_ids = {d.id for d in self.deliveries.values() if d.lesson_id == lesson_id and d.kind == "quiz"}
+        return {
+            poll.item_id
+            for poll in self.polls.values()
+            if poll.delivery_id in quiz_ids
+            and poll.item_id is not None
+            and any(not correct for (poll_id, _), correct in self.poll_answers.items() if poll_id == poll.id)
+        }
+
+    async def errors_for_items(self, learner_id: int, item_ids: list[int]) -> list[ErrorRecord]:
+        return []  # the fake keeps errors without their item
 
     async def open_translation(self, telegram_chat_id: str) -> OpenTranslationTask | None:
         learner = self._learners.by_chat.get(telegram_chat_id)

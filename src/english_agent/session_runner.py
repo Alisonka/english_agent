@@ -36,13 +36,13 @@ from english_agent.models.curriculum import CurriculumTopic
 from english_agent.models.review import StepReview, SummaryReview
 from english_agent.models.run import RunOutcome, RunReport, StageReport
 from english_agent.models.topic import LessonStep, StepVariant, TopicContent, TopicPlan, TopicSummary
-from english_agent.planner import plan_topic
 from english_agent.research.agent import ResearchAgent
 from english_agent.research.models import TopicNotes
 from english_agent.research.sitemaps import FileSitemapCache, SitemapCache, SitemapIndex
 from english_agent.research.tools import LiveResearchTools
 from english_agent.step_writer import write_step
 from english_agent.summary_writer import write_summary
+from english_agent.topic_planner import plan_topic
 from english_agent.tracing import get_tracer
 
 

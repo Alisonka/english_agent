@@ -16,6 +16,7 @@ from english_agent.models.profile import LearnerProfile
 from english_agent.models.run import RunReport
 from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.topic import LessonStep, TopicContent
+from english_agent.versions import Provenance
 
 LessonStatus = Literal["pending", "sending", "sent", "failed", "skipped"]
 LessonClaim = Literal["claimed", "resume", "busy", "done"]
@@ -260,6 +261,9 @@ class PracticeDeliveryRecord(BaseModel):
 
 
 PracticeSource = Literal["today", "previous", "review"]
+# Why the Planner chose an item: today's step, the topic's least-recalled earlier step, an item due
+# for review, one the learner keeps getting wrong, one missed in today's quiz, or the least recalled.
+PlanReason = Literal["today", "previous", "due", "weak", "wrong_today", "least_recalled"]
 
 
 class AssembledQuestion(BaseModel):
@@ -269,6 +273,7 @@ class AssembledQuestion(BaseModel):
     item_id: int | None
     item_key: str
     source: PracticeSource
+    reason: PlanReason | None = None  # None for blocks assembled before the Planner
 
 
 class AssembledSentence(BaseModel):
@@ -281,6 +286,7 @@ class AssembledSentence(BaseModel):
     key_idea_ru: str | None = None
     form: str | None = None
     source: PracticeSource
+    reason: PlanReason | None = None  # None for blocks assembled before the Planner
 
 
 class PracticeBlock(BaseModel):
@@ -292,6 +298,8 @@ class PracticeBlock(BaseModel):
     kind: Literal["quiz", "translation"]
     questions: list[AssembledQuestion] = Field(default_factory=list)
     sentences: list[AssembledSentence] = Field(default_factory=list)
+    # Code-owned: the Planner that chose the items; None for blocks assembled before it.
+    provenance: Provenance | None = None
 
 
 class SentStep(BaseModel):
@@ -311,6 +319,23 @@ class SentStep(BaseModel):
     @property
     def item_key(self) -> str:
         return f"{self.topic_id}:{self.step_slug}"
+
+
+class CardMemory(BaseModel):
+    """One card as the Planner sees it: the item, when FSRS wants it reviewed, how likely it is recalled now."""
+
+    item_id: int
+    item_key: str
+    topic_id: str
+    due_at: datetime
+    retrievability: float = Field(ge=0, le=1)
+
+
+class AskedHistory(BaseModel):
+    """What the learner was already asked recently, per item key: quiz question texts and Russian sentences."""
+
+    questions: dict[str, set[str]] = Field(default_factory=dict)
+    sentences: dict[str, set[str]] = Field(default_factory=dict)
 
 
 class ItemAccuracy(BaseModel):

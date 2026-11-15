@@ -5,6 +5,10 @@ due to every learner, on the learner's own schedule. All state lives in `practic
 block is claimed in the database before it is sent, so a restart or an overlapping tick never
 sends it twice. A block that failed half-way stays claimed and is not retried (a duplicate quiz
 is worse than a missing one). One learner's failure (a blocked bot, say) never stops the others.
+
+What a block asks besides today's step is the Planner's choice (`planner.py`) from the learner's
+own cards: due reviews, weak items, what went wrong in the morning's quiz; questions asked in the
+last `ASKED_WINDOW` are avoided while a bank has others.
 """
 
 from __future__ import annotations
@@ -12,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from aiogram.types import ForceReply
@@ -29,6 +35,7 @@ from english_agent.models.storage import (
     PracticeDeliveryRecord,
     PracticeKind,
 )
+from english_agent.planner import Candidate, Pick, plan_quiz, plan_translation
 from english_agent.planning import practice_due
 from english_agent.practice_select import (
     StepBank,
@@ -37,16 +44,17 @@ from english_agent.practice_select import (
     bank_from_lesson,
     bank_from_record,
     bank_from_step,
-    choose_previous,
 )
-from english_agent.srs import make_scheduler
 from english_agent.storage.repositories import PracticeStore, Stores
 from english_agent.telegram.render import render_quiz_intro, render_translation_task
 from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError
 from english_agent.tracing import get_tracer
+from english_agent.versions import SCHEMA_VERSIONS, build_provenance
 
 TRANSLATION_PLACEHOLDER = "1. … 2. … 3. …"
 _CONCURRENT_LEARNERS = 16  # sends are rate-limited anyway; this bounds open DB transactions
+ASKED_WINDOW = timedelta(days=60)  # questions asked within this long are kept for later days
+_EXTRA_LOOKUPS = 5  # past its slots, how many more planned items to try when one has no bank
 
 log = logging.getLogger(__name__)
 
@@ -130,11 +138,16 @@ async def _send_quiz(
     return message_ids
 
 
-async def _banks(
-    settings: Settings, stores: Stores, learner: LearnerRecord, record: LessonRecord, now: datetime
-) -> tuple[StepBank, StepBank | None, StepBank | None] | None:
-    """Today's bank, the earlier-step bank (least recalled) and the older-topic review bank."""
-    scheduler = make_scheduler(settings)
+@dataclass(frozen=True)
+class _Day:
+    """What the Planner works from for one sent day: today's bank and every item it could review."""
+
+    today: StepBank
+    earlier: dict[int, StepBank]  # the topic's earlier main steps, by item id
+    candidates: list[Candidate]
+
+
+async def _day(stores: Stores, learner: LearnerRecord, record: LessonRecord, now: datetime) -> _Day | None:
     if record.payload_kind == "step":
         content = await stores.contents.get(record.content_id) if record.content_id is not None else None
         topic_content = content.topic if content is not None else None
@@ -145,35 +158,71 @@ async def _banks(
         today_item, _ = await stores.items.get_or_create(
             step_item_from(main, topic_content.form_for(index)), source_lesson_id=record.id
         )
-        today_bank = bank_from_step(main, today_item.id)
-        earlier = [topic_content.step(i, "main") for i in range(1, index)]
-        id_by_key = await stores.items.ids_for_keys([step.item_key for step in earlier])
-        cards = {card.item_id: card for card in await stores.cards.for_items(learner.id, list(id_by_key.values()))}
-        banks: list[StepBank] = []
-        retrievability: dict[int, float] = {}
-        for step in earlier:
-            item_id = id_by_key.get(step.item_key)
-            banks.append(bank_from_step(step, item_id))
-            card = cards.get(item_id) if item_id is not None else None
-            if item_id is not None and card is not None:
-                retrievability[item_id] = scheduler.retrievability(card.fsrs_state, now)
-        previous_bank = choose_previous(banks, retrievability) if banks else None
+        ids = await stores.items.ids_for_keys(topic_content.item_keys())
+        ids[main.item_key] = today_item.id
+        today = bank_from_step(main, ids)
+        earlier = {
+            ids[step.item_key]: bank_from_step(step, ids)
+            for step in (topic_content.step(i, "main") for i in range(1, index))
+            if step.item_key in ids
+        }
     else:
         lesson = record.lesson
         if lesson is None:
             return None
         today_item, _ = await stores.items.get_or_create(core_item_from_lesson(lesson), source_lesson_id=record.id)
-        today_bank = bank_from_lesson(lesson, record.item_key, today_item.id)
-        previous_bank = None
+        today, earlier = bank_from_lesson(lesson, record.item_key, today_item.id), {}
 
-    review_bank = None
-    chosen = await stores.cards.due_or_weakest(learner.id, now, exclude_topic_id=record.topic_id)
-    if chosen is not None:
-        _, item = chosen
-        taught = await stores.lessons.taught_step(learner.id, item.key)
-        if taught is not None:
-            review_bank = bank_from_record(taught, item.id)
-    return today_bank, previous_bank, review_bank
+    memory = {card.item_id: card for card in await stores.cards.memory(learner.id, now)}
+    older = [card for card in memory.values() if card.topic_id != record.topic_id]
+    accuracy = await stores.cards.item_accuracy(learner.id, [*earlier, *(card.item_id for card in older)])
+    candidates = [
+        Candidate(
+            item_id=item_id,
+            item_key=bank.item_key,
+            same_topic=True,
+            due_at=memory[item_id].due_at if item_id in memory else None,
+            retrievability=memory[item_id].retrievability if item_id in memory else 0.0,
+            accuracy=accuracy.get(item_id),
+        )
+        for item_id, bank in earlier.items()
+    ]
+    candidates += [
+        Candidate(
+            item_id=card.item_id,
+            item_key=card.item_key,
+            same_topic=False,
+            due_at=card.due_at,
+            retrievability=card.retrievability,
+            accuracy=accuracy.get(card.item_id),
+        )
+        for card in older
+    ]
+    return _Day(today=today, earlier=earlier, candidates=candidates)
+
+
+async def _banks_for(
+    stores: Stores,
+    learner: LearnerRecord,
+    day: _Day,
+    picks: list[Pick],
+    slots: int,
+    usable: Callable[[StepBank], bool],
+) -> list[tuple[Pick, StepBank]]:
+    """The first `slots` picks that have a usable bank (an item taught long ago may have none)."""
+    chosen: list[tuple[Pick, StepBank]] = []
+    for pick in picks[: slots + _EXTRA_LOOKUPS]:
+        if len(chosen) >= slots:
+            break
+        item_id = pick.candidate.item_id
+        if pick.candidate.same_topic:
+            bank = day.earlier.get(item_id)
+        else:
+            taught = await stores.lessons.taught_step(learner.id, pick.candidate.item_key)
+            bank = bank_from_record(taught, item_id) if taught is not None else None
+        if bank is not None and usable(bank):
+            chosen.append((pick, bank))
+    return chosen
 
 
 async def deliver_practice_for(
@@ -194,20 +243,29 @@ async def deliver_practice_for(
     kind = due_practice(learner, settings, record, quiz, translation, now)
     if kind is None:
         return None
-    banks = await _banks(settings, stores, learner, record, now)
-    if banks is None:
+    day = await _day(stores, learner, record, now)
+    if day is None:
         return None
-    today_bank, previous_bank, review_bank = banks
+    today_bank = day.today
     rng = rng or random.Random()
+    asked = await stores.practice.asked(learner.id, now - ASKED_WINDOW)
     if kind == "quiz":
-        block = assemble_quiz(today_bank, previous_bank, review_bank, rng=rng)
+        plan = plan_quiz(day.candidates, now)
+        picks = [plan.previous] if plan.previous is not None else []
+        chosen = await _banks_for(stores, learner, day, picks, len(picks), lambda bank: bool(bank.own_questions))
+        chosen += await _banks_for(
+            stores, learner, day, plan.reviews, plan.review_slots, lambda bank: bool(bank.own_questions)
+        )
+        block = assemble_quiz(today_bank, chosen, asked=asked, rng=rng)
         item_count = len(block.questions)
     else:
-        other = previous_bank or review_bank
-        block = assemble_translation(
-            today_bank, other, other_source="previous" if previous_bank is not None else "review", rng=rng
-        )
+        wrong = await stores.practice.wrong_quiz_items(record.id)
+        ranked = plan_translation(day.candidates, now, wrong_today=wrong)
+        other = await _banks_for(stores, learner, day, ranked, 1, lambda bank: bool(bank.sentences))
+        block = assemble_translation(today_bank, other[0] if other else None, asked=asked, rng=rng)
         item_count = len(block.sentences)
+    provenance = build_provenance(component="planner", schema_version=SCHEMA_VERSIONS["practice_block"])
+    block = block.model_copy(update={"provenance": provenance})
     delivery = await stores.practice.claim_delivery(record.id, kind, item_count, payload=block.model_dump(mode="json"))
     if delivery is None:
         return None
@@ -216,6 +274,8 @@ async def deliver_practice_for(
         span.set_attribute("practice.kind", kind)
         span.set_attribute("topic.id", record.topic_id)
         span.set_attribute("item.key", today_bank.item_key)
+        span.set_attribute("plan.size", item_count)
+        span.set_attribute("plan.due_cards", sum(1 for candidate in day.candidates if candidate.is_due(now)))
         if kind == "quiz":
             message_ids = await _send_quiz(
                 sender, stores.practice, delivery.id, chat_id, today_bank.title_en, block, rng

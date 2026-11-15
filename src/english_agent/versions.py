@@ -49,7 +49,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "card_record": 2,  # v2: last_reviewed_at, reviews
     "review_log_record": 2,  # v2: source_ref
     "practice_delivery_record": 2,  # v2: payload (the day's assembled practice set)
-    "practice_block": 1,  # the day's assembled quiz/translation set stored in that payload
+    "practice_block": 2,  # the day's assembled quiz/translation set in that payload; v2: reason per item, provenance
     "quiz_poll_record": 2,  # v2: item_id
     "translation_answer_record": 2,  # v2: grading_attempts, grading_started_at
     "translation_grade": 1,

@@ -9,7 +9,7 @@ from english_agent.llm import AssistantTurn, ToolCall
 from english_agent.models.review import ReviewIssue
 from english_agent.models.topic import LessonStep, TopicContent
 from fakes import ScriptedLLM
-from test_planner import NOTES
+from test_topic_planner import NOTES
 
 CONTENT = TopicContent.model_validate(topic_content_payload())
 MAIN = CONTENT.step(1, "main")

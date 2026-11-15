@@ -14,7 +14,7 @@ from english_agent.models.topic import LessonStep, StepVariant, TopicContent, To
 from english_agent.research.models import NOT_FOUND_MESSAGE, ResearchResult
 from fakes import ScriptedLLM
 from test_pipeline import make_settings
-from test_planner import NOTES
+from test_topic_planner import NOTES
 
 TOPIC = CurriculumTopic(
     id="there_is_are", title_en="there is / there are", title_ru="there is / there are", order=13, tags=["there"]
