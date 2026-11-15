@@ -10,6 +10,7 @@ from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
+from english_agent.models.run import RunReport
 from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import (
     CardRecord,
@@ -440,7 +441,9 @@ class FakeContents:
         self.rows[key] = row.model_copy(update=changes)
         return self.rows[key]
 
-    async def finish(self, content_id: int, content: Lesson | TopicContent) -> LessonContentRecord:
+    async def finish(
+        self, content_id: int, content: Lesson | TopicContent, *, run: RunReport | None = None
+    ) -> LessonContentRecord:
         kind = "topic" if isinstance(content, TopicContent) else "lesson"
         return self._update(
             content_id,
@@ -449,10 +452,11 @@ class FakeContents:
             payload_kind=kind,
             error=None,
             generated_at=datetime.now(UTC),
+            run=run,
         )
 
-    async def fail(self, content_id: int, reason: str) -> LessonContentRecord:
-        return self._update(content_id, status="failed", error=reason)
+    async def fail(self, content_id: int, reason: str, *, run: RunReport | None = None) -> LessonContentRecord:
+        return self._update(content_id, status="failed", error=reason, run=run)
 
     async def get(self, content_id: int) -> LessonContentRecord | None:
         return next((row for row in self.rows.values() if row.id == content_id), None)

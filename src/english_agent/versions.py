@@ -32,14 +32,18 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "topic_notes": 1,
     # A topic taught in steps (models/topic.py): plan, per-step message + bank, and the cheat sheet.
     "topic_plan": 1,
-    "lesson_step": 1,
-    "topic_summary": 1,
-    "topic_content": 1,
+    "lesson_step": 2,  # v2: review (the Critic's code-owned review)
+    "topic_summary": 2,  # v2: review
+    "topic_content": 2,  # v2: steps and summary carry the Critic's review
+    # The Critic (models/review.py) and the content run report (models/run.py).
+    "step_review": 1,
+    "summary_review": 1,
+    "content_run": 1,
     # Storage records (models/storage.py); the table shapes themselves are versioned by Alembic.
     "learner_record": 2,  # v2: schedule (timezone, send times, quiz delay), started_on, is_active, paused_at
     "learner_schedule": 1,
     "lesson_record": 4,  # v2: content_id; v3: status/claim/attempts; v4: step columns + payload_kind
-    "lesson_content_record": 2,  # v2: payload_kind (lesson | topic)
+    "lesson_content_record": 3,  # v2: payload_kind (lesson | topic); v3: run (the generation report)
     "item_record": 1,
     "error_record": 1,
     "card_record": 2,  # v2: last_reviewed_at, reviews
@@ -62,6 +66,8 @@ PROMPT_FILES: dict[str, Path] = {
     "plan_topic_system": _PROMPTS_DIR / "plan_topic_system.md",
     "write_step_system": _PROMPTS_DIR / "write_step_system.md",
     "write_summary_system": _PROMPTS_DIR / "write_summary_system.md",
+    "review_step_system": _PROMPTS_DIR / "review_step_system.md",
+    "review_summary_system": _PROMPTS_DIR / "review_summary_system.md",
 }
 
 

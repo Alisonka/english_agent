@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     writer_model: str = "claude-haiku-5-5"
     llm_max_tokens: int = 8192
 
+    # The Critic checks every written step and cheat sheet before a learner sees it: another model
+    # than the writer, so it does not approve its own mistakes. Empty CRITIC_MODEL turns it off.
+    critic_model: str = "claude-sonnet-5-5"
+    critic_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    critic_max_revisions: int = Field(default=1, ge=0, le=3)  # rewrites per step before the run fails
+    # One content run (research + plan + steps + reviews + cheat sheet) stops past these limits.
+    content_run_max_calls: int = Field(default=60, ge=10)
+    content_run_max_cost_usd: float = Field(default=2.0, gt=0)
+
     cache_dir: Path = Path(".cache")
     sitemap_ttl_days: int = 7  # сколько дней карта сайта (sitemap) считается «свежей» до повторной загрузки
     http_timeout_seconds: float = 20.0

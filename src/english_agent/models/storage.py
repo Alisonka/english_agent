@@ -13,6 +13,7 @@ from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson, Source
 from english_agent.models.practice import QuizQuestion, TranslationGrade, TranslationTask
 from english_agent.models.profile import LearnerProfile
+from english_agent.models.run import RunReport
 from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.topic import LessonStep, TopicContent
 
@@ -148,6 +149,7 @@ class LessonContentRecord(BaseModel):
     claimed_by: str | None
     generated_at: datetime | None
     created_at: datetime
+    run: RunReport | None = None  # how the last generation run went; None for content written before reports
 
     @property
     def lesson(self) -> "Lesson | None":

@@ -149,5 +149,7 @@ async def generate_content(topic_id: str, cefr: Cefr, deps: WorkerDeps = TaskiqD
         topic = next((item for item in curriculum.topics if item.id == topic_id), None)
         if topic is None:
             return None
-        record = await ensure_content(deps.runtime, topic, cefr, curriculum.version)
+        # Past the claim's stale time another worker may take the topic over: stop writing by then.
+        async with asyncio.timeout(deps.runtime.settings.content_generation_stale_minutes * 60):
+            record = await ensure_content(deps.runtime, topic, cefr, curriculum.version)
         return None if record is None else record.status

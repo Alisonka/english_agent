@@ -44,10 +44,10 @@ from english_agent.planning import lesson_due
 from english_agent.profile import weak_points_for_topic
 from english_agent.progression import NextStep, TopicProgress, is_done, next_step, reteach_candidate, topic_progress
 from english_agent.research.sitemaps import SitemapCache
+from english_agent.session_runner import run_topic_session
 from english_agent.storage.repositories import Stores, open_stores
 from english_agent.telegram.render import render_cheat_sheet, render_step
 from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError, make_bot
-from english_agent.topic_writer import generate_topic
 from english_agent.tracing import configure_tracing, get_tracer
 
 COURSE_FINISHED = "Курс завершён: все темы пройдены."
@@ -171,21 +171,19 @@ async def ensure_content(
     if outcome == "busy":
         return None
     log.info("writing the topic %s (%s), attempt %d", topic.id, cefr, record.attempts)
-    try:
-        research, content = await generate_topic(
-            topic,
-            settings,
-            cefr=cefr,
-            curriculum_version=curriculum_version,
-            client=runtime.client,
-            sitemaps=runtime.sitemaps,
-        )
-        reason = research.message
-    except Exception as error:  # unattended run: every failure is recorded, not just logged
-        content, reason = None, f"{type(error).__name__}: {error}"
-    if content is None:
-        return await stores.contents.fail(record.id, reason)
-    return await stores.contents.finish(record.id, content)
+    session = await run_topic_session(
+        topic,
+        settings,
+        cefr=cefr,
+        curriculum_version=curriculum_version,
+        client=runtime.client,
+        sitemaps=runtime.sitemaps,
+    )
+    log.info("topic %s (%s) run: %s", topic.id, cefr, session.report.summary())
+    if session.content is None:
+        reason = session.report.error or "the topic could not be written"
+        return await stores.contents.fail(record.id, reason, run=session.report)
+    return await stores.contents.finish(record.id, session.content, run=session.report)
 
 
 async def run_lesson_for_learner(
@@ -270,7 +268,8 @@ async def run_lesson_for_learner(
             await stores.lessons.fail(row.id, reason, final=True)  # the topic comes again tomorrow
             LESSONS_FAILED.labels("true").inc()
             if runtime.alerts is not None:
-                await runtime.alerts.alert("topic not written", f"{topic.id} ({level}): {reason}")
+                run = f"\n{content.run.summary()}" if content.run is not None else ""
+                await runtime.alerts.alert("topic not written", f"{topic.id} ({level}): {reason}{run}")
             if send:
                 await notify(sender, chat_id, LESSON_FAILED.format(title=topic.title_ru))
             return FAILED
@@ -405,13 +404,11 @@ async def preview_topic(
         if topic is None:
             print(COURSE_FINISHED)
             return OK
-    try:
-        research, content = await generate_topic(topic, settings, cefr=level, curriculum_version=curriculum.version)
-        reason = research.message
-    except Exception as error:
-        content, reason = None, f"{type(error).__name__}: {error}"
+    session = await run_topic_session(topic, settings, cefr=level, curriculum_version=curriculum.version)
+    log.info("topic %s run: %s", topic.id, session.report.summary())
+    content = session.content
     if content is None:
-        log.error("topic %s failed: %s", topic.id, reason)
+        log.error("topic %s failed: %s", topic.id, session.report.error)
         return FAILED
     print(content.model_dump_json(indent=2, ensure_ascii=False))
     if sender is None or chat_id is None:

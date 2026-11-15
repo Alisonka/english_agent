@@ -22,6 +22,7 @@ from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
+from english_agent.models.run import RunReport
 from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import (
     CORE_SLUG,
@@ -170,9 +171,11 @@ class LessonContentStore(Protocol):
         max_attempts: int,
     ) -> tuple[ClaimOutcome, LessonContentRecord]: ...
 
-    async def finish(self, content_id: int, content: Lesson | TopicContent) -> LessonContentRecord: ...
+    async def finish(
+        self, content_id: int, content: Lesson | TopicContent, *, run: RunReport | None = None
+    ) -> LessonContentRecord: ...
 
-    async def fail(self, content_id: int, reason: str) -> LessonContentRecord: ...
+    async def fail(self, content_id: int, reason: str, *, run: RunReport | None = None) -> LessonContentRecord: ...
 
     async def get(self, content_id: int) -> LessonContentRecord | None: ...
 
@@ -908,22 +911,26 @@ class LessonContentRepo:
             return "busy"
         return "claimed"
 
-    async def finish(self, content_id: int, content: Lesson | TopicContent) -> LessonContentRecord:
+    async def finish(
+        self, content_id: int, content: Lesson | TopicContent, *, run: RunReport | None = None
+    ) -> LessonContentRecord:
         is_topic = isinstance(content, TopicContent)
         async with session_scope(self._sessions) as session:
             row = await session.get_one(LessonContentRow, content_id, with_for_update=True)
             row.status, row.payload, row.error = "ready", content.model_dump(mode="json"), None
+            row.run = run.model_dump(mode="json") if run is not None else None
             row.payload_kind = "topic" if is_topic else "lesson"
             row.schema_version = SCHEMA_VERSIONS["topic_content" if is_topic else "lesson"]
             row.generated_at = datetime.now(UTC)
             await session.flush()
             return LessonContentRecord.model_validate(row)
 
-    async def fail(self, content_id: int, reason: str) -> LessonContentRecord:
+    async def fail(self, content_id: int, reason: str, *, run: RunReport | None = None) -> LessonContentRecord:
         async with session_scope(self._sessions) as session:
             row = await session.get_one(LessonContentRow, content_id, with_for_update=True)
             if row.status != "ready":  # a late failure never overwrites content another worker finished
                 row.status, row.error = "failed", reason
+                row.run = run.model_dump(mode="json") if run is not None else None
             await session.flush()
             return LessonContentRecord.model_validate(row)
 

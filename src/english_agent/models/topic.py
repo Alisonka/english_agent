@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Example, Source
 from english_agent.models.practice import QuizQuestion, TranslationTask
+from english_agent.models.review import StepReview, SummaryReview
 from english_agent.versions import Provenance
 
 MAX_STEPS = 4
@@ -171,6 +172,8 @@ class LessonStep(BaseModel):
     # Code-owned: taken from the research notes, never from the step writer.
     sources: Annotated[list[Source], Field(max_length=5)] = Field(default_factory=list)
     provenance: Provenance | None = None
+    # Code-owned: the Critic's last review of this step; None when the Critic was off.
+    review: StepReview | None = None
 
     _check_slug = field_validator("slug")(_reject_reserved)
 
@@ -216,6 +219,8 @@ class TopicSummary(BaseModel):
     # Code-owned, from the research notes.
     sources: Annotated[list[Source], Field(max_length=5)] = Field(default_factory=list)
     provenance: Provenance | None = None
+    # Code-owned: the Critic's last review of the cheat sheet; None when the Critic was off.
+    review: SummaryReview | None = None
 
 
 class TopicContent(BaseModel):

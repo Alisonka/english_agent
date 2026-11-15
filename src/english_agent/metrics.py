@@ -33,6 +33,9 @@ TELEGRAM_FLOOD_WAIT = Counter(
 LESSONS_SENT = Counter("english_agent_lessons_sent_total", "Lessons delivered to a learner", ["cefr"])
 LESSONS_FAILED = Counter("english_agent_lessons_failed_total", "Lesson attempts that failed", ["final"])
 ALERTS = Counter("english_agent_alerts_total", "Operational alerts raised", ["kind"])
+CONTENT_RUNS = Counter("english_agent_content_runs_total", "Topic content runs, by outcome", ["outcome"])
+REVIEWS = Counter("english_agent_reviews_total", "Critic reviews, by artifact and verdict", ["artifact", "verdict"])
+REVIEW_ISSUES = Counter("english_agent_review_issues_total", "Issues the Critic reported, by kind", ["kind"])
 
 
 def serve_metrics(port: int) -> None:

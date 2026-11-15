@@ -13,21 +13,28 @@ flowchart LR
     research --> notes[TopicNotes]
     notes --> plan[plan_topic]
     plan --> steps["write_step x N (+ re-teach) and write_summary"]
-    steps -->|"one forced tool call each (Claude)"| content["Validated TopicContent (JSON)"]
+    steps --> critic["Critic (second model): accept, or one rewrite"]
+    critic -->|"checked"| content["Validated TopicContent (JSON)"]
     content --> telegram["Telegram (one step a day, then the cheat sheet)"]
 ```
 
 - **Research** ([src/english_agent/research/](src/english_agent/research/)): an
   agent crawls sitemaps and reads grammar articles from three curated sources
   (`englex.ru`, `skyeng.ru`, `skysmart.ru`), returning structured notes.
-- **Generation** ([src/english_agent/topic_writer.py](src/english_agent/topic_writer.py)):
+- **Generation** ([src/english_agent/session_runner.py](src/english_agent/session_runner.py)):
   a topic is taught over **1–4 short daily steps**, not one long lesson. The planner
   ([planner.py](src/english_agent/planner.py)) splits the research notes into ordered
   steps; the step writer ([step_writer.py](src/english_agent/step_writer.py)) turns each
   into a `LessonStep` (a scannable message plus a practice bank, with an `alt` re-teach
   variant); the summary writer ([summary_writer.py](src/english_agent/summary_writer.py))
-  builds the end-of-topic cheat sheet. The whole `TopicContent` is written once per
-  (topic, level) and shared. Provenance and `sources` are code-owned. Lessons stored in
+  builds the end-of-topic cheat sheet. Before any learner sees them, the Critic
+  ([critic.py](src/english_agent/critic.py), `CRITIC_MODEL`, another model than the writer)
+  checks every step and the cheat sheet against the research notes and the level, answers each
+  quiz question itself (a key that differs from its answer blocks the step) and sends a step
+  with blocking issues back for one rewrite; a step still rejected fails the run, which is
+  retried later. The runner holds the run to `CONTENT_RUN_MAX_CALLS` / `CONTENT_RUN_MAX_COST_USD`
+  and stores a report of it (stages, calls, cost, rewrites) in `lesson_contents.run`. The whole
+  `TopicContent` is written once per (topic, level) and shared. Provenance and `sources` are code-owned. Lessons stored in
   the old single-lesson schema (`Lesson`) are still read, but no longer written.
 - **Telegram** ([src/english_agent/telegram/](src/english_agent/telegram/)): renders a
   step as one short HTML message (a hook, one key idea, three examples with the Russian
@@ -166,6 +173,10 @@ Configuration is read from environment variables or a local `.env` file (see
 | `FSRS_MAXIMUM_INTERVAL_DAYS` | no | `180` | Longest gap between two reviews of an item |
 | `RESEARCH_MODEL` | no | `claude-haiku-5-5` | Model used by the research agent |
 | `WRITER_MODEL` | no | `claude-haiku-5-5` | Model used by the lesson writer |
+| `CRITIC_MODEL` | no | `claude-sonnet-5-5` | Model that reviews every written step and cheat sheet; empty turns the Critic off |
+| `CRITIC_EFFORT` | no | `medium` | Claude API `output_config.effort` for the Critic |
+| `CRITIC_MAX_REVISIONS` | no | `1` | Rewrites the Critic may ask for per step before the run fails |
+| `CONTENT_RUN_MAX_CALLS` / `CONTENT_RUN_MAX_COST_USD` | no | `60` / `2.0` | Limits of one topic's content run (research, writing, reviews) |
 | `LLM_MAX_TOKENS` | no | `8192` | Max tokens per LLM call |
 | `RESEARCH_MAX_STEPS` | no | `12` | Max research agent steps |
 | `RESEARCH_MAX_FETCHES_PER_SITE` | no | `2` | Max page fetches per site |
@@ -332,6 +343,7 @@ compose network (`bot:9100`, `worker:9100`); what to watch:
 | `english_agent_job_duration_seconds{task="deliver_lesson"}` | lessons taking minutes: content not prewarmed, Claude slow |
 | `english_agent_lessons_sent_total`, `english_agent_lessons_failed_total` | sent per day vs. learners due |
 | `english_agent_llm_errors_total`, `english_agent_llm_cost_usd_total` | Claude outages and spend |
+| `english_agent_content_runs_total{outcome}`, `english_agent_reviews_total{verdict="revise"}`, `english_agent_review_issues_total{kind}` | failing content runs, how often and why the Critic sends steps back |
 | `english_agent_telegram_requests_total{outcome!="ok"}`, `english_agent_telegram_retry_after_seconds_total` | blocked chats, flood control |
 | `english_agent_alerts_total` | anything that also went to `ADMIN_CHAT_ID` |
 
@@ -491,7 +503,8 @@ src/english_agent/
   pipeline.py      # topic -> research -> lesson -> Telegram -> lessons table
   practice.py      # quiz and translation task after the lesson (scheduling, sending)
   tracing.py       # OpenTelemetry setup (opt-in OTLP export)
-  topic_writer.py  # research -> topic plan -> steps -> cheat sheet (TopicContent)
+  session_runner.py # research -> topic plan -> steps -> Critic -> cheat sheet (TopicContent), budget, report
+  critic.py        # second-model review of steps and cheat sheets
   llm/             # Anthropic (Claude) client + token-cost estimate
   models/          # pydantic models (curriculum, lesson, practice, golden, storage records)
   prompts/         # system prompts

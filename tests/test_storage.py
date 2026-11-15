@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from english_agent.items import core_item_from_lesson
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import TranslationGrade
+from english_agent.models.run import RunReport, StageReport
 from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import ItemDraft, LessonRecord
 from english_agent.profile import build_profile
@@ -445,6 +446,22 @@ async def test_a_late_failure_does_not_undo_finished_content(sessions: SessionFa
     _, content_id, _ = await claim(contents, "a", AT)
     await contents.finish(content_id, lesson)
     assert (await contents.fail(content_id, "timeout")).status == "ready"
+
+
+async def test_the_run_report_is_stored_with_failed_and_ready_content(sessions: SessionFactory, lesson: Lesson) -> None:
+    contents = LessonContentRepo(sessions)
+    _, content_id, _ = await claim(contents, "a", AT)
+    failed_run = RunReport(
+        outcome="failed", error="ReviewRejected: step 1", calls=9, stages=[StageReport(name="step 1")]
+    )
+    failed = await contents.fail(content_id, "ReviewRejected: step 1", run=failed_run)
+    assert failed.run == failed_run
+
+    await claim(contents, "b", AT + STALE + timedelta(minutes=1))
+    ready_run = RunReport(outcome="ready", calls=20, cost_usd=0.31)
+    ready = await contents.finish(content_id, lesson, run=ready_run)
+    assert ready.run == ready_run
+    assert (await contents.get(content_id)) == ready
 
 
 async def test_sent_lesson_points_at_its_content(sessions: SessionFactory, lesson: Lesson) -> None:

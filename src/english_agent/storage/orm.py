@@ -139,6 +139,8 @@ class LessonContentRow(Base):
     claimed_by: Mapped[str | None] = mapped_column(String(64))
     generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created_at()
+    # `RunReport.model_dump(mode="json")` of the last generation run (ready or failed); NULL before reports.
+    run: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class ItemRow(Base):
