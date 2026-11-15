@@ -58,7 +58,6 @@ _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 # Named prompts whose content we fingerprint. Add new prompts here.
 PROMPT_FILES: dict[str, Path] = {
     "research_system": _PROMPTS_DIR / "research_system.md",
-    "write_lesson_system": _PROMPTS_DIR / "write_lesson_system.md",
     "grade_translation_system": _PROMPTS_DIR / "grade_translation_system.md",
     "plan_topic_system": _PROMPTS_DIR / "plan_topic_system.md",
     "write_step_system": _PROMPTS_DIR / "write_step_system.md",

@@ -11,9 +11,10 @@ flowchart LR
     topic["Curriculum topic (curriculum/*.yaml)"] --> research[ResearchAgent]
     research -->|"reads live sites via sitemaps"| sources[("englex.ru / skyeng.ru / skysmart.ru")]
     research --> notes[TopicNotes]
-    notes --> writer[write_lesson]
-    writer -->|"one forced tool call (Claude)"| lesson["Validated Lesson (JSON)"]
-    lesson --> telegram["Telegram (HTML message)"]
+    notes --> plan[plan_topic]
+    plan --> steps["write_step x N (+ re-teach) and write_summary"]
+    steps -->|"one forced tool call each (Claude)"| content["Validated TopicContent (JSON)"]
+    content --> telegram["Telegram (one step a day, then the cheat sheet)"]
 ```
 
 - **Research** ([src/english_agent/research/](src/english_agent/research/)): an
@@ -26,9 +27,8 @@ flowchart LR
   into a `LessonStep` (a scannable message plus a practice bank, with an `alt` re-teach
   variant); the summary writer ([summary_writer.py](src/english_agent/summary_writer.py))
   builds the end-of-topic cheat sheet. The whole `TopicContent` is written once per
-  (topic, level) and shared. Provenance and `sources` are code-owned. The legacy
-  single-lesson writer ([writer.py](src/english_agent/writer.py)) still serves stored
-  lessons of the old schema.
+  (topic, level) and shared. Provenance and `sources` are code-owned. Lessons stored in
+  the old single-lesson schema (`Lesson`) are still read, but no longer written.
 - **Telegram** ([src/english_agent/telegram/](src/english_agent/telegram/)): renders a
   step as one short HTML message (a hook, one key idea, three examples with the Russian
   behind a spoiler, a self-check, a progress bar and a "tomorrow" teaser) and the cheat
@@ -65,8 +65,8 @@ tokens go.
 ```mermaid
 flowchart TD
     pipelineRun["pipeline.run"] --> researchRun["research.run"]
-    pipelineRun --> writeLesson["writer.write_lesson"]
-    pipelineRun --> sendLesson["telegram.send_lesson"]
+    pipelineRun --> writeLesson["topic.generate (planner, writer.write_step, writer.write_summary)"]
+    pipelineRun --> sendLesson["POST sendMessage (the day's step)"]
     researchRun --> llmChat["llm.chat (tokens)"]
     researchRun --> toolSpans["tool.search_site / tool.fetch_page / tool.finish"]
     toolSpans --> httpGet["GET englex.ru/... (auto httpx span)"]
@@ -99,10 +99,10 @@ provided [docker-compose.yml](docker-compose.yml):
 # 1. Start Jaeger (OTLP collector + storage + UI)
 docker compose up -d
 
-# 2. Run the pipeline with tracing on (prints the lesson, does not send it)
+# 2. Run the pipeline with tracing on (prints the topic content, does not send it)
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
   uv run python -m english_agent.pipeline --topic there_is_are --no-send
-# drop --no-send to also see the telegram.send_lesson span
+# --no-store instead of --no-send also sends every step and the cheat sheet to TELEGRAM_CHAT_ID
 
 # 3. Open the Jaeger UI and pick the "english-agent" service
 open http://localhost:16686
@@ -491,7 +491,7 @@ src/english_agent/
   pipeline.py      # topic -> research -> lesson -> Telegram -> lessons table
   practice.py      # quiz and translation task after the lesson (scheduling, sending)
   tracing.py       # OpenTelemetry setup (opt-in OTLP export)
-  writer.py        # notes -> validated Lesson
+  topic_writer.py  # research -> topic plan -> steps -> cheat sheet (TopicContent)
   llm/             # Anthropic (Claude) client + token-cost estimate
   models/          # pydantic models (curriculum, lesson, practice, golden, storage records)
   prompts/         # system prompts

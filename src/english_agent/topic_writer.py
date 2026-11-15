@@ -1,6 +1,6 @@
 """generate_topic: a curriculum topic in, the whole TopicContent out (research + plan + steps + summary).
 
-This is the step-based replacement for `pipeline.generate_lesson`. It researches the topic once,
+The one generator of lesson content. It researches the topic once,
 plans it into steps, writes each step and its re-teach variant, and writes the cheat sheet, all in
 one span so a trace shows where the night's generation spends its time. Any stage raising leaves
 the caller to record a failed content row and regenerate from scratch next time (no partial content).

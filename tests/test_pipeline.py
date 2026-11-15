@@ -111,14 +111,14 @@ def run_tick(telegram: FakeTelegram) -> Tick:
 
 
 def research_result(topic_id: str, status: str = "failed", message: str = "boom") -> ResearchResult:
-    """A research outcome without notes; `generate_lesson` is stubbed, so the lesson comes separately."""
+    """A research outcome without notes; `generate_topic` is stubbed, so the content comes separately."""
     return ResearchResult.model_validate(
         {"topic_id": topic_id, "status": status, "message": message, "sites_checked": [], "steps": 0, "trajectory": []}
     )
 
 
 def returns(value: Any) -> Any:
-    """An async stand-in for `generate_lesson` that always returns `value`."""
+    """An async stand-in for `generate_topic` that always returns `value`."""
 
     async def stub(*args: Any, **kwargs: Any) -> Any:
         return value
@@ -133,12 +133,6 @@ def echo_topic() -> Any:
         return research_result(topic.id), topic_content(topic.id)
 
     return stub
-
-
-async def test_deliver_lesson_sends_to_the_chat(lesson: Lesson, telegram: FakeTelegram, sent: Sent) -> None:
-    assert await pipeline.deliver_lesson(fake_sender(telegram), lesson, "42") == [1]
-    assert sent[0]["chat_id"] == "42"
-    assert lesson.title_en in sent[0]["text"]
 
 
 def test_a_bot_needs_a_token() -> None:
@@ -160,22 +154,21 @@ def test_main_refuses_to_run_unconfigured_before_calling_llm(
     monkeypatch.setattr(pipeline, "get_settings", make_settings)
 
     async def must_not_run(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("generate_lesson must not be called")
+        raise AssertionError("generate_topic must not be called")
 
-    monkeypatch.setattr(pipeline, "generate_lesson", must_not_run)
+    monkeypatch.setattr(pipeline, "generate_topic", must_not_run)
     assert pipeline.main(["--topic", "there_is_are"]) == 2
     assert "--no-send" in caplog.text
 
 
-def test_main_no_send_prints_lesson_without_telegram(
-    lesson: Lesson,
+def test_main_no_send_prints_the_topic_without_telegram(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     fake_telegram: None,
     sent: Sent,
 ) -> None:
     monkeypatch.setattr(pipeline, "get_settings", make_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", returns((research_result(lesson.topic_id), lesson)))
+    monkeypatch.setattr(pipeline, "generate_topic", returns((research_result("there_is_are"), topic_content())))
 
     assert pipeline.main(["--topic", "there_is_are", "--no-send"]) == 0
     assert json.loads(capsys.readouterr().out)["topic_id"] == "there_is_are"
@@ -217,10 +210,22 @@ def test_main_reports_telegram_failure_and_stops_writing_to_a_blocked_chat(
     assert learner is not None and learner.deactivated_reason == "blocked"
 
 
+def test_main_no_store_sends_every_step_and_the_cheat_sheet(
+    telegram_settings: Settings, monkeypatch: pytest.MonkeyPatch, fake_telegram: None, sent: Sent
+) -> None:
+    monkeypatch.setattr(pipeline, "get_settings", lambda: telegram_settings)
+    content = topic_content()
+    monkeypatch.setattr(pipeline, "generate_topic", returns((research_result("there_is_are"), content)))
+
+    assert pipeline.main(["--topic", "there_is_are", "--no-store"]) == 0
+    assert len(sent) >= len(content.steps) + 1
+    assert "Шпаргалка" in sent[len(content.steps)]["text"]
+
+
 def test_main_when_research_finds_nothing(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     monkeypatch.setattr(pipeline, "get_settings", make_settings)
     result = research_result("there_is_are", status="not_found", message="нет на сайте")
-    monkeypatch.setattr(pipeline, "generate_lesson", returns((result, None)))
+    monkeypatch.setattr(pipeline, "generate_topic", returns((result, None)))
 
     assert pipeline.main(["--topic", "there_is_are", "--no-send"]) == 1
     assert "нет на сайте" in caplog.text
@@ -300,23 +305,14 @@ def test_next_topic_is_the_first_one_not_sent_yet() -> None:
 
 
 @pytest.fixture
-def generated(lesson: Lesson, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Stub both generators, collecting the topic ids asked for.
-
-    Previews (--no-send, no database) still go through the legacy `generate_lesson`; the
-    database-backed path (the tick, a send) goes through `generate_topic`.
-    """
+def generated(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Stub the generator (previews and the database-backed path alike), collecting the topic ids asked for."""
     topics: list[str] = []
-
-    async def fake_lesson(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, Lesson]:
-        topics.append(topic.id)
-        return research_result(topic.id), lesson.model_copy(update={"topic_id": topic.id})
 
     async def fake_topic(topic: Any, settings: Any, **kwargs: Any) -> tuple[ResearchResult, TopicContent]:
         topics.append(topic.id)
         return research_result(topic.id), topic_content(topic.id)
 
-    monkeypatch.setattr(pipeline, "generate_lesson", fake_lesson)
     monkeypatch.setattr(pipeline, "generate_topic", fake_topic)
     return topics
 
@@ -546,13 +542,13 @@ async def test_tick_teaches_the_learners_saved_level(
     assert levels == ["B1"]
 
 
-def test_main_no_send_does_not_open_the_database(lesson: Lesson, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_no_send_does_not_open_the_database(monkeypatch: pytest.MonkeyPatch) -> None:
     def must_not_open(settings: Settings) -> None:
         raise AssertionError("--no-send must not touch the database")
 
     monkeypatch.setattr(pipeline, "open_stores", must_not_open)
     monkeypatch.setattr(pipeline, "get_settings", make_settings)
-    monkeypatch.setattr(pipeline, "generate_lesson", returns((research_result(lesson.topic_id), lesson)))
+    monkeypatch.setattr(pipeline, "generate_topic", returns((research_result("there_is_are"), topic_content())))
     assert pipeline.main(["--topic", "there_is_are", "--no-send"]) == 0
 
 
