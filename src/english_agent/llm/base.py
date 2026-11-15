@@ -14,12 +14,24 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class Usage:
+    """Tokens one call used and its estimated cost (None when the model has no price)."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost_usd: float | None = None
+
+
+@dataclass(frozen=True)
 class AssistantTurn:
     content: str | None
     tool_calls: list[ToolCall] = field(default_factory=list)
     # Provider-native content blocks (e.g. Anthropic thinking + tool_use blocks with
     # signatures). When present they are replayed verbatim so multi-turn tool use works.
     raw_blocks: list[dict[str, Any]] | None = None
+    usage: Usage | None = None  # None when the provider reported none (and for scripted turns)
 
     def to_message(self) -> dict[str, Any]:
         if self.raw_blocks is not None:

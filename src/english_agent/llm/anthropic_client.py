@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from typing import Any
 from weakref import WeakKeyDictionary
 
@@ -34,7 +35,7 @@ import anthropic
 from anthropic import AsyncAnthropic
 
 from english_agent.config import Settings
-from english_agent.llm.base import AssistantTurn, LLMRejected, LLMUnavailable, ToolCall
+from english_agent.llm.base import AssistantTurn, LLMRejected, LLMUnavailable, ToolCall, Usage
 from english_agent.llm.pricing import estimate_cost_usd
 from english_agent.metrics import LLM_COST, LLM_ERRORS, LLM_TOKENS
 from english_agent.tracing import get_tracer, record_model_output
@@ -104,9 +105,22 @@ def to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def to_anthropic_tool_choice(tool_choice: Any) -> dict[str, Any]:
+# Models that answer a forced `tool_choice` ("any" / "tool") with HTTP 400. They get "auto" instead;
+# the system prompt names the tool, and `submit_model` asks again if a turn comes back without it.
+_NO_FORCED_TOOL_CHOICE = ("claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1")
+
+
+def supports_forced_tool_choice(model: str) -> bool:
+    return not model.startswith(_NO_FORCED_TOOL_CHOICE)
+
+
+def to_anthropic_tool_choice(tool_choice: Any, *, forced_allowed: bool = True) -> dict[str, Any]:
     if isinstance(tool_choice, dict):
+        if not forced_allowed:
+            return {"type": "auto"}
         return {"type": "tool", "name": tool_choice["function"]["name"]}
+    if not forced_allowed and str(tool_choice) == "any":
+        return {"type": "auto"}
     return {"type": str(tool_choice)}
 
 
@@ -161,7 +175,9 @@ class AnthropicLLM:
                         system=system,
                         messages=converted,
                         tools=to_anthropic_tools(tools),
-                        tool_choice=to_anthropic_tool_choice(tool_choice),
+                        tool_choice=to_anthropic_tool_choice(
+                            tool_choice, forced_allowed=supports_forced_tool_choice(self.model)
+                        ),
                         cache_control={"type": "ephemeral"},
                         **extra,
                     )
@@ -171,6 +187,7 @@ class AnthropicLLM:
                 span.record_exception(error)
                 span.set_attribute("error.type", type(classified).__name__)
                 raise classified from error
+            reported: Usage | None = None
             if response.usage is not None:
                 usage = response.usage
                 cache_write = usage.cache_creation_input_tokens or 0
@@ -194,10 +211,17 @@ class AnthropicLLM:
                 if cost is not None:
                     LLM_COST.labels(self.model).inc(cost)
                     span.set_attribute("gen_ai.usage.cost_usd", round(cost, 6))
+                reported = Usage(
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_read_tokens=cache_read,
+                    cache_write_tokens=cache_write,
+                    cost_usd=cost,
+                )
             if response.stop_reason is not None:
                 span.set_attribute("gen_ai.response.finish_reason", response.stop_reason)
             blocks = [json.loads(block.model_dump_json(exclude_none=True)) for block in response.content]
-            turn = parse_response_blocks(blocks)
+            turn = replace(parse_response_blocks(blocks), usage=reported)
             span.set_attribute("gen_ai.response.tool_calls", len(turn.tool_calls))
             record_model_output(
                 span,

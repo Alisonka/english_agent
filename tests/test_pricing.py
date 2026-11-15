@@ -48,3 +48,4 @@ def test_cache_prices_fall_back_to_input_price() -> None:
 def test_configured_models_are_priced() -> None:
     # The models the project actually uses must have a price, or cost silently vanishes.
     assert "claude-haiku-5-5" in PRICING
+    assert "claude-sonnet-5-5" in PRICING
