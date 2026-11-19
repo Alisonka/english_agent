@@ -12,6 +12,7 @@ from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from conftest import lesson_payload
 from english_agent.bot.app import build_dispatcher
 from english_agent.bot.deps import BotDeps, InProcessJobs
+from english_agent.bot.handlers import parse_interests
 from english_agent.config import Settings
 from english_agent.grading import Grader, grade_answer, refresh_profile_safely
 from english_agent.models.curriculum import load_curriculum
@@ -250,6 +251,48 @@ async def test_status_shows_the_settings() -> None:
     await bot.text("/status")
     status = bot.telegram.texts[0]
     assert "<b>B1</b>" in status and "Europe/Moscow" in status and "18:00" in status
+
+
+async def test_goal_button_saves_the_goal_and_status_shows_it() -> None:
+    bot = Harness()
+    await bot.text("/goal")
+    [sent] = bot.telegram.of(SendMessage)
+    assert [row[0].callback_data for row in sent.reply_markup.inline_keyboard] == [
+        "goal:work",
+        "goal:travel",
+        "goal:exam",
+        "goal:general",
+    ]
+
+    await bot.tap("goal:travel")
+    await bot.tap("goal:nonsense")  # an unknown button changes nothing
+    assert bot.learners.by_chat["42"].goal == "travel"
+    assert any(isinstance(call, EditMessageText) and "Для путешествий" in call.text for call in bot.telegram.calls)
+
+    await bot.text("/status")
+    assert "Цель: Для путешествий" in bot.telegram.texts[-1]
+
+
+async def test_interests_are_parsed_saved_and_cleared() -> None:
+    bot = Harness()
+    await bot.text("/interests футбол,  IT , футбол")
+    assert bot.learners.by_chat["42"].interests == ["футбол", "IT"]
+    assert "Интересы: футбол, IT" in bot.telegram.texts[-1]
+
+    await bot.text("/interests")
+    assert "через запятую" in bot.telegram.texts[-1]
+    assert bot.learners.by_chat["42"].interests == ["футбол", "IT"]  # a bad command keeps them
+
+    await bot.text("/interests -")
+    assert bot.learners.by_chat["42"].interests == []
+
+
+def test_parse_interests_enforces_the_limits() -> None:
+    assert parse_interests("a, b") == ["a", "b"]
+    assert parse_interests(" - ") == []
+    assert parse_interests(", ,") is None
+    assert parse_interests(",".join(f"t{n}" for n in range(6))) is None  # more than five
+    assert parse_interests("x" * 31) is None
 
 
 # --- practice: quiz answers and the translation task ------------------------------

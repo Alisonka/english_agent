@@ -447,6 +447,19 @@ async def test_invalid_citations_name_every_id_that_cannot_back_a_decision(sessi
     assert [e.id for e in await repo.since(learner.id, at - timedelta(seconds=1), topic_id="tenses")] == [other_topic]
 
 
+async def test_learner_goal_and_interests_are_saved(sessions: SessionFactory) -> None:
+    learners = LearnerRepo(sessions)
+    created = await learners.get_or_create("42", "A2")
+    assert (created.goal, created.interests) == (None, [])
+
+    await learners.set_goal("42", "exam")
+    updated = await learners.set_interests("42", ["футбол", "IT"])
+
+    assert updated is not None and (updated.goal, updated.interests) == ("exam", ["футбол", "IT"])
+    assert await learners.get("42") == updated
+    assert await learners.set_goal("missing", "work") is None
+
+
 async def test_new_learner_gets_the_given_schedule(sessions: SessionFactory) -> None:
     learners = LearnerRepo(sessions)
     schedule = LearnerSchedule(timezone="Asia/Vladivostok", lesson_send_time=time(7, 30), quiz_delay_minutes=30)

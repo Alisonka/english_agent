@@ -51,7 +51,10 @@ class Base(DeclarativeBase):
 
 class LearnerRow(Base):
     __tablename__ = "learners"
-    __table_args__ = (CheckConstraint("quiz_delay_minutes >= 0", name="quiz_delay_minutes"),)
+    __table_args__ = (
+        CheckConstraint("quiz_delay_minutes >= 0", name="quiz_delay_minutes"),
+        CheckConstraint("goal IN ('work', 'travel', 'exam', 'general')", name="goal"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_chat_id: Mapped[str] = mapped_column(String(64), unique=True)
@@ -69,6 +72,9 @@ class LearnerRow(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deactivated_reason: Mapped[str | None] = mapped_column(String(64))
+    # /goal and /interests: what the course leans towards and the themes of personal exercises.
+    goal: Mapped[str | None] = mapped_column(String(16))
+    interests: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
 
 
 class LessonRow(Base):

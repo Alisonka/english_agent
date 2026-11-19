@@ -24,6 +24,7 @@ from english_agent.models.storage import (
     ItemAccuracy,
     ItemDraft,
     ItemRecord,
+    LearnerGoal,
     LearnerProfileRecord,
     LearnerRecord,
     LessonClaim,
@@ -153,6 +154,12 @@ class FakeLearners:
 
     async def deactivate(self, telegram_chat_id: str, reason: str) -> None:
         self._change(telegram_chat_id, is_active=False, deactivated_reason=reason)
+
+    async def set_goal(self, telegram_chat_id: str, goal: LearnerGoal) -> LearnerRecord | None:
+        return self._change(telegram_chat_id, goal=goal)
+
+    async def set_interests(self, telegram_chat_id: str, interests: list[str]) -> LearnerRecord | None:
+        return self._change(telegram_chat_id, interests=interests)
 
     def started(self, telegram_chat_id: str, on: date, cefr: Cefr = "A2", **changes: Any) -> LearnerRecord:
         """Test helper: a learner whose course started on `on`."""

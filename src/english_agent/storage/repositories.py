@@ -40,6 +40,7 @@ from english_agent.models.storage import (
     ItemAccuracy,
     ItemDraft,
     ItemRecord,
+    LearnerGoal,
     LearnerProfileRecord,
     LearnerRecord,
     LessonClaim,
@@ -103,6 +104,10 @@ class LearnerStore(Protocol):
     async def set_paused(self, telegram_chat_id: str, paused: bool) -> LearnerRecord | None: ...
 
     async def deactivate(self, telegram_chat_id: str, reason: str) -> None: ...
+
+    async def set_goal(self, telegram_chat_id: str, goal: LearnerGoal) -> LearnerRecord | None: ...
+
+    async def set_interests(self, telegram_chat_id: str, interests: list[str]) -> LearnerRecord | None: ...
 
 
 class LessonStore(Protocol):
@@ -591,6 +596,13 @@ class LearnerRepo:
     async def deactivate(self, telegram_chat_id: str, reason: str) -> None:
         """Stop all sending to the chat (the bot was blocked, the course is over) until /start."""
         await self._change(telegram_chat_id, is_active=False, deactivated_reason=reason)
+
+    async def set_goal(self, telegram_chat_id: str, goal: LearnerGoal) -> LearnerRecord | None:
+        return await self._change(telegram_chat_id, goal=goal)
+
+    async def set_interests(self, telegram_chat_id: str, interests: list[str]) -> LearnerRecord | None:
+        """Replace the learner's interests (already parsed: see `bot.handlers.parse_interests`)."""
+        return await self._change(telegram_chat_id, interests=interests)
 
 
 class LessonRepo:
