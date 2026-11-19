@@ -112,6 +112,16 @@ def next_step(
     remaining topic is on the frontier, the order alone decides (a lesson always comes).
     """
     ordered = sorted(curriculum.topics, key=lambda topic: topic.order)
+    # A topic in progress is finished first, even when an earlier one is still untouched (the
+    # frontier may have held that one back): a learner is never left in the middle of a topic.
+    for topic in ordered:
+        here = progress.get(topic.id)
+        if topic.id in skipped or here is None or is_done(here):
+            continue
+        slug = reteach_candidate(here, accuracy)
+        if slug is not None:
+            return NextStep(topic, _index_of(here, slug), "alt", here.content_id, None)
+        return NextStep(topic, _first_missing_main_index(here), "main", here.content_id, None)
     last_done: CurriculumTopic | None = None
     off_frontier: NextStep | None = None
     for topic in ordered:

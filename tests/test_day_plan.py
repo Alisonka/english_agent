@@ -5,7 +5,8 @@ from datetime import UTC, date, datetime
 from english_agent.day_plan import fallback_plan, frontier_known
 from english_agent.models.cefr import Cefr
 from english_agent.models.curriculum import load_curriculum
-from english_agent.progression import next_step
+from english_agent.models.storage import SentStep
+from english_agent.progression import next_step, topic_progress
 from english_agent.topic_graph import default_graph
 
 DAY = date(2026, 11, 20)
@@ -56,3 +57,19 @@ def test_with_nothing_on_the_frontier_the_order_decides() -> None:
     assert found is not None and found.topic.id == "be_present"
     done = {topic.id for topic in curriculum.topics}
     assert next_step(curriculum, {}, done, {}, frontier=set()) is None  # every topic skipped: nothing left
+
+
+def test_a_topic_in_progress_is_finished_before_an_earlier_untouched_one() -> None:
+    curriculum = load_curriculum("A2")
+    later = SentStep(
+        lesson_id=1,
+        topic_id="past_continuous",
+        lesson_date=DAY,
+        step_index=1,
+        step_count=2,
+        step_slug="s1",
+        variant="main",
+        content_id=5,
+    )
+    found = next_step(curriculum, topic_progress([later]), set(), {}, frontier={"be_present"})
+    assert found is not None and (found.topic.id, found.index) == ("past_continuous", 2)
