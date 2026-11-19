@@ -109,9 +109,10 @@ class ThrottlingMiddleware(BaseRequestMiddleware):
         bot: Bot,
         method: TelegramMethod[TelegramType],
     ) -> Response[TelegramType]:
-        if isinstance(method, GetUpdates):
-            return await make_request(bot, method)
         name = method.__api_method__
+        # Compared by name: an isinstance check narrows `method` away from TelegramMethod[TelegramType].
+        if name == GetUpdates.__api_method__:
+            return await make_request(bot, method)
         attempt = 0
         while True:
             await self._limiter.acquire(_chat_of(method))

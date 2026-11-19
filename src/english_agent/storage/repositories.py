@@ -12,8 +12,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
+from typing import cast as narrow
 
-from sqlalchemy import cast, func, select, tuple_, update
+from sqlalchemy import CursorResult, cast, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -617,7 +618,7 @@ class LessonRepo:
                     tuple_(LessonRow.learner_id, LessonRow.lesson_date).in_(keys)
                 )
             )
-            return {(learner_id, day): status for learner_id, day, status in rows}
+            return {(learner_id, day): narrow(LessonStatus, status) for learner_id, day, status in rows}
 
     async def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]:
         """Topics of this level the learner already got: the next lesson is the first topic not in here."""
@@ -696,7 +697,11 @@ class LessonRepo:
             )
             return {
                 (learner_id, day): LessonState(
-                    lesson_id=lesson_id, status=status, attempts=attempts, claimed_at=claimed_at, sent_at=sent_at
+                    lesson_id=lesson_id,
+                    status=narrow(LessonStatus, status),
+                    attempts=attempts,
+                    claimed_at=claimed_at,
+                    sent_at=sent_at,
                 )
                 for learner_id, day, lesson_id, status, attempts, claimed_at, sent_at in rows
             }
@@ -819,7 +824,7 @@ class LessonRepo:
                 .where(LessonRow.lesson_date < before, LessonRow.status.in_(("pending", "sending", "failed")))
                 .values(status="skipped", claimed_at=None, error=func.coalesce(LessonRow.error, "not sent that day"))
             )
-            return int(result.rowcount or 0)
+            return int(narrow(CursorResult[Any], result).rowcount or 0)
 
     async def _save(self, learner_id: int, day: date, **values: Any) -> LessonRecord:
         """Insert the day's row, or overwrite an earlier failed attempt; a sent lesson is final."""
@@ -1182,7 +1187,7 @@ class ProfileRepo:
                 )
             ).one()
             return ProfileInputs(
-                cefr=learner.cefr,
+                cefr=narrow(Cefr, learner.cefr),
                 window_days=window_days,
                 lessons_sent=lessons_sent or 0,
                 errors=[ErrorRecord.model_validate(error) for error in errors],
@@ -1215,7 +1220,7 @@ class MaintenanceRepo:
             .values(item_id=ItemRow.id)
         )
         async with session_scope(self._sessions) as session:
-            return (await session.execute(statement)).rowcount
+            return int(narrow(CursorResult[Any], await session.execute(statement)).rowcount or 0)
 
     async def replay_reviews(self) -> int:
         """Rate every stored quiz answer and graded translation that has no review log yet, oldest first."""
@@ -1228,11 +1233,14 @@ class MaintenanceRepo:
                     .where(QuizPollRow.item_id.is_not(None))
                 )
             ).all()
-            for answer, item_id in answers:
-                rating = quiz_rating(answer.is_correct)
-                ref = f"quiz_answer:{answer.id}"
-                payload = {"poll_id": answer.poll_id}
-                events.append((answer.answered_at, answer.learner_id, item_id, rating, "quiz", ref, payload))
+            for quiz_answer, poll_item_id in answers:
+                assert poll_item_id is not None  # filtered by the query
+                rating = quiz_rating(quiz_answer.is_correct)
+                ref = f"quiz_answer:{quiz_answer.id}"
+                quiz_payload: dict[str, Any] = {"poll_id": quiz_answer.poll_id}
+                events.append(
+                    (quiz_answer.answered_at, quiz_answer.learner_id, poll_item_id, rating, "quiz", ref, quiz_payload)
+                )
             graded = (
                 await session.execute(
                     select(TranslationAnswerRow, LessonRow.topic_id)
@@ -1246,12 +1254,14 @@ class MaintenanceRepo:
                 if item is None or answer.graded_at is None:
                     continue
                 for sentence in TranslationGrade.model_validate(answer.grade).sentences:
-                    rating = translation_rating(sentence.verdict)
-                    if rating is None:
+                    sentence_rating = translation_rating(sentence.verdict)
+                    if sentence_rating is None:
                         continue
                     ref = f"translation_answer:{answer.id}:{sentence.n}"
-                    payload = {"verdict": sentence.verdict}
-                    events.append((answer.graded_at, answer.learner_id, item.id, rating, "translation", ref, payload))
+                    verdict: dict[str, Any] = {"verdict": sentence.verdict}
+                    events.append(
+                        (answer.graded_at, answer.learner_id, item.id, sentence_rating, "translation", ref, verdict)
+                    )
 
             applied = 0
             for at, learner_id, item_id, rating, source, source_ref, payload in sorted(events, key=lambda e: e[0]):
@@ -1517,7 +1527,7 @@ class PracticeRepo:
             )
             kinds: dict[int, set[PracticeKind]] = {}
             for lesson_id, kind in rows:
-                kinds.setdefault(lesson_id, set()).add(kind)
+                kinds.setdefault(lesson_id, set()).add(narrow(PracticeKind, kind))
             return kinds
 
     async def asked(self, learner_id: int, since: datetime) -> AskedHistory:

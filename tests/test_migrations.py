@@ -58,7 +58,7 @@ def test_existing_learners_count_as_started_after_0004(database_url: str) -> Non
 
         run_alembic(engine, "upgrade", "0004")
         with engine.connect() as connection:
-            rows = dict(connection.execute(text("SELECT id, curriculum_started_on FROM learners")).tuples())
+            rows = dict(connection.execute(text("SELECT id, curriculum_started_on FROM learners")).tuples().all())
         assert rows == {with_lesson: date(2026, 10, 27), without: date(2026, 11, 3)}
 
 
@@ -85,7 +85,7 @@ def test_sent_lessons_become_legacy_content_in_0005(database_url: str) -> None:
             contents = connection.execute(
                 text("SELECT id, topic_id, content_key, status, payload FROM lesson_contents")
             ).all()
-            links = dict(connection.execute(text("SELECT status, content_id FROM lessons")).tuples())
+            links = dict(connection.execute(text("SELECT status, content_id FROM lessons")).tuples().all())
         [(content_id, topic_id, key, status, body)] = contents
         assert (topic_id, key, status, body) == ("there_is_are", "legacy", "ready", {"topic_id": "there_is_are"})
         assert links == {"sent": content_id, "failed": None}
