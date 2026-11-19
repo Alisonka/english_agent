@@ -56,7 +56,9 @@ async def plan_topic(
     *,
     cefr: Cefr = "A2",
     curriculum_version: int | None = None,
+    steps: int | None = None,
 ) -> TopicPlan:
+    """The topic's steps; `steps` fixes their number (a remedial mini-lesson is one step)."""
     provenance = build_provenance(
         component="topic_planner",
         schema_version=SCHEMA_VERSIONS["topic_plan"],
@@ -64,7 +66,7 @@ async def plan_topic(
         prompt_names=("plan_topic_system",),
         curriculum_version=curriculum_version,
     )
-    target = step_budget(notes)
+    target = steps or step_budget(notes)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _PROMPT},
         {
@@ -90,10 +92,17 @@ async def plan_topic(
         ),
         messages=messages,
         build=build,
-        problem=lambda plan: plan_problems(plan, notes),
+        problem=lambda plan: _with_count(plan_problems(plan, notes), plan, steps),
         span_name="planner.plan_topic",
         span_attrs={"topic.id": topic.id, "topic.target_steps": target},
     )
+
+
+def _with_count(problems: str, plan: TopicPlan, steps: int | None) -> str:
+    if steps is None or len(plan.steps) == steps:
+        return problems
+    count = f"the plan must have exactly {steps} step(s), not {len(plan.steps)}"
+    return f"{problems}; {count}" if problems else count
 
 
 def _numbered_notes(notes: TopicNotes) -> str:

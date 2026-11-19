@@ -36,6 +36,7 @@ from english_agent.knowledge import (
 )
 from english_agent.mentor_memory import STALE_AFTER, Observation, can_move, evaluate_expectation
 from english_agent.models.cefr import Cefr
+from english_agent.models.content_order import ContentBrief, ContentOrder, OrderStatus
 from english_agent.models.knowledge import LearnerAbility, QuestionStat
 from english_agent.models.lesson import Lesson
 from english_agent.models.mentor import (
@@ -90,6 +91,7 @@ from english_agent.srs import GOOD, ReviewScheduler, due_at, make_scheduler, qui
 from english_agent.storage.db import SessionFactory, make_engine, make_session_factory, session_scope
 from english_agent.storage.orm import (
     CardRow,
+    ContentOrderRow,
     DayPlanRow,
     DossierRow,
     ErrorRow,
@@ -341,6 +343,16 @@ class EvidenceStore(Protocol):
     async def topic_answers(self, learner_id: int, topic_ids: list[str]) -> dict[str, tuple[int, int]]: ...
 
 
+class OrderStore(Protocol):
+    async def order(self, brief: ContentBrief, cefr: Cefr) -> ContentOrder: ...
+
+    async def by_topic(self, topic_id: str, cefr: Cefr) -> ContentOrder | None: ...
+
+    async def open_orders(self, limit: int) -> list[ContentOrder]: ...
+
+    async def finish(self, order_id: int, status: OrderStatus, content_id: int | None, now: datetime) -> None: ...
+
+
 class KnowledgeStore(Protocol):
     async def known_topics(self, learner_id: int, now: datetime) -> set[str]: ...
 
@@ -357,6 +369,7 @@ class Stores:
     plans: PlanStore
     knowledge: KnowledgeStore
     evidence: EvidenceStore
+    orders: OrderStore
 
 
 def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = None) -> Stores:
@@ -372,6 +385,7 @@ def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = Non
         plans=PlanRepo(sessions),
         knowledge=KnowledgeRepo(sessions, scheduler),
         evidence=EvidenceRepo(sessions),
+        orders=ContentOrderRepo(sessions),
     )
 
 
@@ -1538,6 +1552,50 @@ async def _require_citations(session: AsyncSession, learner_id: int, evidence_id
         raise InvalidCitationsError([])
     if invalid := await _invalid_citations(session, learner_id, evidence_ids):
         raise InvalidCitationsError(invalid)
+
+
+class ContentOrderRepo:
+    """Remedial and contrast lessons on order: one per brief and level, whoever ordered it first."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def order(self, brief: ContentBrief, cefr: Cefr) -> ContentOrder:
+        """Order the brief's lesson; an order already there (any status) is returned as it is."""
+        statement = (
+            insert(ContentOrderRow)
+            .values(topic_id=brief.topic_id, cefr=cefr, brief=brief.model_dump(mode="json"), status="ordered")
+            .on_conflict_do_nothing(index_elements=["topic_id", "cefr"])
+        )
+        async with session_scope(self._sessions) as session:
+            await session.execute(statement)
+            row = await session.scalar(
+                select(ContentOrderRow).where(ContentOrderRow.topic_id == brief.topic_id, ContentOrderRow.cefr == cefr)
+            )
+            assert row is not None
+            return ContentOrder.model_validate(row)
+
+    async def by_topic(self, topic_id: str, cefr: Cefr) -> ContentOrder | None:
+        async with session_scope(self._sessions) as session:
+            row = await session.scalar(
+                select(ContentOrderRow).where(ContentOrderRow.topic_id == topic_id, ContentOrderRow.cefr == cefr)
+            )
+            return None if row is None else ContentOrder.model_validate(row)
+
+    async def open_orders(self, limit: int) -> list[ContentOrder]:
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(ContentOrderRow)
+                .where(ContentOrderRow.status == "ordered")
+                .order_by(ContentOrderRow.created_at)
+                .limit(limit)
+            )
+            return [ContentOrder.model_validate(row) for row in rows]
+
+    async def finish(self, order_id: int, status: OrderStatus, content_id: int | None, now: datetime) -> None:
+        async with session_scope(self._sessions) as session:
+            row = await session.get_one(ContentOrderRow, order_id)
+            row.status, row.content_id, row.finished_at = status, content_id, now
 
 
 class PlanRepo:

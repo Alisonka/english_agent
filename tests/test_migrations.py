@@ -27,6 +27,7 @@ TABLES = {
     "question_stats",
     "topic_marks",
     "day_plans",
+    "content_orders",
 }
 
 

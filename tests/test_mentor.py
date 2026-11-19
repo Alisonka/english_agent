@@ -183,3 +183,18 @@ def test_the_evening_window(hour: int, minute: int, due: bool) -> None:
 
     local = datetime(2026, 11, 3, hour, minute, tzinfo=UTC)
     assert mentor_due(local, time(21, 0)) is due
+
+
+async def test_the_mentor_orders_a_remedial_and_gets_a_receipt(sessions: SessionFactory, lesson: Lesson) -> None:
+    runtime, repos, learner = await setup(sessions, lesson)
+    [cited] = await evidence_ids(repos, learner)
+    brief = {"kind": "remedial", "topic_ids": ["there_is_are"], "error_type": "form", "focus_ru": "Is или are."}
+    llm = ScriptedLLM(
+        [turn(("order_content", brief)), turn(("order_content", brief)), turn(("commit_plan", review_day([cited])))]
+    )
+
+    assert await session(runtime, repos, learner, llm) == "committed"
+    receipts = [m["content"] for m in llm.transcripts[2] if m["role"] == "tool"]
+    assert receipts[0] == receipts[1] and '"status": "ordered"' in receipts[0]  # one shared order
+    order = await runtime.stores.orders.by_topic("remedial_there_is_are_form", "A2")
+    assert order is not None and order.brief.focus_ru == "Is или are."

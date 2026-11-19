@@ -15,9 +15,10 @@ from conftest import topic_content_payload
 from english_agent import pipeline
 from english_agent.config import Settings
 from english_agent.content import content_key
+from english_agent.models.content_order import ContentBrief
 from english_agent.models.curriculum import load_curriculum
 from english_agent.models.lesson import Lesson
-from english_agent.models.plan import DayPlan, StepChoice
+from english_agent.models.plan import DayPlan, FallbackBranch, StepChoice
 from english_agent.models.run import RunReport
 from english_agent.models.storage import LearnerRecord
 from english_agent.models.topic import TopicContent
@@ -731,3 +732,62 @@ async def test_a_worker_that_died_mid_send_is_taken_over_and_resumed(
     done = lessons.rows[(learner.id, START)]
     assert done.status == "sent" and done.telegram_message_ids == [77]
     assert sent == []  # the message had already arrived; it is not sent again
+
+
+# --- ordered content ---------------------------------------------------------------
+
+
+REMEDIAL = ContentBrief(
+    kind="remedial", topic_ids=["there_is_are"], error_type="form", focus_ru="Is или are после there."
+)
+
+
+async def test_ordered_lessons_are_written_once_and_the_morning_sends_them(
+    run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+    order = await stores.orders.order(REMEDIAL, "A2")
+    assert (await stores.orders.order(REMEDIAL, "A2")).id == order.id  # shared: one order per brief
+    runtime = pipeline.Runtime(tick_settings(), stores, fake_sender(FakeTelegram()))
+
+    assert await pipeline.write_ordered_content(runtime, msk(3)) == 1
+    assert await pipeline.write_ordered_content(runtime, msk(4)) == 0  # nothing left to write
+    assert generated == [REMEDIAL.topic_id]
+    ready = await stores.orders.by_topic(REMEDIAL.topic_id, "A2")
+    assert ready is not None and ready.status == "ready" and ready.content_id is not None
+
+    day = DayPlan(
+        learner_id=learner.id,
+        plan_date=START,
+        day_type="remedial",
+        step=StepChoice(topic_id=REMEDIAL.topic_id, step_index=1),
+        fallback=FallbackBranch(day_type="review_day"),
+        source="agent",
+        created_at=msk(8),
+    )
+    await stores.plans.commit(day, now=msk(8))
+    await run_tick(stores, msk(9, 0))
+    assert len(sent) == 1 and generated == [REMEDIAL.topic_id]  # sent from the written content
+
+
+async def test_ordered_content_not_ready_by_morning_runs_the_fallback_branch(
+    run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+    await stores.orders.order(REMEDIAL, "A2")
+    day = DayPlan(
+        learner_id=learner.id,
+        plan_date=START,
+        day_type="remedial",
+        step=StepChoice(topic_id=REMEDIAL.topic_id, step_index=1),
+        fallback=FallbackBranch(day_type="review_day"),
+        source="agent",
+        created_at=msk(8),
+    )
+    await stores.plans.commit(day, now=msk(8))
+
+    await run_tick(stores, msk(9, 0))
+
+    assert generated == [] and sent == []  # a review day: no lesson, no content written in the morning

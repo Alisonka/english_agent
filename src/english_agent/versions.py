@@ -53,6 +53,9 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "question_stat": 1,
     # The day plan (models/plan.py) and its stored record.
     "day_plan": 1,
+    # A remedial or contrast lesson the Mentor ordered (models/content_order.py).
+    "content_brief": 1,
+    "content_order": 1,
     "day_plan_record": 1,
     "topic_mark": 1,  # storage/orm.py TopicMarkRow: a topic credited by placement or confirmed by an exam
     # The Mentor's memory (models/mentor.py): journal with checkable expectations, hypotheses, dossier.

@@ -4,6 +4,7 @@ from english_agent.storage.db import SessionFactory, make_engine, make_session_f
 from english_agent.storage.repositories import (
     CardRepo,
     CardStore,
+    ContentOrderRepo,
     EvidenceRepo,
     EvidenceStore,
     InvalidCitationsError,
@@ -20,6 +21,7 @@ from english_agent.storage.repositories import (
     LessonStore,
     MaintenanceRepo,
     MentorMemoryRepo,
+    OrderStore,
     PlanRepo,
     PlanStore,
     PracticeRepo,
@@ -34,6 +36,7 @@ from english_agent.storage.repositories import (
 __all__ = [
     "CardRepo",
     "CardStore",
+    "ContentOrderRepo",
     "EvidenceRepo",
     "EvidenceStore",
     "InvalidCitationsError",
@@ -50,6 +53,7 @@ __all__ = [
     "LessonStore",
     "MaintenanceRepo",
     "MentorMemoryRepo",
+    "OrderStore",
     "PlanRepo",
     "PlanStore",
     "PracticeRepo",
