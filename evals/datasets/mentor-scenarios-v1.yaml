@@ -1,0 +1,68 @@
+# Mentor decision scenarios (english_agent.scenarios). A snapshot of one learner and the day types
+# a good tutor may choose. rules_clear: the deterministic policy must pass it; the others measure
+# the agent's judgement. Target: 60 scenarios; disagreements from shadow mode become new ones.
+version: 1
+scenarios:
+  - id: s01_new_learner
+    note: A new A2 learner starts with the first topic.
+    allowed: [new_topic]
+    rules_clear: true
+
+  - id: s02_step_in_progress
+    note: Step 1 of 3 sent and answered well; the topic goes on.
+    in_progress: {topic_id: there_is_are, steps_sent: 1, step_count: 3, last_checks: 4, last_correct: 4, last_days: 2}
+    done_topics: [be_present]
+    allowed: [continue_topic]
+    rules_clear: true
+
+  - id: s03_step_not_sticking
+    note: 40% on the last step over two days — it is explained again before moving on.
+    in_progress: {topic_id: there_is_are, steps_sent: 2, step_count: 3, last_checks: 5, last_correct: 2, last_days: 2}
+    done_topics: [be_present]
+    allowed: [reteach, remedial]
+    rules_clear: true
+
+  - id: s04_too_early_to_judge
+    note: One wrong answer on one day is a slip, not a pattern.
+    in_progress: {topic_id: there_is_are, steps_sent: 2, step_count: 3, last_checks: 1, last_correct: 0, last_days: 1}
+    done_topics: [be_present]
+    allowed: [continue_topic]
+    rules_clear: true
+
+  - id: s05_known_topics_are_skipped
+    note: Topics credited by the placement test are not taught again.
+    known_topics: [be_present, have_got, present_simple_habits]
+    allowed: [new_topic]
+    rules_clear: true
+
+  - id: s06_prerequisite_first
+    note: With the first nine topics done, topic 10 waits for "questions with do/does/did".
+    done_topics: [be_present, have_got, present_simple_habits, present_simple_third_person, present_continuous_now, present_simple_vs_continuous, stative_verbs_a2, past_simple_regular, past_simple_irregular]
+    allowed: [new_topic]
+    rules_clear: true
+
+  - id: s07_b1_starts_at_its_level
+    note: A learner placed at B1 knows A2 and starts with the first B1 topic.
+    cefr: B1
+    allowed: [new_topic]
+    rules_clear: true
+
+  - id: s08_back_after_ten_days
+    note: Back after ten days away — a lighter day or reviews first, not new material.
+    in_progress: {topic_id: there_is_are, steps_sent: 1, step_count: 3, last_checks: 3, last_correct: 3, last_days: 2}
+    done_topics: [be_present]
+    days_away: 10
+    allowed: [light_day, review_day]
+
+  - id: s09_weak_prerequisite
+    note: 40% on Present Perfect vs Past Simple while the Past Simple questions topic was never studied.
+    in_progress: {topic_id: present_perfect_vs_past_simple, steps_sent: 2, step_count: 3, last_checks: 5, last_correct: 2, last_days: 3}
+    done_topics: [past_simple_regular, past_simple_irregular, present_perfect_ever_never, present_perfect_just_already_yet]
+    allowed: [remedial, reteach]
+
+  - id: s10_steady_progress
+    note: Everything goes well; no reason to interrupt the course.
+    in_progress: {topic_id: comparatives, steps_sent: 1, step_count: 2, last_checks: 4, last_correct: 4, last_days: 2}
+    done_topics: [be_present, have_got, articles_a_an]
+    allowed: [continue_topic]
+    rules_clear: true
