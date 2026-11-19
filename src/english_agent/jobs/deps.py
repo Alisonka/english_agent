@@ -16,6 +16,7 @@ from english_agent.health import beat
 from english_agent.jobs.dedup import Deduper, RedisDeduper
 from english_agent.llm import make_client
 from english_agent.pipeline import Runtime
+from english_agent.reflector import Reflector, make_reflector
 from english_agent.research.sitemaps import RedisSitemapCache
 from english_agent.srs import make_scheduler
 from english_agent.storage.db import make_engine, make_session_factory
@@ -30,6 +31,7 @@ class WorkerDeps:
     runtime: Runtime
     dedup: Deduper
     grade: Grader
+    reflect: Reflector | None = None  # None: the Reflector is off
     _stack: AsyncExitStack = field(default_factory=AsyncExitStack)
 
     async def close(self) -> None:
@@ -65,7 +67,13 @@ async def open_worker_deps(settings: Settings) -> WorkerDeps:
             sitemaps=RedisSitemapCache(redis, ttl_days=settings.sitemap_ttl_days),
             alerts=Alerter(sender, settings.admin_chat_id),
         )
-        return WorkerDeps(runtime, RedisDeduper(redis), make_grader(settings, client), stack)
+        return WorkerDeps(
+            runtime,
+            RedisDeduper(redis),
+            make_grader(settings, client),
+            reflect=make_reflector(settings, client),
+            _stack=stack,
+        )
     except BaseException:
         await stack.aclose()
         raise

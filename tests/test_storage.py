@@ -10,8 +10,16 @@ from sqlalchemy.exc import IntegrityError
 from english_agent.items import core_item_from_lesson
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import TranslationGrade
+from english_agent.models.run import RunReport, StageReport
 from english_agent.models.schedule import LearnerSchedule
-from english_agent.models.storage import ItemDraft, LessonRecord
+from english_agent.models.storage import (
+    AskedHistory,
+    AssembledQuestion,
+    AssembledSentence,
+    ItemDraft,
+    LessonRecord,
+    PracticeBlock,
+)
 from english_agent.profile import build_profile
 from english_agent.srs import AGAIN, GOOD, ReviewScheduler
 from english_agent.storage import (
@@ -447,6 +455,22 @@ async def test_a_late_failure_does_not_undo_finished_content(sessions: SessionFa
     assert (await contents.fail(content_id, "timeout")).status == "ready"
 
 
+async def test_the_run_report_is_stored_with_failed_and_ready_content(sessions: SessionFactory, lesson: Lesson) -> None:
+    contents = LessonContentRepo(sessions)
+    _, content_id, _ = await claim(contents, "a", AT)
+    failed_run = RunReport(
+        outcome="failed", error="ReviewRejected: step 1", calls=9, stages=[StageReport(name="step 1")]
+    )
+    failed = await contents.fail(content_id, "ReviewRejected: step 1", run=failed_run)
+    assert failed.run == failed_run
+
+    await claim(contents, "b", AT + STALE + timedelta(minutes=1))
+    ready_run = RunReport(outcome="ready", calls=20, cost_usd=0.31)
+    ready = await contents.finish(content_id, lesson, run=ready_run)
+    assert ready.run == ready_run
+    assert (await contents.get(content_id)) == ready
+
+
 async def test_sent_lesson_points_at_its_content(sessions: SessionFactory, lesson: Lesson) -> None:
     learner = await LearnerRepo(sessions).get_or_create("42", "A2")
     _, content_id, _ = await claim(LessonContentRepo(sessions), "a", AT)
@@ -591,17 +615,64 @@ async def test_sent_steps_and_taught_step_on_legacy_rows(sessions: SessionFactor
     assert await lessons.taught_step(learner.id, "there_is_are:missing") is None
 
 
-async def test_due_or_weakest_excludes_the_current_topic(sessions: SessionFactory, lesson: Lesson) -> None:
+async def test_memory_lists_every_card_with_its_item_due_date_and_recall(
+    sessions: SessionFactory, lesson: Lesson
+) -> None:
     learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    other = await LearnerRepo(sessions).get_or_create("43", "A2")
     items, cards = ItemRepo(sessions), CardRepo(sessions, SCHEDULER)
     now = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
-    today_item = (await items.get_or_create(_topic_draft("present_simple", "s1", lesson.sources)))[0]
-    old_item = (await items.get_or_create(_topic_draft("there_is_are", "core", lesson.sources)))[0]
-    await cards.review(learner.id, today_item.id, AGAIN, now - timedelta(days=9), source="quiz", source_ref="a")
-    await cards.review(learner.id, old_item.id, AGAIN, now - timedelta(days=2), source="quiz", source_ref="b")
+    overdue = (await items.get_or_create(_topic_draft("there_is_are", "core", lesson.sources)))[0]
+    fresh = (await items.get_or_create(_topic_draft("present_simple", "s1", lesson.sources)))[0]
+    await cards.review(learner.id, overdue.id, AGAIN, now - timedelta(days=9), source="quiz", source_ref="a")
+    await cards.review(learner.id, fresh.id, GOOD, now, source="quiz", source_ref="b")
+    await cards.review(other.id, fresh.id, GOOD, now, source="quiz", source_ref="c")
 
-    chosen = await cards.due_or_weakest(learner.id, now, exclude_topic_id="present_simple")
-    assert chosen is not None and chosen[1].id == old_item.id  # the current topic's overdue card is skipped
+    memory = {card.item_key: card for card in await cards.memory(learner.id, now)}
+
+    assert set(memory) == {"there_is_are:core", "present_simple:s1"}
+    assert memory["there_is_are:core"].topic_id == "there_is_are"
+    assert memory["there_is_are:core"].due_at < now <= memory["present_simple:s1"].due_at
+    assert memory["there_is_are:core"].retrievability < memory["present_simple:s1"].retrievability
+
+
+async def test_wrong_quiz_items_and_their_errors(sessions: SessionFactory, lesson: Lesson) -> None:
+    practice, lesson_id, item_id = await _quiz_setup(sessions, lesson)
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    assert await practice.wrong_quiz_items(lesson_id) == set()
+
+    await practice.record_poll_answer("p0", "42", [lesson.quiz[0].correct_option])
+    await practice.record_poll_answer("p1", "42", wrong_option(lesson, 1))
+
+    assert await practice.wrong_quiz_items(lesson_id) == {item_id}
+    [error] = await practice.errors_for_items(learner.id, [item_id])
+    assert error.item_id == item_id and error.kind == "quiz"
+    assert await practice.errors_for_items(learner.id, []) == []
+
+
+async def test_asked_collects_the_questions_and_sentences_of_recent_blocks(
+    sessions: SessionFactory, lesson: Lesson
+) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    record = await LessonRepo(sessions).record_sent(learner.id, DAY, lesson, [1], curriculum_version=1)
+    practice = PracticeRepo(sessions, SCHEDULER)
+    quiz = PracticeBlock(
+        kind="quiz",
+        questions=[AssembledQuestion(question=lesson.quiz[0], item_id=None, item_key="t:a", source="today")],
+    )
+    translation = PracticeBlock(
+        kind="translation",
+        sentences=[
+            AssembledSentence(task=lesson.translation[0], item_id=None, item_key="t:b", title_en="t", source="review")
+        ],
+    )
+    await practice.claim_delivery(record.id, "quiz", 1, payload=quiz.model_dump(mode="json"))
+    await practice.claim_delivery(record.id, "translation", 1, payload=translation.model_dump(mode="json"))
+
+    asked = await practice.asked(learner.id, datetime.now(UTC) - timedelta(days=1))
+    assert asked.questions == {"t:a": {lesson.quiz[0].question}}
+    assert asked.sentences == {"t:b": {lesson.translation[0].ru}}
+    assert await practice.asked(learner.id, datetime.now(UTC) + timedelta(minutes=1)) == AskedHistory()
 
 
 async def test_item_accuracy_counts_checks_correct_and_days(sessions: SessionFactory, lesson: Lesson) -> None:

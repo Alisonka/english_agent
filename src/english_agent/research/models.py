@@ -30,8 +30,8 @@ class NoteExample(BaseModel):
     ru: str | None = Field(default=None, max_length=240)
 
 
-class TopicNotes(BaseModel):  # Это то, что research-подагент передаёт функции write_lesson.
-    """What the research subagent hands to write_lesson. Grounded in exactly one fetched page."""
+class TopicNotes(BaseModel):  # Это то, что research-подагент передаёт планировщику темы и писателю шагов.
+    """What the research subagent hands to the topic planner and the step writer. Grounded in one fetched page."""
 
     site: Literal["englex", "skyeng", "skysmart"]
     source: Source

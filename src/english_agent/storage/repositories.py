@@ -22,9 +22,12 @@ from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
+from english_agent.models.run import RunReport
 from english_agent.models.schedule import LearnerSchedule
 from english_agent.models.storage import (
     CORE_SLUG,
+    AskedHistory,
+    CardMemory,
     CardRecord,
     ClaimOutcome,
     ErrorRecord,
@@ -170,9 +173,11 @@ class LessonContentStore(Protocol):
         max_attempts: int,
     ) -> tuple[ClaimOutcome, LessonContentRecord]: ...
 
-    async def finish(self, content_id: int, content: Lesson | TopicContent) -> LessonContentRecord: ...
+    async def finish(
+        self, content_id: int, content: Lesson | TopicContent, *, run: RunReport | None = None
+    ) -> LessonContentRecord: ...
 
-    async def fail(self, content_id: int, reason: str) -> LessonContentRecord: ...
+    async def fail(self, content_id: int, reason: str, *, run: RunReport | None = None) -> LessonContentRecord: ...
 
     async def get(self, content_id: int) -> LessonContentRecord | None: ...
 
@@ -231,6 +236,12 @@ class PracticeStore(Protocol):
 
     async def delivered_kinds(self, lesson_ids: list[int]) -> dict[int, set[PracticeKind]]: ...
 
+    async def asked(self, learner_id: int, since: datetime) -> AskedHistory: ...
+
+    async def wrong_quiz_items(self, lesson_id: int) -> set[int]: ...
+
+    async def errors_for_items(self, learner_id: int, item_ids: list[int]) -> list[ErrorRecord]: ...
+
     async def finish_translation_answer(self, answer_id: int, grade: TranslationGrade) -> TranslationAnswerRecord: ...
 
     async def fail_translation_answer(self, answer_id: int, reason: str) -> None: ...
@@ -243,9 +254,7 @@ class CardStore(Protocol):
 
     async def for_items(self, learner_id: int, item_ids: list[int]) -> list[CardRecord]: ...
 
-    async def due_or_weakest(
-        self, learner_id: int, now: datetime, *, exclude_topic_id: str
-    ) -> tuple[CardRecord, ItemRecord] | None: ...
+    async def memory(self, learner_id: int, now: datetime) -> list[CardMemory]: ...
 
     async def item_accuracy(self, learner_id: int, item_ids: list[int]) -> dict[int, ItemAccuracy]: ...
 
@@ -908,22 +917,26 @@ class LessonContentRepo:
             return "busy"
         return "claimed"
 
-    async def finish(self, content_id: int, content: Lesson | TopicContent) -> LessonContentRecord:
+    async def finish(
+        self, content_id: int, content: Lesson | TopicContent, *, run: RunReport | None = None
+    ) -> LessonContentRecord:
         is_topic = isinstance(content, TopicContent)
         async with session_scope(self._sessions) as session:
             row = await session.get_one(LessonContentRow, content_id, with_for_update=True)
             row.status, row.payload, row.error = "ready", content.model_dump(mode="json"), None
+            row.run = run.model_dump(mode="json") if run is not None else None
             row.payload_kind = "topic" if is_topic else "lesson"
             row.schema_version = SCHEMA_VERSIONS["topic_content" if is_topic else "lesson"]
             row.generated_at = datetime.now(UTC)
             await session.flush()
             return LessonContentRecord.model_validate(row)
 
-    async def fail(self, content_id: int, reason: str) -> LessonContentRecord:
+    async def fail(self, content_id: int, reason: str, *, run: RunReport | None = None) -> LessonContentRecord:
         async with session_scope(self._sessions) as session:
             row = await session.get_one(LessonContentRow, content_id, with_for_update=True)
             if row.status != "ready":  # a late failure never overwrites content another worker finished
                 row.status, row.error = "failed", reason
+                row.run = run.model_dump(mode="json") if run is not None else None
             await session.flush()
             return LessonContentRecord.model_validate(row)
 
@@ -1052,28 +1065,26 @@ class CardRepo:
             )
             return [CardRecord.model_validate(row) for row in rows]
 
-    async def due_or_weakest(
-        self, learner_id: int, now: datetime, *, exclude_topic_id: str
-    ) -> tuple[CardRecord, ItemRecord] | None:
-        """A card to interleave from an older topic: the most overdue, else the least-recalled.
-
-        Excludes the topic being taught today, so the review slot always reaches back. None when the
-        learner has no card outside that topic.
-        """
+    async def memory(self, learner_id: int, now: datetime) -> list[CardMemory]:
+        """Every card of the learner with its item: when it is due and how likely it is recalled at `now`."""
         async with session_scope(self._sessions) as session:
-            base = (
-                select(CardRow, ItemRow)
-                .join(ItemRow, CardRow.item_id == ItemRow.id)
-                .where(CardRow.learner_id == learner_id, ItemRow.topic_id != exclude_topic_id)
-            )
-            due = (await session.execute(base.where(CardRow.due_at <= now).order_by(CardRow.due_at).limit(1))).first()
-            if due is not None:
-                return CardRecord.model_validate(due[0]), ItemRecord.model_validate(due[1])
-            rows = (await session.execute(base)).all()
-            if not rows:
-                return None
-            card, item = min(rows, key=lambda pair: self._scheduler.retrievability(pair[0].fsrs_state, now))
-            return CardRecord.model_validate(card), ItemRecord.model_validate(item)
+            rows = (
+                await session.execute(
+                    select(CardRow, ItemRow)
+                    .join(ItemRow, CardRow.item_id == ItemRow.id)
+                    .where(CardRow.learner_id == learner_id)
+                )
+            ).all()
+            return [
+                CardMemory(
+                    item_id=item.id,
+                    item_key=item.key,
+                    topic_id=item.topic_id,
+                    due_at=card.due_at,
+                    retrievability=self._scheduler.retrievability(card.fsrs_state, now),
+                )
+                for card, item in rows
+            ]
 
     async def item_accuracy(self, learner_id: int, item_ids: list[int]) -> dict[int, ItemAccuracy]:
         """Per item: how many reviews, how many were correct (rating >= Good), on how many UTC days."""
@@ -1508,6 +1519,55 @@ class PracticeRepo:
             for lesson_id, kind in rows:
                 kinds.setdefault(lesson_id, set()).add(kind)
             return kinds
+
+    async def asked(self, learner_id: int, since: datetime) -> AskedHistory:
+        """The questions and sentences the learner was sent since `since`, per item key (from block payloads)."""
+        history = AskedHistory()
+        async with session_scope(self._sessions) as session:
+            payloads = await session.scalars(
+                select(PracticeDeliveryRow.payload)
+                .join(LessonRow, PracticeDeliveryRow.lesson_id == LessonRow.id)
+                .where(
+                    LessonRow.learner_id == learner_id,
+                    PracticeDeliveryRow.claimed_at >= since,
+                    PracticeDeliveryRow.payload.is_not(None),
+                )
+            )
+            for payload in payloads:
+                block = PracticeBlock.model_validate(payload)
+                for question in block.questions:
+                    history.questions.setdefault(question.item_key, set()).add(question.question.question)
+                for sentence in block.sentences:
+                    history.sentences.setdefault(sentence.item_key, set()).add(sentence.task.ru)
+        return history
+
+    async def wrong_quiz_items(self, lesson_id: int) -> set[int]:
+        """The items the learner answered wrong in this lesson's quiz."""
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(QuizPollRow.item_id)
+                .join(PracticeDeliveryRow, QuizPollRow.delivery_id == PracticeDeliveryRow.id)
+                .join(QuizAnswerRow, QuizAnswerRow.poll_id == QuizPollRow.id)
+                .where(
+                    PracticeDeliveryRow.lesson_id == lesson_id,
+                    PracticeDeliveryRow.kind == "quiz",
+                    QuizAnswerRow.is_correct.is_(False),
+                    QuizPollRow.item_id.is_not(None),
+                )
+            )
+            return {item_id for item_id in rows if item_id is not None}
+
+    async def errors_for_items(self, learner_id: int, item_ids: list[int]) -> list[ErrorRecord]:
+        """The learner's errors on these items, oldest first."""
+        if not item_ids:
+            return []
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(ErrorRow)
+                .where(ErrorRow.learner_id == learner_id, ErrorRow.item_id.in_(item_ids))
+                .order_by(ErrorRow.created_at)
+            )
+            return [ErrorRecord.model_validate(row) for row in rows]
 
     async def finish_translation_answer(self, answer_id: int, grade: TranslationGrade) -> TranslationAnswerRecord:
         """Save the grade, close the task, log every corrected sentence in `errors` and rate the lesson's item.

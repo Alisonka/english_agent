@@ -23,10 +23,11 @@ class ModelPrice:
     cache_read: float | None = None
 
 
-# Update these to match your Anthropic plan. Values below are placeholders in the
-# ballpark of Anthropic's small-model tier; verify them before trusting the numbers.
+# Anthropic first-party list prices (prompts up to 100k tokens; Haiku 5.5 costs more above that,
+# which these short prompts never reach). Cache write = 5-minute TTL (1.25x input), read = 0.1x input.
 PRICING: dict[str, ModelPrice] = {
-    "claude-haiku-5-5": ModelPrice(input=0.80, output=4.00, cache_write=1.00, cache_read=0.08),
+    "claude-haiku-5-5": ModelPrice(input=0.10, output=0.50, cache_write=0.125, cache_read=0.01),
+    "claude-sonnet-5-5": ModelPrice(input=2.00, output=10.00, cache_write=2.50, cache_read=0.20),
 }
 
 _PER_MILLION = 1_000_000

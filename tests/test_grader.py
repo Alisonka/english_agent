@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from english_agent.grader import GradeError, _submit_tool, grade_translation
-from english_agent.llm import AssistantTurn, ToolCall
+from english_agent.grader import grade_translation
+from english_agent.llm import AssistantTurn, LLMWriteError, ToolCall
 from english_agent.models.lesson import Lesson
+from english_agent.models.profile import FocusPoint, Reflection
 from english_agent.models.storage import GradingInput, GradingSentence
 from fakes import ScriptedLLM
+
+NOW = datetime(2026, 11, 12, 18, 0, tzinfo=UTC)
 
 
 def grading_input(lesson: Lesson) -> GradingInput:
@@ -69,7 +73,33 @@ async def test_grade_has_code_owned_provenance_and_sees_the_task(lesson: Lesson)
     prompt = llm.transcripts[0][1]["content"]
     assert lesson.translation[1].reference_en in prompt
     assert "<<<\nThere is a window in my room.\n>>>" in prompt
-    assert "provenance" not in _submit_tool()["function"]["parameters"]["properties"]
+    assert "provenance" not in llm.calls[0]["tools"][0]["function"]["parameters"]["properties"]
+
+
+async def test_the_learners_recurring_mistakes_reach_the_grader(lesson: Lesson) -> None:
+    point = FocusPoint(
+        item_keys=["there_is_are:core"],
+        pattern_ru="Ставит there is перед множественным числом.",
+        contrast_ru="Много предметов — there are.",
+        error_type="target_form",
+        evidence_error_ids=[1],
+    )
+    learner = Reflection(
+        focus_points=[point], notes_ru="Следить за числом.", based_on_errors=3, until_error_id=1, reflected_at=NOW
+    )
+    llm = ScriptedLLM([submit(GOOD)])
+
+    await grade_translation(llm, grading_input(lesson).model_copy(update={"learner": learner}), "answer")
+
+    prompt = llm.transcripts[0][1]["content"]
+    assert "recurring mistakes" in prompt and point.pattern_ru in prompt and "Следить за числом." in prompt
+    assert prompt.index(point.pattern_ru) < prompt.index("<<<")
+
+
+async def test_without_a_reflection_the_grader_sees_no_learner_section(lesson: Lesson) -> None:
+    llm = ScriptedLLM([submit(GOOD)])
+    await grade_translation(llm, grading_input(lesson), "answer")
+    assert "recurring mistakes" not in llm.transcripts[0][1]["content"]
 
 
 async def test_invalid_grade_is_fed_back_once(lesson: Lesson) -> None:
@@ -88,11 +118,11 @@ async def test_grader_gives_up_after_attempts(lesson: Lesson) -> None:
         "sentences": [{**GOOD["sentences"][1], "explanation_ru": ""}, *GOOD["sentences"][::2]],
     }
     llm = ScriptedLLM([submit(fixed_without_reason), submit(fixed_without_reason)])
-    with pytest.raises(GradeError):
+    with pytest.raises(LLMWriteError):
         await grade_translation(llm, grading_input(lesson), "answer")
 
 
 async def test_task_without_sentences_is_rejected(lesson: Lesson) -> None:
     empty = grading_input(lesson).model_copy(update={"sentences": []})
-    with pytest.raises(GradeError):
+    with pytest.raises(LLMWriteError):
         await grade_translation(ScriptedLLM([]), empty, "answer")

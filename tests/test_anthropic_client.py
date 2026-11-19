@@ -11,6 +11,7 @@ from english_agent.llm import AssistantTurn, LLMRejected, LLMUnavailable, ToolCa
 from english_agent.llm.anthropic_client import (
     AnthropicLLM,
     parse_response_blocks,
+    supports_forced_tool_choice,
     to_anthropic_messages,
     to_anthropic_tool_choice,
     to_anthropic_tools,
@@ -62,6 +63,23 @@ def test_tool_and_tool_choice_conversion() -> None:
     assert to_anthropic_tools([spec]) == [{"name": "f", "description": "d", "input_schema": {"type": "object"}}]
     assert to_anthropic_tool_choice("auto") == {"type": "auto"}
     assert to_anthropic_tool_choice({"type": "function", "function": {"name": "f"}}) == {"type": "tool", "name": "f"}
+
+
+def test_models_without_forced_tool_choice_get_auto() -> None:
+    forced = {"type": "function", "function": {"name": "f"}}
+    assert supports_forced_tool_choice("claude-haiku-5-5")
+    assert not supports_forced_tool_choice("claude-sonnet-5-5")
+    assert to_anthropic_tool_choice(forced, forced_allowed=False) == {"type": "auto"}
+    assert to_anthropic_tool_choice("any", forced_allowed=False) == {"type": "auto"}
+    assert to_anthropic_tool_choice("auto", forced_allowed=False) == {"type": "auto"}
+
+
+async def test_sonnet_requests_never_force_a_tool() -> None:
+    messages = _RecordingMessages()
+    client = cast(AsyncAnthropic, SimpleNamespace(messages=messages))
+    llm = AnthropicLLM(_settings(), "claude-sonnet-5-5", client=client)
+    await llm.chat([{"role": "user", "content": "hi"}], [], tool_choice={"type": "function", "function": {"name": "f"}})
+    assert messages.kwargs["tool_choice"] == {"type": "auto"}
 
 
 class _RecordingMessages:
@@ -127,6 +145,9 @@ async def test_a_real_response_is_parsed_into_a_turn() -> None:
 
     turn = await _http_llm(handler).chat([{"role": "user", "content": "hi"}], [])
     assert [(call.name, call.arguments) for call in turn.tool_calls] == [("finish", {"found": False})]
+    assert turn.usage is not None
+    assert (turn.usage.input_tokens, turn.usage.output_tokens) == (10, 5)
+    assert turn.usage.cost_usd is not None and turn.usage.cost_usd > 0
 
 
 @pytest.mark.parametrize(("status", "expected"), [(429, LLMUnavailable), (529, LLMUnavailable), (500, LLMUnavailable)])

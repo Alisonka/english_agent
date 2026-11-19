@@ -2,13 +2,11 @@
 
 `Sender` hides aiogram's method signatures behind the few calls the project makes and keeps
 the old client's guarantees: HTML parse mode and no link previews (bot defaults), plain-text
-quiz explanations, and lessons split into ordered messages. Errors are aiogram's:
+quiz explanations. Errors are aiogram's:
 `TelegramError` for any API failure, `TelegramForbiddenError` when the user blocked the bot.
 """
 
 from __future__ import annotations
-
-from collections.abc import Awaitable, Callable
 
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
@@ -21,10 +19,7 @@ from aiogram.exceptions import TelegramForbiddenError
 from aiogram.types import ForceReply, InlineKeyboardMarkup, InputPollOption
 
 from english_agent.config import Settings
-from english_agent.models.lesson import Lesson
-from english_agent.telegram.render import render_messages
 from english_agent.telegram.throttle import LocalRateLimiter, RateLimiter, ThrottlingMiddleware
-from english_agent.tracing import get_tracer
 
 __all__ = ["Sender", "TelegramError", "TelegramForbiddenError", "make_bot"]
 
@@ -81,28 +76,3 @@ class Sender:
         )
         assert message.poll is not None
         return message.message_id, message.poll.id
-
-    async def send_lesson(
-        self,
-        chat_id: str,
-        lesson: Lesson,
-        *,
-        skip: int = 0,
-        on_sent: Callable[[int], Awaitable[None]] | None = None,
-    ) -> list[int]:
-        """Send the lesson's messages in order, after the first `skip` (sent before a crash).
-
-        `on_sent` is awaited with each message id as soon as Telegram accepts it, so a caller
-        that records progress can resume without sending a chunk twice.
-        """
-        with get_tracer().start_as_current_span("telegram.send_lesson") as span:
-            chunks = render_messages(lesson)
-            span.set_attribute("telegram.messages", len(chunks))
-            span.set_attribute("telegram.skipped", skip)
-            sent: list[int] = []
-            for chunk in chunks[skip:]:
-                message_id = await self.send_text(chat_id, chunk)
-                sent.append(message_id)
-                if on_sent is not None:
-                    await on_sent(message_id)
-            return sent

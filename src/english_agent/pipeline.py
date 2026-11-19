@@ -25,7 +25,6 @@ from datetime import UTC, date, datetime, timedelta
 from typing import cast
 from zoneinfo import ZoneInfo
 
-import httpx
 from anthropic import AsyncAnthropic
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
@@ -35,27 +34,21 @@ from english_agent.alerts import Alerter
 from english_agent.config import Settings, get_settings
 from english_agent.content import content_key, worker_id
 from english_agent.items import step_item_from
-from english_agent.llm import AnthropicLLM, make_client
 from english_agent.logs import bind, configure_logging
 from english_agent.metrics import LESSONS_FAILED, LESSONS_SENT
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
-from english_agent.models.lesson import Lesson
 from english_agent.models.schedule import local_now
-from english_agent.models.storage import ItemAccuracy, LearnerRecord, LessonContentRecord
+from english_agent.models.storage import ErrorRecord, ItemAccuracy, LearnerRecord, LessonContentRecord
 from english_agent.planning import lesson_due
-from english_agent.profile import weak_points_for_topic
+from english_agent.profile import current_reflection, weak_points_for_topic
 from english_agent.progression import NextStep, TopicProgress, is_done, next_step, reteach_candidate, topic_progress
-from english_agent.research.agent import ResearchAgent
-from english_agent.research.models import ResearchResult
-from english_agent.research.sitemaps import FileSitemapCache, SitemapCache, SitemapIndex
-from english_agent.research.tools import LiveResearchTools
+from english_agent.research.sitemaps import SitemapCache
+from english_agent.session_runner import run_topic_session
 from english_agent.storage.repositories import Stores, open_stores
 from english_agent.telegram.render import render_cheat_sheet, render_step
 from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError, make_bot
-from english_agent.topic_writer import generate_topic
 from english_agent.tracing import configure_tracing, get_tracer
-from english_agent.writer import write_lesson
 
 COURSE_FINISHED = "Курс завершён: все темы пройдены."
 LESSON_FAILED = "Урок «{title}» сегодня не получился. Пришлю его завтра."
@@ -80,55 +73,6 @@ class Runtime:
     alerts: Alerter | None = None  # None: problems are only logged
 
 
-def _research_http(settings: Settings) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        timeout=settings.http_timeout_seconds,
-        headers={"User-Agent": settings.http_user_agent},
-        follow_redirects=True,
-    )
-
-
-async def generate_lesson(
-    topic: CurriculumTopic,
-    settings: Settings,
-    *,
-    cefr: Cefr = "A2",
-    curriculum_version: int | None = None,
-    client: AsyncAnthropic | None = None,
-    sitemaps: SitemapCache | None = None,
-) -> tuple[ResearchResult, Lesson | None]:
-    """Returns the research result and, if a page was found, the lesson built from it.
-
-    `client` and `sitemaps` are the process's shared Claude client and sitemap cache; without
-    them a client is opened (and closed) for this call and sitemaps are cached on disk.
-    """
-    async with AsyncExitStack() as stack:
-        http = await stack.enter_async_context(_research_http(settings))
-        if client is None:
-            client = await stack.enter_async_context(make_client(settings))
-        cache = sitemaps or FileSitemapCache(settings.cache_dir, ttl_days=settings.sitemap_ttl_days)
-        tools = LiveResearchTools(http, SitemapIndex(http, cache), page_char_limit=settings.research_page_char_limit)
-        researcher = ResearchAgent(
-            AnthropicLLM(settings, model=settings.research_model, client=client),
-            tools,
-            max_steps=settings.research_max_steps,
-            max_fetches_per_site=settings.research_max_fetches_per_site,
-            curriculum_version=curriculum_version,
-            cefr=cefr,
-        )
-        research = await researcher.run(topic)
-        if research.notes is None:
-            return research, None
-        lesson = await write_lesson(
-            AnthropicLLM(settings, model=settings.writer_model, client=client),
-            topic,
-            research.notes,
-            cefr=cefr,
-            curriculum_version=curriculum_version,
-        )
-        return research, lesson
-
-
 def resolve_cefr(explicit: str | None, learner: LearnerRecord | None, default: Cefr) -> Cefr:
     """The level to teach: an explicit --level, else the learner's saved choice, else the default."""
     if explicit is not None:
@@ -139,11 +83,6 @@ def resolve_cefr(explicit: str | None, learner: LearnerRecord | None, default: C
 def local_today(settings: Settings) -> date:
     """Today in the default TIMEZONE; for command-line runs (a learner's day uses their own zone)."""
     return datetime.now(ZoneInfo(settings.timezone)).date()
-
-
-async def deliver_lesson(sender: Sender, lesson: Lesson, chat_id: str) -> list[int]:
-    """Send the lesson to the chat; returns the message ids."""
-    return await sender.send_lesson(chat_id, lesson)
 
 
 def topic_for_day(curriculum: Curriculum, day: int) -> CurriculumTopic | None:
@@ -232,21 +171,19 @@ async def ensure_content(
     if outcome == "busy":
         return None
     log.info("writing the topic %s (%s), attempt %d", topic.id, cefr, record.attempts)
-    try:
-        research, content = await generate_topic(
-            topic,
-            settings,
-            cefr=cefr,
-            curriculum_version=curriculum_version,
-            client=runtime.client,
-            sitemaps=runtime.sitemaps,
-        )
-        reason = research.message
-    except Exception as error:  # unattended run: every failure is recorded, not just logged
-        content, reason = None, f"{type(error).__name__}: {error}"
-    if content is None:
-        return await stores.contents.fail(record.id, reason)
-    return await stores.contents.finish(record.id, content)
+    session = await run_topic_session(
+        topic,
+        settings,
+        cefr=cefr,
+        curriculum_version=curriculum_version,
+        client=runtime.client,
+        sitemaps=runtime.sitemaps,
+    )
+    log.info("topic %s (%s) run: %s", topic.id, cefr, session.report.summary())
+    if session.content is None:
+        reason = session.report.error or "the topic could not be written"
+        return await stores.contents.fail(record.id, reason, run=session.report)
+    return await stores.contents.finish(record.id, session.content, run=session.report)
 
 
 async def run_lesson_for_learner(
@@ -331,7 +268,8 @@ async def run_lesson_for_learner(
             await stores.lessons.fail(row.id, reason, final=True)  # the topic comes again tomorrow
             LESSONS_FAILED.labels("true").inc()
             if runtime.alerts is not None:
-                await runtime.alerts.alert("topic not written", f"{topic.id} ({level}): {reason}")
+                run = f"\n{content.run.summary()}" if content.run is not None else ""
+                await runtime.alerts.alert("topic not written", f"{topic.id} ({level}): {reason}{run}")
             if send:
                 await notify(sender, chat_id, LESSON_FAILED.format(title=topic.title_ru))
             return FAILED
@@ -412,8 +350,17 @@ async def _send_cheat_sheet(runtime: Runtime, learner: LearnerRecord, level: Cef
         if content is None or content.topic is None:
             return
         topic_content = content.topic
-        accuracy = await _step_accuracy(stores, learner.id, topic_content.item_keys())
-        weak = weak_points_for_topic(topic_content.steps, accuracy, {})
+        keys = topic_content.item_keys()
+        accuracy = await _step_accuracy(stores, learner.id, keys)
+        key_by_id = {item_id: key for key, item_id in (await stores.items.ids_for_keys(keys)).items()}
+        errors: dict[str, list[ErrorRecord]] = {}
+        for error in await stores.practice.errors_for_items(learner.id, list(key_by_id)):
+            if error.item_id is not None and error.item_id in key_by_id:
+                errors.setdefault(key_by_id[error.item_id], []).append(error)
+        latest = await stores.profiles.latest(learner.id)
+        reflection = current_reflection(latest.profile if latest is not None else None, datetime.now(UTC))
+        focus = reflection.focus_points if reflection is not None else []
+        weak = weak_points_for_topic(topic_content.steps, accuracy, errors, focus)
         message_ids = [
             await runtime.sender.send_text(learner.telegram_chat_id, message)
             for message in render_cheat_sheet(topic_content.summary, weak)
@@ -433,7 +380,7 @@ async def _finish_course(
         await _send_cheat_sheet(runtime, learner, level, last)
 
 
-async def preview_lesson(
+async def preview_topic(
     settings: Settings,
     today: date,
     *,
@@ -442,7 +389,11 @@ async def preview_lesson(
     sender: Sender | None = None,
     chat_id: str | None = None,
 ) -> int:
-    """Write (and print) a lesson without the database: `topic_id`, or the topic of course day `today`."""
+    """Write (and print) a topic without the database: `topic_id`, or the topic of course day `today`.
+
+    With a `sender` (a send run with `--no-store`) every step and the cheat sheet go to the chat at
+    once, which shows the whole topic as a learner would get it over several days.
+    """
     curriculum = load_curriculum(level)
     if topic_id:
         topic = next((item for item in curriculum.topics if item.id == topic_id), None)
@@ -462,23 +413,23 @@ async def preview_lesson(
         if topic is None:
             print(COURSE_FINISHED)
             return OK
-    try:
-        research, lesson = await generate_lesson(topic, settings, cefr=level, curriculum_version=curriculum.version)
-        reason = research.message
-    except Exception as error:
-        lesson, reason = None, f"{type(error).__name__}: {error}"
-    if lesson is None:
-        log.error("lesson for %s failed: %s", topic.id, reason)
+    session = await run_topic_session(topic, settings, cefr=level, curriculum_version=curriculum.version)
+    log.info("topic %s run: %s", topic.id, session.report.summary())
+    content = session.content
+    if content is None:
+        log.error("topic %s failed: %s", topic.id, session.report.error)
         return FAILED
-    print(lesson.model_dump_json(indent=2, ensure_ascii=False))
+    print(content.model_dump_json(indent=2, ensure_ascii=False))
     if sender is None or chat_id is None:
         return OK
+    messages = [render_step(step) for step in content.steps] + render_cheat_sheet(content.summary, [])
     try:
-        message_ids = await deliver_lesson(sender, lesson, chat_id)
+        for message in messages:
+            await sender.send_text(chat_id, message)
     except TelegramError as error:
         log.error("telegram error: %s", error)
         return FAILED
-    log.info("sent %d message(s) to Telegram chat %s", len(message_ids), chat_id)
+    log.info("sent %d message(s) to Telegram chat %s", len(messages), chat_id)
     return OK
 
 
@@ -531,7 +482,7 @@ async def _run(settings: Settings, args: argparse.Namespace) -> int:
         if stores is None:
             today = args.date or local_today(settings)
             level = cast(Cefr, args.level or settings.learner_cefr)
-            return await preview_lesson(
+            return await preview_topic(
                 settings, today, topic_id=args.topic, level=level, sender=sender, chat_id=chat_id
             )
         assert sender is not None

@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 from english_agent.config import Settings
 from english_agent.grading import Grader, grade_answer, refresh_profile_safely
+from english_agent.reflector import Reflector
 from english_agent.storage.repositories import Stores
 from english_agent.telegram.sender import Sender
 
@@ -41,8 +42,16 @@ class BotDeps:
 class InProcessJobs:
     """Background tasks of this process, bounded, logged, and awaited on shutdown."""
 
-    def __init__(self, stores: Stores, sender: Sender, grade: Grader, *, concurrency: int = 4) -> None:
-        self._stores, self._sender, self._grade = stores, sender, grade
+    def __init__(
+        self,
+        stores: Stores,
+        sender: Sender,
+        grade: Grader,
+        *,
+        reflect: Reflector | None = None,
+        concurrency: int = 4,
+    ) -> None:
+        self._stores, self._sender, self._grade, self._reflect = stores, sender, grade, reflect
         self._gate = asyncio.Semaphore(concurrency)
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -64,10 +73,13 @@ class InProcessJobs:
         task.add_done_callback(self._tasks.discard)
 
     async def grade_translation(self, answer_id: int) -> None:
-        self._spawn(f"grade:{answer_id}", grade_answer(self._stores, self._sender, self._grade, answer_id))
+        self._spawn(
+            f"grade:{answer_id}",
+            grade_answer(self._stores, self._sender, self._grade, answer_id, reflect=self._reflect),
+        )
 
     async def refresh_profile(self, learner_id: int) -> None:
-        self._spawn(f"profile:{learner_id}", refresh_profile_safely(self._stores.profiles, learner_id))
+        self._spawn(f"profile:{learner_id}", refresh_profile_safely(self._stores, learner_id, self._reflect))
 
     @property
     def pending(self) -> int:

@@ -2,8 +2,9 @@
 
 The model sees only this step's plan entry and note points, a recap of earlier steps, and the next
 step's title for the teaser — never the material of other steps, so it cannot leak tomorrow into
-today. Code owns the structural fields (slug, index, total, variant, sources). The `alt` variant
-re-teaches the same idea with a fresh hook and different examples and carries no practice.
+today. Code owns the structural fields (slug, index, total, variant, sources) and the Critic's
+`review`. The `alt` variant re-teaches the same idea with a fresh hook and different examples and
+carries no practice. `feedback` (the Critic's issues with the previous attempt) asks for a rewrite.
 """
 
 from __future__ import annotations
@@ -14,12 +15,24 @@ from typing import Any
 from english_agent.llm import ChatLLM, submit_model, tool_schema
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Source
-from english_agent.models.topic import LessonStep, StepVariant, TopicPlan
+from english_agent.models.topic import LessonStep, PlanStep, StepVariant, TopicPlan
 from english_agent.research.models import TopicNotes
 from english_agent.versions import SCHEMA_VERSIONS, build_provenance
 
 _PROMPT = (Path(__file__).resolve().parent / "prompts" / "write_step_system.md").read_text(encoding="utf-8")
-_OWNED_BASE = ("topic_id", "title_en", "title_ru", "cefr", "slug", "index", "total", "variant", "sources", "provenance")
+_OWNED_BASE = (
+    "topic_id",
+    "title_en",
+    "title_ru",
+    "cefr",
+    "slug",
+    "index",
+    "total",
+    "variant",
+    "sources",
+    "provenance",
+    "review",
+)
 
 
 def _slice(points: list[Any], ids: list[int]) -> list[Any]:
@@ -37,8 +50,12 @@ async def write_step(
     content_so_far: list[LessonStep] | None = None,
     cefr: Cefr = "A2",
     curriculum_version: int | None = None,
+    feedback: str | None = None,
 ) -> LessonStep:
-    """Write step `index` (1-based) of `plan` in the given variant; `main` is the main step for an alt."""
+    """Write step `index` (1-based) of `plan` in the given variant; `main` is the main step for an alt.
+
+    `feedback` is appended to the brief when the Critic sent the previous attempt back.
+    """
     total = len(plan.steps)
     plan_step = plan.steps[index - 1]
     previous = plan.steps[: index - 1]
@@ -56,7 +73,8 @@ async def write_step(
         {"role": "system", "content": _PROMPT},
         {
             "role": "user",
-            "content": _step_brief(plan, index, notes, variant=variant, main=main, content_so_far=content_so_far or []),
+            "content": _step_brief(plan, index, notes, variant=variant, main=main, content_so_far=content_so_far or [])
+            + (f"\n{feedback}" if feedback else ""),
         },
     ]
 
@@ -92,7 +110,12 @@ async def write_step(
         build=build,
         problem=lambda step: _step_problem(step, allowed_slugs=allowed_slugs, is_last=is_last, main=main),
         span_name="writer.write_step",
-        span_attrs={"topic.id": plan.topic_id, "step.index": index, "step.variant": variant},
+        span_attrs={
+            "topic.id": plan.topic_id,
+            "step.index": index,
+            "step.variant": variant,
+            "step.rewrite": feedback is not None,
+        },
     )
 
 
@@ -145,13 +168,7 @@ def _step_brief(
     else:
         lines.append("This is the LAST step: no teaser_ru.")
     lines.append("")
-    lines.append(f"Rule points for this step:\n{_bullets(_slice(notes.rule_points, plan_step.rule_point_ids))}")
-    if nuances := _slice(notes.nuances, plan_step.nuance_ids):
-        lines.append(f"Nuances for this step:\n{_bullets(nuances)}")
-    if examples := _slice(notes.examples, plan_step.example_ids):
-        lines.append("Example material:\n" + _bullets([f"{e.en}" + (f" — {e.ru}" if e.ru else "") for e in examples]))
-    if mistakes := _slice(notes.typical_mistakes, plan_step.mistake_ids):
-        lines.append(f"Typical mistakes:\n{_bullets(mistakes)}")
+    lines.extend(notes_for_step(plan_step, notes))
     if variant == "alt":
         lines.append("")
         lines.append("Write the ALT (re-teach) variant: a new hook, the same idea in other words, 3 DIFFERENT")
@@ -161,6 +178,18 @@ def _step_brief(
                 "The main step's examples (use different ones): " + "; ".join(e.en for e in main.message.examples)
             )
     return "\n".join(lines)
+
+
+def notes_for_step(plan_step: PlanStep, notes: TopicNotes) -> list[str]:
+    """The research note points the plan gave this step, as brief sections (the writer's and the Critic's)."""
+    lines = [f"Rule points for this step:\n{_bullets(_slice(notes.rule_points, plan_step.rule_point_ids))}"]
+    if nuances := _slice(notes.nuances, plan_step.nuance_ids):
+        lines.append(f"Nuances for this step:\n{_bullets(nuances)}")
+    if examples := _slice(notes.examples, plan_step.example_ids):
+        lines.append("Example material:\n" + _bullets([f"{e.en}" + (f" — {e.ru}" if e.ru else "") for e in examples]))
+    if mistakes := _slice(notes.typical_mistakes, plan_step.mistake_ids):
+        lines.append(f"Typical mistakes:\n{_bullets(mistakes)}")
+    return lines
 
 
 def _bullets(items: list[str]) -> str:

@@ -16,6 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY pyproject.toml uv.lock alembic.ini ./
 COPY src ./src
 COPY curriculum ./curriculum
+COPY evals/datasets ./evals/datasets
 COPY migrations ./migrations
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev

@@ -1,101 +1,94 @@
 from __future__ import annotations
 
-from typing import Any
+from datetime import UTC, datetime, timedelta
 
-import pytest
-from pydantic import ValidationError
+from english_agent.models.storage import ItemAccuracy
+from english_agent.planner import MAX_REVIEW_SLOTS, Candidate, plan_quiz, plan_translation
 
-from conftest import topic_content_payload
-from english_agent.llm import AssistantTurn, ToolCall
-from english_agent.llm.forced_tool import LLMWriteError
-from english_agent.models.curriculum import CurriculumTopic
-from english_agent.models.topic import TopicPlan
-from english_agent.planner import plan_problems, plan_topic, step_budget
-from english_agent.research.models import TopicNotes
-from fakes import ScriptedLLM
-
-TOPIC = CurriculumTopic(
-    id="there_is_are", title_en="there is / there are", title_ru="there is / there are", order=13, tags=["there"]
-)
-
-NOTES = TopicNotes(
-    site="skysmart",
-    source={"url": "https://skysmart.ru/x", "title": "There is / are", "accessed_at": "2026-10-16"},
-    page_title="There is / are",
-    summary_ru="Статья про there is / there are, как сказать, что где-то что-то есть.",
-    rule_points=["there is + ед.", "there is неисч.", "there are + мн.", "вопрос Is/Are there"],
-    nuances=["согласование с первым", "there не значит там", "короткие ответы"],
-    examples=[
-        {"en": "There is a cat here.", "ru": "Здесь кот."},
-        {"en": "There is some milk.", "ru": "Есть молоко."},
-        {"en": "There are two books.", "ru": "Две книги."},
-        {"en": "Is there a bank here?", "ru": "Здесь есть банк?"},
-    ],
-    typical_mistakes=["It is a cat → There is a cat"],
-)
+NOW = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
 
 
-def _plan_args() -> dict[str, Any]:
-    plan = topic_content_payload()["plan"]
-    return {"steps": plan["steps"], "characters": plan["characters"]}
-
-
-def submit(args: dict[str, Any]) -> AssistantTurn:
-    return AssistantTurn(content=None, tool_calls=[ToolCall(id="c1", name="submit_plan", arguments=args)])
-
-
-@pytest.mark.parametrize(
-    ("rules", "nuances", "expected"),
-    [(1, 0, 1), (4, 0, 1), (5, 0, 2), (8, 0, 2), (9, 0, 3), (20, 20, 4)],
-)
-def test_step_budget(rules: int, nuances: int, expected: int) -> None:
-    notes = NOTES.model_copy(update={"rule_points": ["x"] * rules, "nuances": ["y"] * nuances})
-    assert step_budget(notes) == expected
-
-
-async def test_plan_topic_fills_code_owned_fields() -> None:
-    llm = ScriptedLLM([submit({**_plan_args(), "topic_id": "wrong", "cefr": "C1"})])
-    plan = await plan_topic(llm, TOPIC, NOTES)
-    assert plan.topic_id == "there_is_are" and plan.cefr == "A2"
-    assert plan.slugs == ["singular", "plural"]
-    assert plan.provenance is not None and plan.provenance.component == "planner"
-    params = llm.calls[0]["tools"][0]["function"]["parameters"]
-    assert not {"topic_id", "cefr", "provenance"} & set(params["properties"])
-
-
-async def test_plan_topic_feeds_coverage_errors_back_once() -> None:
-    args = _plan_args()
-    uncovered = {**args, "steps": [args["steps"][0]]}  # drops the second step's rule points and nuances
-    llm = ScriptedLLM([submit(uncovered), submit(args)])
-    plan = await plan_topic(llm, TOPIC, NOTES)
-    assert len(plan.steps) == 2
-    feedback = llm.calls[1]["messages"][-1]["content"]
-    assert "not assigned to any step" in feedback
-
-
-async def test_plan_topic_gives_up_after_attempts() -> None:
-    args = _plan_args()
-    uncovered = {**args, "steps": [args["steps"][0]]}
-    llm = ScriptedLLM([submit(uncovered), submit(uncovered)])
-    with pytest.raises(LLMWriteError):
-        await plan_topic(llm, TOPIC, NOTES)
-
-
-def test_plan_problems_rejects_out_of_range_and_duplicate_ids() -> None:
-    plan = TopicPlan.model_validate({**topic_content_payload()["plan"]})
-    duplicated = plan.model_copy(
-        update={"steps": [plan.steps[0], plan.steps[1].model_copy(update={"rule_point_ids": [0, 2, 3]})]}
+def older(item_id: int, *, due_in_days: float, recall: float = 0.5, checks: int = 0, correct: int = 0) -> Candidate:
+    accuracy = ItemAccuracy(item_id=item_id, checks=checks, correct=correct, days=1) if checks else None
+    return Candidate(
+        item_id=item_id,
+        item_key=f"old:{item_id}",
+        same_topic=False,
+        due_at=NOW + timedelta(days=due_in_days),
+        retrievability=recall,
+        accuracy=accuracy,
     )
-    assert "more than one step" in plan_problems(duplicated, NOTES)
 
 
-def test_plan_problems_empty_when_covered() -> None:
-    plan = TopicPlan.model_validate({**topic_content_payload()["plan"]})
-    assert plan_problems(plan, NOTES) == ""
+def earlier(item_id: int, recall: float = 0.0) -> Candidate:
+    return Candidate(item_id=item_id, item_key=f"today:{item_id}", same_topic=True, retrievability=recall)
 
 
-def test_plan_rejects_reserved_slug() -> None:
-    args = _plan_args()
-    args["steps"][0]["slug"] = "core"
-    with pytest.raises(ValidationError):
-        TopicPlan.model_validate({**args, "topic_id": "there_is_are", "cefr": "A2"})
+def test_a_first_topic_has_nothing_to_review() -> None:
+    plan = plan_quiz([], NOW)
+    assert plan.previous is None and plan.reviews == [] and plan.review_slots == 0
+
+
+def test_the_previous_step_is_the_least_recalled_earlier_one() -> None:
+    plan = plan_quiz([earlier(1, 0.9), earlier(2, 0.3), earlier(3, 0.6)], NOW)
+    assert plan.previous is not None and plan.previous.candidate.item_id == 2
+    assert plan.previous.reason == "previous" and plan.previous.source == "previous"
+
+
+def test_due_items_come_first_most_overdue_first_and_set_the_slots() -> None:
+    candidates = [older(1, due_in_days=3), older(2, due_in_days=-1), older(3, due_in_days=-5), older(4, due_in_days=2)]
+    plan = plan_quiz(candidates, NOW)
+    assert [pick.candidate.item_id for pick in plan.reviews[:2]] == [3, 2]
+    assert [pick.reason for pick in plan.reviews[:2]] == ["due", "due"]
+    assert plan.review_slots == 2
+    assert all(pick.source == "review" for pick in plan.reviews)
+
+
+def test_at_least_one_older_item_even_when_nothing_is_due_and_the_least_recalled_wins() -> None:
+    plan = plan_quiz([older(1, due_in_days=4, recall=0.8), older(2, due_in_days=9, recall=0.4)], NOW)
+    assert plan.review_slots == 1
+    assert plan.reviews[0].candidate.item_id == 2 and plan.reviews[0].reason == "least_recalled"
+
+
+def test_review_slots_are_capped_for_a_learner_far_behind() -> None:
+    plan = plan_quiz([older(i, due_in_days=-i) for i in range(1, 10)], NOW)
+    assert plan.review_slots == MAX_REVIEW_SLOTS
+    assert len(plan.reviews) == 9  # the caller skips items without a bank
+
+
+def test_an_item_the_learner_keeps_getting_wrong_is_marked_weak() -> None:
+    plan = plan_quiz([older(1, due_in_days=4, recall=0.3, checks=5, correct=2)], NOW)
+    assert plan.reviews[0].reason == "weak"
+
+
+def test_a_reflector_focus_item_that_needs_practice_takes_the_first_review_slot() -> None:
+    weak_focus = older(5, due_in_days=6, recall=0.7, checks=4, correct=2)
+    named_only = older(6, due_in_days=6, recall=0.1)  # a focus item that is neither due nor weak
+    plan = plan_quiz([older(1, due_in_days=-3), weak_focus, named_only], NOW, focus=frozenset({"old:5", "old:6"}))
+    assert [(pick.candidate.item_id, pick.reason) for pick in plan.reviews] == [
+        (5, "focus"),
+        (1, "due"),
+        (6, "least_recalled"),
+    ]
+    assert plan.review_slots == 1
+
+
+def test_translation_after_todays_misses_practises_the_focus() -> None:
+    ranked = plan_translation(
+        [older(1, due_in_days=-2), older(2, due_in_days=-1), older(3, due_in_days=5)],
+        NOW,
+        wrong_today={3},
+        focus=frozenset({"old:2"}),
+    )
+    assert [(pick.candidate.item_id, pick.reason) for pick in ranked] == [(3, "wrong_today"), (2, "focus"), (1, "due")]
+
+
+def test_translation_prefers_what_went_wrong_today_then_due_then_the_previous_step() -> None:
+    candidates = [older(1, due_in_days=-2), older(2, due_in_days=5), earlier(3), older(4, due_in_days=1)]
+    ranked = plan_translation(candidates, NOW, wrong_today={4})
+    assert [(pick.candidate.item_id, pick.reason) for pick in ranked] == [
+        (4, "wrong_today"),
+        (1, "due"),
+        (3, "previous"),
+        (2, "least_recalled"),
+    ]

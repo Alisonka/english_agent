@@ -65,7 +65,7 @@ class InlineJobs:
         await grade_answer(self.stores, self.sender, self.grade, answer_id)
 
     async def refresh_profile(self, learner_id: int) -> None:
-        await refresh_profile_safely(self.stores.profiles, learner_id)
+        await refresh_profile_safely(self.stores, learner_id)
 
 
 class Harness:

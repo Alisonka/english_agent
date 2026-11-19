@@ -30,7 +30,7 @@ def test_build_provenance_collects_component_versions() -> None:
         component="writer",
         schema_version=SCHEMA_VERSIONS["lesson"],
         model="claude-haiku-5-5",
-        prompt_names=("write_lesson_system",),
+        prompt_names=("write_step_system",),
         curriculum_version=3,
     )
     assert isinstance(prov, Provenance)
@@ -38,6 +38,6 @@ def test_build_provenance_collects_component_versions() -> None:
     assert prov.component == "writer"
     assert prov.schema_version == SCHEMA_VERSIONS["lesson"]
     assert prov.model == "claude-haiku-5-5"
-    assert prov.prompts["write_lesson_system"] == prompt_fingerprint("write_lesson_system")
+    assert prov.prompts["write_step_system"] == prompt_fingerprint("write_step_system")
     assert prov.curriculum_version == 3
     assert prov.generated_at.tzinfo is not None

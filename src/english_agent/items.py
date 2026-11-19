@@ -1,8 +1,8 @@
 """Lessons as learnable items: the unit that reviews, cards and errors attach to.
 
 Every sent lesson yields one *core item*, `<topic_id>:core`: the topic's form, its one-line
-function and the full rule, with the lesson's sources. Finer-grained items (one per recurring
-error) come later from the Reflector. A topic's core item is created once: teaching the topic
+function and the full rule, with the lesson's sources. The Reflector's focus points name
+these items; it creates none. A topic's core item is created once: teaching the topic
 again keeps the original, so cards and errors never lose their anchor.
 """
 

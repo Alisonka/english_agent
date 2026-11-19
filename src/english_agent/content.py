@@ -1,6 +1,6 @@
 """Shared lesson content: one lesson per topic, level and generation recipe, sent to every learner.
 
-Research and writing take up to ~14 Claude calls per lesson; with shared content they run once
+Research, writing and the Critic's reviews take a few dozen Claude calls per topic; with shared content they run once
 per (topic, level) instead of once per learner. Personal work (the quiz answers, the graded
 translation, FSRS cards, the profile) stays per learner.
 
@@ -20,7 +20,7 @@ LEGACY_CONTENT_KEY = "legacy"  # lessons backfilled from before shared content (
 
 
 def content_key(settings: Settings) -> str:
-    """The generation recipe: topic-content schema, the research/plan/step/summary prompts, both models."""
+    """The generation recipe: topic-content schema, every prompt of the run, the models (the Critic's too)."""
     return ":".join(
         (
             f"topic{SCHEMA_VERSIONS['topic_content']}",
@@ -28,8 +28,11 @@ def content_key(settings: Settings) -> str:
             prompt_fingerprint("plan_topic_system"),
             prompt_fingerprint("write_step_system"),
             prompt_fingerprint("write_summary_system"),
+            prompt_fingerprint("review_step_system"),
+            prompt_fingerprint("review_summary_system"),
             settings.research_model,
             settings.writer_model,
+            settings.critic_model or "no-critic",
         )
     )
 

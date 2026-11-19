@@ -21,8 +21,9 @@ from english_agent.grader import grade_translation
 from english_agent.llm import AnthropicLLM, LLMUnavailable
 from english_agent.models.practice import TranslationGrade
 from english_agent.models.storage import GradingInput
-from english_agent.profile import refresh_profile
-from english_agent.storage.repositories import ProfileStore, Stores
+from english_agent.profile import current_reflection, refresh_profile
+from english_agent.reflector import Reflector
+from english_agent.storage.repositories import Stores
 from english_agent.telegram.render import render_grade
 from english_agent.telegram.sender import Sender, TelegramError
 
@@ -51,28 +52,40 @@ def dispute_keyboard(answer_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
-async def refresh_profile_safely(profiles: ProfileStore, learner_id: int) -> None:
+async def refresh_profile_safely(stores: Stores, learner_id: int, reflect: Reflector | None = None) -> None:
     """The profile is derived data: a failure here is logged and never reaches the learner."""
     try:
-        await refresh_profile(profiles, learner_id, datetime.now(UTC))
+        await refresh_profile(stores, learner_id, datetime.now(UTC), reflect=reflect)
     except SQLAlchemyError as error:
         log.warning("profile refresh failed for learner %s: %s", learner_id, error)
 
 
 async def grade_answer(
-    stores: Stores, sender: Sender, grade: Grader, answer_id: int, *, retry_transient: bool = False
+    stores: Stores,
+    sender: Sender,
+    grade: Grader,
+    answer_id: int,
+    *,
+    retry_transient: bool = False,
+    reflect: Reflector | None = None,
 ) -> bool:
     """Grade a pending answer, store the result and show it; False when there was nothing to grade.
 
+    The grader also sees the Reflector's current reading of the learner, for its explanations.
     With `retry_transient` (a queued job), a rate-limited or unreachable Claude API leaves the
     answer pending and re-raises, so the job is retried, until MAX_GRADING_ATTEMPTS are used.
     """
-    task = await stores.practice.begin_grading(answer_id, datetime.now(UTC))
+    now = datetime.now(UTC)
+    task = await stores.practice.begin_grading(answer_id, now)
     if task is None:  # graded already (a redelivered job), or failed and waiting for a new answer
         return False
     chat_id, message_id = task.telegram_chat_id, task.answer.progress_message_id
+    latest = await stores.profiles.latest(task.answer.learner_id)
+    grading_input = task.input.model_copy(
+        update={"learner": current_reflection(latest.profile if latest is not None else None, now)}
+    )
     try:
-        result = await grade(task.input, task.answer.answer_text)
+        result = await grade(grading_input, task.answer.answer_text)
     except LLMUnavailable:
         if retry_transient and task.answer.grading_attempts < MAX_GRADING_ATTEMPTS:
             raise
@@ -87,7 +100,7 @@ async def grade_answer(
         return True
     graded = await stores.practice.finish_translation_answer(answer_id, result)
     await _show(sender, chat_id, message_id, render_grade(result), reply_markup=dispute_keyboard(answer_id))
-    await refresh_profile_safely(stores.profiles, graded.learner_id)
+    await refresh_profile_safely(stores, graded.learner_id, reflect)
     return True
 
 

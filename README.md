@@ -11,24 +11,31 @@ flowchart LR
     topic["Curriculum topic (curriculum/*.yaml)"] --> research[ResearchAgent]
     research -->|"reads live sites via sitemaps"| sources[("englex.ru / skyeng.ru / skysmart.ru")]
     research --> notes[TopicNotes]
-    notes --> writer[write_lesson]
-    writer -->|"one forced tool call (Claude)"| lesson["Validated Lesson (JSON)"]
-    lesson --> telegram["Telegram (HTML message)"]
+    notes --> plan[plan_topic]
+    plan --> steps["write_step x N (+ re-teach) and write_summary"]
+    steps --> critic["Critic (second model): accept, or one rewrite"]
+    critic -->|"checked"| content["Validated TopicContent (JSON)"]
+    content --> telegram["Telegram (one step a day, then the cheat sheet)"]
 ```
 
 - **Research** ([src/english_agent/research/](src/english_agent/research/)): an
   agent crawls sitemaps and reads grammar articles from three curated sources
   (`englex.ru`, `skyeng.ru`, `skysmart.ru`), returning structured notes.
-- **Generation** ([src/english_agent/topic_writer.py](src/english_agent/topic_writer.py)):
+- **Generation** ([src/english_agent/session_runner.py](src/english_agent/session_runner.py)):
   a topic is taught over **1–4 short daily steps**, not one long lesson. The planner
-  ([planner.py](src/english_agent/planner.py)) splits the research notes into ordered
+  ([topic_planner.py](src/english_agent/topic_planner.py)) splits the research notes into ordered
   steps; the step writer ([step_writer.py](src/english_agent/step_writer.py)) turns each
   into a `LessonStep` (a scannable message plus a practice bank, with an `alt` re-teach
   variant); the summary writer ([summary_writer.py](src/english_agent/summary_writer.py))
-  builds the end-of-topic cheat sheet. The whole `TopicContent` is written once per
-  (topic, level) and shared. Provenance and `sources` are code-owned. The legacy
-  single-lesson writer ([writer.py](src/english_agent/writer.py)) still serves stored
-  lessons of the old schema.
+  builds the end-of-topic cheat sheet. Before any learner sees them, the Critic
+  ([critic.py](src/english_agent/critic.py), `CRITIC_MODEL`, another model than the writer)
+  checks every step and the cheat sheet against the research notes and the level, answers each
+  quiz question itself (a key that differs from its answer blocks the step) and sends a step
+  with blocking issues back for one rewrite; a step still rejected fails the run, which is
+  retried later. The runner holds the run to `CONTENT_RUN_MAX_CALLS` / `CONTENT_RUN_MAX_COST_USD`
+  and stores a report of it (stages, calls, cost, rewrites) in `lesson_contents.run`. The whole
+  `TopicContent` is written once per (topic, level) and shared. Provenance and `sources` are code-owned. Lessons stored in
+  the old single-lesson schema (`Lesson`) are still read, but no longer written.
 - **Telegram** ([src/english_agent/telegram/](src/english_agent/telegram/)): renders a
   step as one short HTML message (a hook, one key idea, three examples with the Russian
   behind a spoiler, a self-check, a progress bar and a "tomorrow" teaser) and the cheat
@@ -39,9 +46,13 @@ flowchart LR
   and sending a topic's cheat sheet when the learner moves on.
 - **Practice** ([src/english_agent/practice.py](src/english_agent/practice.py),
   [src/english_agent/practice_select.py](src/english_agent/practice_select.py),
-  [src/english_agent/grader.py](src/english_agent/grader.py)): the day's quiz interleaves
-  today's step with an earlier step and an older topic (`QUIZ_DELAY_MINUTES` after the
-  step), the translation task mixes today with one earlier item (`TRANSLATION_SEND_TIME`).
+  [src/english_agent/grader.py](src/english_agent/grader.py)): what a day's practice reviews
+  besides today's step is decided by the Planner ([planner.py](src/english_agent/planner.py))
+  from the learner's own FSRS cards: the quiz (`QUIZ_DELAY_MINUTES` after the step) has two
+  questions on today's step, one on the topic's least-recalled earlier step and one to three
+  older items that are due (most overdue first, else the least recalled); the translation task
+  (`TRANSLATION_SEND_TIME`) adds to two sentences on today's step one on an item missed in that
+  morning's quiz, else a due one. Questions asked in the last 60 days are avoided.
   Poll answers and the translation are stored, wrong answers go to the `errors` table, and
   the translation is graded by `GRADER_MODEL` (corrections and an explanation in Russian,
   with a button to dispute the grade).
@@ -65,8 +76,8 @@ tokens go.
 ```mermaid
 flowchart TD
     pipelineRun["pipeline.run"] --> researchRun["research.run"]
-    pipelineRun --> writeLesson["writer.write_lesson"]
-    pipelineRun --> sendLesson["telegram.send_lesson"]
+    pipelineRun --> writeLesson["topic.generate (planner, writer.write_step, writer.write_summary)"]
+    pipelineRun --> sendLesson["POST sendMessage (the day's step)"]
     researchRun --> llmChat["llm.chat (tokens)"]
     researchRun --> toolSpans["tool.search_site / tool.fetch_page / tool.finish"]
     toolSpans --> httpGet["GET englex.ru/... (auto httpx span)"]
@@ -99,10 +110,10 @@ provided [docker-compose.yml](docker-compose.yml):
 # 1. Start Jaeger (OTLP collector + storage + UI)
 docker compose up -d
 
-# 2. Run the pipeline with tracing on (prints the lesson, does not send it)
+# 2. Run the pipeline with tracing on (prints the topic content, does not send it)
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
   uv run python -m english_agent.pipeline --topic there_is_are --no-send
-# drop --no-send to also see the telegram.send_lesson span
+# --no-store instead of --no-send also sends every step and the cheat sheet to TELEGRAM_CHAT_ID
 
 # 3. Open the Jaeger UI and pick the "english-agent" service
 open http://localhost:16686
@@ -166,6 +177,12 @@ Configuration is read from environment variables or a local `.env` file (see
 | `FSRS_MAXIMUM_INTERVAL_DAYS` | no | `180` | Longest gap between two reviews of an item |
 | `RESEARCH_MODEL` | no | `claude-haiku-5-5` | Model used by the research agent |
 | `WRITER_MODEL` | no | `claude-haiku-5-5` | Model used by the lesson writer |
+| `CRITIC_MODEL` | no | `claude-sonnet-5-5` | Model that reviews every written step and cheat sheet; empty turns the Critic off |
+| `CRITIC_EFFORT` | no | `medium` | Claude API `output_config.effort` for the Critic |
+| `CRITIC_MAX_REVISIONS` | no | `1` | Rewrites the Critic may ask for per step before the run fails |
+| `CONTENT_RUN_MAX_CALLS` / `CONTENT_RUN_MAX_COST_USD` | no | `60` / `2.0` | Limits of one topic's content run (research, writing, reviews) |
+| `REFLECTOR_MODEL` | no | `claude-sonnet-5-5` | Model that reads a learner's new errors and names what keeps going wrong; empty turns the Reflector off |
+| `REFLECTOR_EFFORT` | no | `medium` | Claude API `output_config.effort` for the Reflector |
 | `LLM_MAX_TOKENS` | no | `8192` | Max tokens per LLM call |
 | `RESEARCH_MAX_STEPS` | no | `12` | Max research agent steps |
 | `RESEARCH_MAX_FETCHES_PER_SITE` | no | `2` | Max page fetches per site |
@@ -332,6 +349,8 @@ compose network (`bot:9100`, `worker:9100`); what to watch:
 | `english_agent_job_duration_seconds{task="deliver_lesson"}` | lessons taking minutes: content not prewarmed, Claude slow |
 | `english_agent_lessons_sent_total`, `english_agent_lessons_failed_total` | sent per day vs. learners due |
 | `english_agent_llm_errors_total`, `english_agent_llm_cost_usd_total` | Claude outages and spend |
+| `english_agent_content_runs_total{outcome}`, `english_agent_reviews_total{verdict="revise"}`, `english_agent_review_issues_total{kind}` | failing content runs, how often and why the Critic sends steps back |
+| `english_agent_reflections_total{outcome="failed"}` | the Reflector failing (the previous reflection is kept) |
 | `english_agent_telegram_requests_total{outcome!="ok"}`, `english_agent_telegram_retry_after_seconds_total` | blocked chats, flood control |
 | `english_agent_alerts_total` | anything that also went to `ADMIN_CHAT_ID` |
 
@@ -405,8 +424,13 @@ schedule), `lesson_contents`, `lessons`, the practice tables, and the learner mo
 - `learner_profiles` — append-only versions of the profile
   ([models/profile.py](src/english_agent/models/profile.py)): weak items, error
   patterns and 7-day accuracy, recomputed by code after a finished quiz or a graded
-  translation ([profile.py](src/english_agent/profile.py)); `notes_ru` is reserved
-  for the Reflector.
+  translation ([profile.py](src/english_agent/profile.py)). The same refresh runs the
+  Reflector ([reflector.py](src/english_agent/reflector.py), `REFLECTOR_MODEL`) when the learner
+  has new errors (three, or one after a quiet week; at most about once a day): it names up to
+  three recurring mistakes, each tied to the items and the error rows it rests on, plus a note for
+  the grader. For 14 days that `reflection` steers the learner's practice (a focus item that is
+  due or weak gets the first review slot), the grader's explanations (never its verdicts) and the
+  hints in the cheat sheet.
 
 Migrations are managed by [Alembic](migrations/):
 
@@ -490,8 +514,12 @@ src/english_agent/
   paths.py         # repo-relative paths
   pipeline.py      # topic -> research -> lesson -> Telegram -> lessons table
   practice.py      # quiz and translation task after the lesson (scheduling, sending)
+  planner.py       # what a day's practice reviews, from the learner's cards (pure rules)
+  reflector.py     # a learner's recurring mistakes, from their new errors (LLM, in the profile refresh)
+  topic_planner.py # research notes -> the topic's 1-4 steps (LLM)
   tracing.py       # OpenTelemetry setup (opt-in OTLP export)
-  writer.py        # notes -> validated Lesson
+  session_runner.py # research -> topic plan -> steps -> Critic -> cheat sheet (TopicContent), budget, report
+  critic.py        # second-model review of steps and cheat sheets
   llm/             # Anthropic (Claude) client + token-cost estimate
   models/          # pydantic models (curriculum, lesson, practice, golden, storage records)
   prompts/         # system prompts

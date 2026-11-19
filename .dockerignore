@@ -11,4 +11,6 @@
 reports
 research_notes
 tests
-evals
+# evals/datasets ships: the Critic reads the golden set's known false claims
+evals/*
+!evals/datasets

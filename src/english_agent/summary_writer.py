@@ -1,6 +1,7 @@
 """write_summary: the whole topic in, the end-of-topic cheat sheet (TopicSummary) out.
 
-The model summarises the steps already written; it adds nothing new. Code owns the sources.
+The model summarises the steps already written; it adds nothing new. Code owns the sources and the
+Critic's `review`; `feedback` (the Critic's issues with the previous attempt) asks for a rewrite.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from english_agent.research.models import TopicNotes
 from english_agent.versions import SCHEMA_VERSIONS, build_provenance
 
 _PROMPT = (Path(__file__).resolve().parent / "prompts" / "write_summary_system.md").read_text(encoding="utf-8")
-_OWNED_BY_CODE = ("topic_id", "cefr", "sources", "provenance")
+_OWNED_BY_CODE = ("topic_id", "cefr", "sources", "provenance", "review")
 
 
 async def write_summary(
@@ -26,6 +27,7 @@ async def write_summary(
     *,
     cefr: Cefr = "A2",
     curriculum_version: int | None = None,
+    feedback: str | None = None,
 ) -> TopicSummary:
     provenance = build_provenance(
         component="summary_writer",
@@ -36,7 +38,7 @@ async def write_summary(
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _PROMPT},
-        {"role": "user", "content": _summary_brief(plan, steps)},
+        {"role": "user", "content": _summary_brief(plan, steps) + (f"\n{feedback}" if feedback else "")},
     ]
 
     def build(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -71,7 +73,13 @@ async def write_summary(
 
 
 def _summary_brief(plan: TopicPlan, steps: list[LessonStep]) -> str:
-    lines = [f"Topic: {plan.topic_id} (level {plan.cefr}). Write one section per step, in this order."]
+    header = f"Topic: {plan.topic_id} (level {plan.cefr}). Write one section per step, in this order."
+    return header + "\n" + steps_digest(steps)
+
+
+def steps_digest(steps: list[LessonStep]) -> str:
+    """What each written step taught, compactly (the summary writer's and the Critic's view of the topic)."""
+    lines: list[str] = []
     for step in steps:
         form = f" | form: {step.message.form}" if step.message.form else ""
         examples = "; ".join(example.en for example in step.message.examples)

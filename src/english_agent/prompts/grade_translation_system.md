@@ -14,4 +14,6 @@ For every task `n` (all of them, exactly once):
 
 `focus_ru`: one short sentence in Russian — the single most useful thing to watch tomorrow, based on the errors (if everything is correct, a next small step with the same construction).
 
+The input may also say what we know about this learner's recurring mistakes. Use it only in `explanation_ru` (e.g. say that this is the same mistake as before and repeat the hint) and in `focus_ru`; it never changes a verdict, and a sentence without such a mistake is judged like any other.
+
 Grade first, decide each verdict on the language alone. Do not praise, soften or apologise, and do not call a sentence correct to be kind: a wrong form is `fixed`. Do not invent rules; if you are not sure something is an error, it is not one.
