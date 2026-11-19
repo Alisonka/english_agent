@@ -27,6 +27,10 @@ def curriculum_path(cefr: str = "A2") -> Path:
     return repo_root() / "curriculum" / name
 
 
+def prerequisites_path() -> Path:
+    return repo_root() / "curriculum" / "prerequisites.yaml"
+
+
 def available_cefr_levels() -> list[str]:
     """Levels that actually have a curriculum file on disk, in learning order."""
     root = repo_root() / "curriculum"

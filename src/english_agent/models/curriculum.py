@@ -1,10 +1,13 @@
 from pathlib import Path
+from typing import Annotated
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from english_agent.models.cefr import Cefr
 from english_agent.paths import curriculum_path
+
+TopicId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$")]
 
 
 class CurriculumTopic(BaseModel):
@@ -46,3 +49,10 @@ def load_curriculum(cefr: Cefr = "A2", *, path: Path | None = None) -> Curriculu
     if path is None and curriculum.cefr != cefr:
         raise ValueError(f"{target.name} declares cefr {curriculum.cefr!r}, expected {cefr!r}")
     return curriculum
+
+
+class PrerequisiteFile(BaseModel):
+    """`curriculum/prerequisites.yaml`: topic -> the topics it requires, across all levels."""
+
+    version: int = Field(ge=1)
+    prerequisites: dict[TopicId, list[TopicId]]
