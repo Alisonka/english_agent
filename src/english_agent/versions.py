@@ -68,9 +68,11 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "quiz_poll_record": 2,  # v2: item_id
     "translation_answer_record": 2,  # v2: grading_attempts, grading_started_at
     "translation_grade": 1,
-    "grading_input": 2,  # what the grader sees: the day's sentences, their context; v2: learner (Reflection)
-    "learner_profile": 2,  # v2: reflection (the Reflector's focus points and notes) replaces notes_ru
-    "reflection": 1,
+    # What the grader sees: the day's sentences, their context; v2: learner (Reflection); v3: reflection v2.
+    "grading_input": 3,
+    # v2: reflection (the focus points and notes) replaces notes_ru; v3: reflection v2.
+    "learner_profile": 3,
+    "reflection": 2,  # v2: focus points carry the Diagnostician's cause, probe_ru and intervention
 }
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
@@ -84,7 +86,7 @@ PROMPT_FILES: dict[str, Path] = {
     "write_summary_system": _PROMPTS_DIR / "write_summary_system.md",
     "review_step_system": _PROMPTS_DIR / "review_step_system.md",
     "review_summary_system": _PROMPTS_DIR / "review_summary_system.md",
-    "reflect_system": _PROMPTS_DIR / "reflect_system.md",
+    "diagnose_system": _PROMPTS_DIR / "diagnose_system.md",
     "dossier_system": _PROMPTS_DIR / "dossier_system.md",
 }
 

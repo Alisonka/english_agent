@@ -159,7 +159,10 @@ async def _reflect(
     """A new reflection, or the previous one when the Reflector fails (logged, never raised)."""
     accuracy = await stores.cards.item_accuracy(learner_id, list(inputs.items))
     try:
-        reflection = await reflect(ReflectionRequest(inputs=inputs, accuracy=accuracy, previous=previous, now=now))
+        request = ReflectionRequest(
+            inputs=inputs, accuracy=accuracy, previous=previous, now=now, learner_id=learner_id, reader=stores.evidence
+        )
+        reflection = await reflect(request)
     except (LLMError, LLMWriteError, ValueError) as error:
         REFLECTIONS.labels("failed").inc()
         log.warning("reflection failed for learner %s: %s: %s", learner_id, type(error).__name__, error)
