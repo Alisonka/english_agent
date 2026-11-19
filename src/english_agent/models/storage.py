@@ -223,6 +223,7 @@ class ErrorRecord(BaseModel):
     error_type: str | None
     explanation_ru: str | None
     created_at: datetime
+    cancelled_at: datetime | None = None  # overturned by the Arbiter
 
 
 EvidenceKind = Literal[
@@ -421,6 +422,7 @@ class TranslationAnswerRecord(BaseModel):
     graded_at: datetime | None
     grading_attempts: int = 0
     grading_started_at: datetime | None = None
+    arbiter: TranslationGrade | None = None  # the Arbiter's grade after a dispute
 
 
 class OpenTranslationTask(BaseModel):

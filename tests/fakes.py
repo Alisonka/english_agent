@@ -852,6 +852,14 @@ class FakePractice:
         self._update_answer(answer_id, disputed=True)
         return True
 
+    async def for_arbitration(self, answer_id: int) -> GradingTask | None:
+        return None  # arbitration runs against PostgreSQL (tests/test_arbiter.py)
+
+    async def overturn(
+        self, answer_id: int, arbiter: TranslationGrade, sentences: list[int], now: datetime
+    ) -> list[int]:
+        return []
+
     def _update_answer(self, answer_id: int, **changes: object) -> TranslationAnswerRecord:
         record = self.translation_answers[answer_id].model_copy(update=changes)
         self.translation_answers[answer_id] = record

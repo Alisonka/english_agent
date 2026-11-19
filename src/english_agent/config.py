@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     # Grades the learner's translation; effort is the Claude API `output_config.effort`.
     grader_model: str = "claude-haiku-5-5"
     grader_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    # A disputed grade is checked again, independently, by a stronger model. Empty ARBITER_MODEL: off.
+    arbiter_model: str = "claude-opus-5-5"
+    arbiter_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
 
     # Claude API client: per-request timeout, SDK retries (429/5xx/overloaded, with backoff), and
     # how many requests one process keeps in flight (the account's rate limit is shared by all).
