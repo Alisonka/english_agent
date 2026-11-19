@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import update
@@ -9,6 +9,7 @@ from english_agent.knowledge import (
     KNOWN,
     LEVEL_DIFFICULTY,
     EloDelta,
+    critic_difficulty,
     element_status,
     elo_step,
     probability,
@@ -19,10 +20,20 @@ from english_agent.knowledge import (
     topic_status,
 )
 from english_agent.models.lesson import Lesson
-from english_agent.storage import EvidenceRepo, KnowledgeRepo, LearnerRepo, SessionFactory, session_scope
+from english_agent.models.review import StepReview
+from english_agent.models.topic import TopicContent
+from english_agent.storage import (
+    EvidenceRepo,
+    KnowledgeRepo,
+    LearnerRepo,
+    LessonContentRepo,
+    SessionFactory,
+    session_scope,
+)
 from english_agent.storage.orm import LessonRow
 from test_storage import _quiz_setup, wrong_option
 
+NOW = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
 GRID = [(ability, easy, gap) for ability in (-2.0, 0.0, 2.5) for easy in (-2.0, 0.5, 2.0) for gap in (0.1, 1.0, 3.0)]
 
 
@@ -143,3 +154,28 @@ async def test_topic_statuses_combine_answers_steps_and_marks(sessions: SessionF
     assert (await knowledge.topic_statuses(learner.id, now))["there_is_are"] == "learning"
     await knowledge.mark_topics(learner.id, ["there_is_are"], "credited", source_ref="placement:1", at=now)
     assert (await knowledge.topic_statuses(learner.id, now))["there_is_are"] == "credited"
+
+
+async def test_a_new_topic_starts_its_quiz_questions_at_the_critics_estimate(
+    sessions: SessionFactory, topic_content: TopicContent
+) -> None:
+    step = topic_content.steps[0]
+    assert step.practice is not None
+    ratings = [1 + n % 5 for n in range(len(step.practice.quiz))]
+    review = StepReview(
+        verdict="accept", quiz_keys=[q.correct_option for q in step.practice.quiz], quiz_difficulty=ratings
+    )
+    steps = [step.model_copy(update={"review": review}), *topic_content.steps[1:]]
+    content = topic_content.model_copy(update={"steps": steps})
+    contents = LessonContentRepo(sessions)
+    _, record = await contents.claim(
+        content.topic_id, "A2", 1, "k", owner="w", now=NOW, stale_after=timedelta(minutes=10), max_attempts=5
+    )
+
+    await contents.finish(record.id, content)
+
+    keys = [question_key(f"{step.topic_id}:{q.item_slug}", q.question) for q in step.practice.quiz]
+    stats = await KnowledgeRepo(sessions).questions(keys)
+    assert [stats[key].prior for key in keys] == [critic_difficulty("A2", rating) for rating in ratings]
+    assert {stat.prior_source for stat in stats.values()} == {"critic"}
+    assert critic_difficulty("B1", 3) == LEVEL_DIFFICULTY["B1"] < critic_difficulty("B1", 5)

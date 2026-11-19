@@ -71,6 +71,14 @@ def start_difficulty(topic: TopicMeta | None, kind: QuestionKind) -> float:
     return level + KIND_OFFSET.get(kind, 0.0)
 
 
+CRITIC_STEP = 0.5  # one point of the Critic's 1-5 scale, in rating units; 3 is the level itself
+
+
+def critic_difficulty(cefr: Cefr, rating: int) -> float:
+    """A quiz question's starting difficulty from the Critic's 1-5 rating for the topic's level."""
+    return LEVEL_DIFFICULTY[cefr] + (rating - 3) * CRITIC_STEP
+
+
 def probability(ability: float, tag_offsets: list[float], difficulty: float) -> float:
     offset = sum(tag_offsets) / len(tag_offsets) if tag_offsets else 0.0
     return 1 / (1 + math.exp(-(ability + offset - difficulty)))

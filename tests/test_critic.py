@@ -17,6 +17,9 @@ ALT = CONTENT.step(1, "alt")
 
 
 def submit(args: dict[str, Any]) -> AssistantTurn:
+    """A review call; a step review without `quiz_difficulty` rates every question 3 (typical)."""
+    if "quiz_keys" in args and "quiz_difficulty" not in args:
+        args = {**args, "quiz_difficulty": [3] * len(args["quiz_keys"])}
     return AssistantTurn(content=None, tool_calls=[ToolCall(id="r1", name="submit_review", arguments=args)])
 
 
@@ -72,6 +75,19 @@ async def test_missing_quiz_answers_are_asked_for_again() -> None:
     review = await review_step(llm, MAIN, CONTENT.plan, NOTES)
     assert review.verdict == "accept"
     assert "one answer per quiz question" in llm.transcripts[1][-1]["content"]
+
+
+async def test_a_review_must_rate_every_quiz_question() -> None:
+    keys = keys_of(MAIN)
+    llm = ScriptedLLM(
+        [
+            submit({"issues": [], "quiz_keys": keys, "quiz_difficulty": [3]}),
+            submit({"issues": [], "quiz_keys": keys, "quiz_difficulty": [5] * len(keys)}),
+        ]
+    )
+    review = await review_step(llm, MAIN, CONTENT.plan, NOTES)
+    assert review.quiz_difficulty == [5] * len(keys)
+    assert "quiz_difficulty must rate every quiz question" in llm.transcripts[1][-1]["content"]
 
 
 async def test_an_alt_step_is_reviewed_against_its_main_step() -> None:
