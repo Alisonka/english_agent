@@ -24,6 +24,7 @@ from english_agent.profile import build_profile
 from english_agent.srs import AGAIN, GOOD, ReviewScheduler
 from english_agent.storage import (
     CardRepo,
+    EvidenceRepo,
     ItemRepo,
     LearnerRepo,
     LessonAlreadySentError,
@@ -35,7 +36,7 @@ from english_agent.storage import (
     SessionFactory,
     session_scope,
 )
-from english_agent.storage.orm import ErrorRow, LessonRow, QuizPollRow, ReviewLogRow
+from english_agent.storage.orm import ErrorRow, EvidenceRow, LessonRow, QuizPollRow, ReviewLogRow
 from english_agent.versions import SCHEMA_VERSIONS
 
 DAY = date(2026, 11, 3)
@@ -386,6 +387,64 @@ async def test_translation_answer_lifecycle(sessions: SessionFactory, lesson: Le
         ]
     card = await CardRepo(sessions, SCHEDULER).get(learner.id, item_id)
     assert card is not None and card.reviews == 2
+
+    # Every sentence is evidence (missing ones too); the fixed one points at its error. The dispute is one more.
+    evidence = await EvidenceRepo(sessions).since(learner.id, datetime.min.replace(tzinfo=UTC))
+    assert [(e.kind, e.source_ref, e.topic_id, e.item_id, e.error_id, e.payload.get("verdict")) for e in evidence] == [
+        ("translation_sentence", f"translation_answer:{answer.id}:1", "there_is_are", item_id, None, "correct"),
+        ("translation_sentence", f"translation_answer:{answer.id}:2", "there_is_are", item_id, error.id, "fixed"),
+        ("translation_sentence", f"translation_answer:{answer.id}:3", "there_is_are", item_id, None, "missing"),
+        ("dispute", f"dispute:translation_answer:{answer.id}", "there_is_are", None, None, None),
+    ]
+    assert await practice.dispute(answer.id) is True  # a second press records nothing new
+    assert len(await EvidenceRepo(sessions).since(learner.id, datetime.min.replace(tzinfo=UTC))) == 4
+
+
+async def test_quiz_answers_are_evidence_once(sessions: SessionFactory, lesson: Lesson) -> None:
+    practice, _, item_id = await _quiz_setup(sessions, lesson)
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    await practice.record_poll_answer("p0", "42", [lesson.quiz[0].correct_option])
+    await practice.record_poll_answer("p1", "42", wrong_option(lesson, 1))
+    await practice.record_poll_answer("p1", "42", [lesson.quiz[1].correct_option])  # repeated: ignored
+
+    evidence = await EvidenceRepo(sessions).since(learner.id, datetime.min.replace(tzinfo=UTC))
+    async with session_scope(sessions) as session:
+        [error] = (await session.scalars(select(ErrorRow))).all()
+    assert [(e.kind, e.topic_id, e.item_id, e.error_id, e.payload["is_correct"]) for e in evidence] == [
+        ("quiz_answer", "there_is_are", item_id, None, True),
+        ("quiz_answer", "there_is_are", item_id, error.id, False),
+    ]
+    assert all(e.source_ref.startswith("quiz_answer:") for e in evidence)
+
+
+async def test_invalid_citations_name_every_id_that_cannot_back_a_decision(sessions: SessionFactory) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    other = await LearnerRepo(sessions).get_or_create("43", "A2")
+    at = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+    async with session_scope(sessions) as session:
+        rows = [
+            EvidenceRow(learner_id=learner.id, kind="probe", source_ref="r:ok", topic_id="articles", occurred_at=at),
+            EvidenceRow(learner_id=learner.id, kind="probe", source_ref="r:t", topic_id="tenses", occurred_at=at),
+            EvidenceRow(learner_id=other.id, kind="probe", source_ref="r:other", topic_id="articles", occurred_at=at),
+            EvidenceRow(
+                learner_id=learner.id,
+                kind="probe",
+                source_ref="r:gone",
+                topic_id="articles",
+                occurred_at=at,
+                cancelled_at=at,
+            ),
+        ]
+        session.add_all(rows)
+        await session.flush()
+        ok, other_topic, foreign, cancelled = (row.id for row in rows)
+    repo = EvidenceRepo(sessions)
+
+    assert await repo.invalid_citations(learner.id, []) == []
+    assert await repo.invalid_citations(learner.id, [ok, other_topic]) == []
+    assert await repo.invalid_citations(learner.id, [foreign, ok, cancelled, 99999]) == [foreign, cancelled, 99999]
+    assert await repo.invalid_citations(learner.id, [ok, other_topic], topic_id="articles") == [other_topic]
+    assert [e.id for e in await repo.since(learner.id, at - timedelta(seconds=1), topic_id="tenses")] == [other_topic]
 
 
 async def test_new_learner_gets_the_given_schedule(sessions: SessionFactory) -> None:

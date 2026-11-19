@@ -293,3 +293,40 @@ class TranslationAnswerRow(Base):
     graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     grading_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     grading_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+EVIDENCE_KINDS = (
+    "quiz_answer",
+    "translation_sentence",
+    "exam_answer",
+    "probe",
+    "tutor_question",
+    "missed_day",
+    "dispute",
+)
+
+
+class EvidenceRow(Base):
+    """One event that tells something about the learner; every agent decision cites these ids."""
+
+    __tablename__ = "evidence"
+    __table_args__ = (
+        CheckConstraint(f"kind IN ({', '.join(repr(kind) for kind in EVIDENCE_KINDS)})", name="kind"),
+        # Agents read "this learner's evidence since the last session", optionally for one topic.
+        Index("ix_evidence_learner_id_occurred_at", "learner_id", "occurred_at"),
+        Index("ix_evidence_learner_id_topic_id", "learner_id", "topic_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(32))
+    # The event it records ("quiz_answer:<id>", "translation_answer:<id>:<n>"): unique, so a replay is a no-op.
+    source_ref: Mapped[str] = mapped_column(String(64), unique=True)
+    topic_id: Mapped[str | None] = mapped_column(String(100))
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="SET NULL"))
+    error_id: Mapped[int | None] = mapped_column(ForeignKey("errors.id", ondelete="SET NULL"))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Set when the event no longer counts (an overturned grade); cancelled evidence cannot be cited.
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created_at()

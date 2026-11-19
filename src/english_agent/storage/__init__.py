@@ -4,6 +4,7 @@ from english_agent.storage.db import SessionFactory, make_engine, make_session_f
 from english_agent.storage.repositories import (
     CardRepo,
     CardStore,
+    EvidenceRepo,
     ItemRepo,
     ItemStore,
     LearnerRepo,
@@ -26,6 +27,7 @@ from english_agent.storage.repositories import (
 __all__ = [
     "CardRepo",
     "CardStore",
+    "EvidenceRepo",
     "ItemRepo",
     "ItemStore",
     "LearnerRepo",
