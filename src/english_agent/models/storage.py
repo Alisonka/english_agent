@@ -217,6 +217,28 @@ class ErrorRecord(BaseModel):
     created_at: datetime
 
 
+EvidenceKind = Literal[
+    "quiz_answer", "translation_sentence", "exam_answer", "probe", "tutor_question", "missed_day", "dispute"
+]
+
+
+class EvidenceRecord(BaseModel):
+    """One learner event (a row of `evidence`); agent decisions cite these ids, and code checks them."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    learner_id: int
+    kind: EvidenceKind
+    source_ref: str
+    topic_id: str | None
+    item_id: int | None
+    error_id: int | None
+    payload: dict[str, Any]
+    occurred_at: datetime
+    cancelled_at: datetime | None
+
+
 class CardRecord(BaseModel):
     """One learner's memory of one item, as FSRS tracks it; `due_at` is when to review it next."""
 

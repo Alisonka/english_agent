@@ -32,6 +32,8 @@ from english_agent.models.storage import (
     CardRecord,
     ClaimOutcome,
     ErrorRecord,
+    EvidenceKind,
+    EvidenceRecord,
     GradingInput,
     GradingSentence,
     GradingTask,
@@ -62,6 +64,7 @@ from english_agent.storage.db import SessionFactory, make_engine, make_session_f
 from english_agent.storage.orm import (
     CardRow,
     ErrorRow,
+    EvidenceRow,
     ItemRow,
     LearnerProfileRow,
     LearnerRow,
@@ -372,6 +375,49 @@ async def _review_card(
     )
     await session.flush()
     return card, True
+
+
+async def _delivery_topic(session: AsyncSession, delivery_id: int) -> str | None:
+    """The topic of the lesson a practice block was sent for."""
+    return await session.scalar(
+        select(LessonRow.topic_id)
+        .join(PracticeDeliveryRow, PracticeDeliveryRow.lesson_id == LessonRow.id)
+        .where(PracticeDeliveryRow.id == delivery_id)
+    )
+
+
+async def _add_evidence(
+    session: AsyncSession,
+    *,
+    learner_id: int,
+    kind: EvidenceKind,
+    source_ref: str,
+    occurred_at: datetime,
+    lesson_topic_id: str | None,
+    item_id: int | None = None,
+    error_id: int | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Record one event inside the caller's transaction; a replayed `source_ref` is a no-op.
+
+    The topic is the item's own (practice is cumulative: a sentence may come from an earlier topic),
+    else the lesson's.
+    """
+    topic_id = await session.scalar(select(ItemRow.topic_id).where(ItemRow.id == item_id)) if item_id else None
+    await session.execute(
+        insert(EvidenceRow)
+        .values(
+            learner_id=learner_id,
+            kind=kind,
+            source_ref=source_ref,
+            topic_id=topic_id or lesson_topic_id,
+            item_id=item_id,
+            error_id=error_id,
+            payload=payload or {},
+            occurred_at=occurred_at,
+        )
+        .on_conflict_do_nothing(index_elements=["source_ref"])
+    )
 
 
 async def _core_item(session: AsyncSession, topic_id: str) -> ItemRow | None:
@@ -1207,6 +1253,43 @@ class ProfileRepo:
             )
 
 
+class EvidenceRepo:
+    """The learner's events, and the check that an agent's citations point at real ones."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def since(self, learner_id: int, after: datetime, *, topic_id: str | None = None) -> list[EvidenceRecord]:
+        """The learner's evidence after `after` (cancelled included, flagged), oldest first; optionally one topic."""
+        statement = select(EvidenceRow).where(EvidenceRow.learner_id == learner_id, EvidenceRow.occurred_at > after)
+        if topic_id is not None:
+            statement = statement.where(EvidenceRow.topic_id == topic_id)
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(statement.order_by(EvidenceRow.occurred_at, EvidenceRow.id))
+            return [EvidenceRecord.model_validate(row) for row in rows]
+
+    async def invalid_citations(
+        self, learner_id: int, evidence_ids: list[int], *, topic_id: str | None = None
+    ) -> list[int]:
+        """The cited ids that cannot back a decision, in citation order; empty when all of them can.
+
+        An id is invalid when no such row exists, it is another learner's, it was cancelled, or
+        (with `topic_id`) it is about another topic.
+        """
+        if not evidence_ids:
+            return []
+        statement = select(EvidenceRow.id).where(
+            EvidenceRow.id.in_(evidence_ids),
+            EvidenceRow.learner_id == learner_id,
+            EvidenceRow.cancelled_at.is_(None),
+        )
+        if topic_id is not None:
+            statement = statement.where(EvidenceRow.topic_id == topic_id)
+        async with session_scope(self._sessions) as session:
+            valid = set(await session.scalars(statement))
+        return [evidence_id for evidence_id in evidence_ids if evidence_id not in valid]
+
+
 class MaintenanceRepo:
     """One-off repairs run from `python -m english_agent.storage`; every method is safe to rerun."""
 
@@ -1378,18 +1461,30 @@ class PracticeRepo:
             ).scalar_one_or_none()
             if answer_id is None:
                 return None
+            error = None
             if not is_correct:
-                session.add(
-                    ErrorRow(
-                        learner_id=learner.id,
-                        item_id=poll.item_id,
-                        kind="quiz",
-                        original=", ".join(question.options[i] for i in option_ids if 0 <= i < len(question.options)),
-                        corrected=question.options[question.correct_option],
-                        error_type=question.kind,
-                        explanation_ru=question.explanation_ru,
-                    )
+                error = ErrorRow(
+                    learner_id=learner.id,
+                    item_id=poll.item_id,
+                    kind="quiz",
+                    original=", ".join(question.options[i] for i in option_ids if 0 <= i < len(question.options)),
+                    corrected=question.options[question.correct_option],
+                    error_type=question.kind,
+                    explanation_ru=question.explanation_ru,
                 )
+                session.add(error)
+                await session.flush()
+            await _add_evidence(
+                session,
+                learner_id=learner.id,
+                kind="quiz_answer",
+                source_ref=f"quiz_answer:{answer_id}",
+                occurred_at=now,
+                lesson_topic_id=await _delivery_topic(session, poll.delivery_id),
+                item_id=poll.item_id,
+                error_id=error.id if error is not None else None,
+                payload={"poll_id": poll.id, "is_correct": is_correct},
+            )
             if poll.item_id is not None:
                 await _review_card(
                     session,
@@ -1607,19 +1702,31 @@ class PracticeRepo:
                     return block.sentences[n - 1].item_id if 1 <= n <= len(block.sentences) else None
                 return core.id if core is not None else None
 
-            session.add_all(
-                ErrorRow(
+            for sentence in grade.sentences:
+                error = None
+                if sentence.verdict == "fixed":
+                    error = ErrorRow(
+                        learner_id=row.learner_id,
+                        item_id=item_for(sentence.n),
+                        kind="text",
+                        original=sentence.learner_text,
+                        corrected=sentence.corrected,
+                        error_type=sentence.error_type,
+                        explanation_ru=sentence.explanation_ru,
+                    )
+                    session.add(error)
+                    await session.flush()
+                await _add_evidence(
+                    session,
                     learner_id=row.learner_id,
+                    kind="translation_sentence",
+                    source_ref=f"translation_answer:{row.id}:{sentence.n}",
+                    occurred_at=now,
+                    lesson_topic_id=lesson_row.topic_id,
                     item_id=item_for(sentence.n),
-                    kind="text",
-                    original=sentence.learner_text,
-                    corrected=sentence.corrected,
-                    error_type=sentence.error_type,
-                    explanation_ru=sentence.explanation_ru,
+                    error_id=error.id if error is not None else None,
+                    payload={"verdict": sentence.verdict, "error_type": sentence.error_type},
                 )
-                for sentence in grade.sentences
-                if sentence.verdict == "fixed"
-            )
             for sentence in grade.sentences:
                 rating = translation_rating(sentence.verdict)
                 item_id = item_for(sentence.n)
@@ -1651,4 +1758,13 @@ class PracticeRepo:
             if row is None or row.status != "graded":
                 return False
             row.disputed = True
+            await _add_evidence(
+                session,
+                learner_id=row.learner_id,
+                kind="dispute",
+                source_ref=f"dispute:translation_answer:{row.id}",
+                occurred_at=datetime.now(UTC),
+                lesson_topic_id=await _delivery_topic(session, row.delivery_id),
+                payload={"translation_answer_id": row.id},
+            )
             return True

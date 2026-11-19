@@ -46,6 +46,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "lesson_content_record": 3,  # v2: payload_kind (lesson | topic); v3: run (the generation report)
     "item_record": 1,
     "error_record": 1,
+    "evidence_record": 1,  # models/storage.py: one learner event that agent decisions cite
     "card_record": 2,  # v2: last_reviewed_at, reviews
     "review_log_record": 3,  # v2: source_ref; v3: payload.before (the card before the rating)
     "practice_delivery_record": 2,  # v2: payload (the day's assembled practice set)
