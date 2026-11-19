@@ -13,7 +13,7 @@ from datetime import date, datetime
 
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum
-from english_agent.models.plan import DayPlan, DayType, StepChoice
+from english_agent.models.plan import DayPlan, DayType, FallbackBranch, StepChoice
 from english_agent.models.storage import ItemAccuracy
 from english_agent.progression import NextStep, TopicProgress, is_done, next_step
 from english_agent.topic_graph import TopicGraph
@@ -48,6 +48,8 @@ def plan_from_step(learner_id: int, day: date, nxt: NextStep, now: datetime) -> 
             leaving_topic_id=nxt.leaving,
         ),
         explanation_ru=EXPLANATIONS[day_type].format(title=nxt.topic.title_ru),
+        # A new topic may not be written by the morning: then the day is reviews only.
+        fallback=FallbackBranch(day_type="review_day") if day_type == "new_topic" else None,
         source="fallback",
         created_at=now,
         provenance=build_provenance(component="fallback_policy", schema_version=SCHEMA_VERSIONS["day_plan"]),
