@@ -1,3 +1,4 @@
+from functools import cache
 from pathlib import Path
 from typing import Annotated
 
@@ -40,6 +41,17 @@ class Curriculum(BaseModel):
 
     def topic_ids(self) -> list[str]:
         return [topic.id for topic in sorted(self.topics, key=lambda item: item.order)]
+
+
+@cache
+def all_topics() -> dict[str, CurriculumTopic]:
+    """Every level's topics by id (ids are unique across levels: checked by the topic graph)."""
+    return {
+        topic.id: topic
+        for cefr in ("A2", "B1", "B2", "C1")
+        if curriculum_path(cefr).exists()
+        for topic in load_curriculum(cefr).topics
+    }
 
 
 def load_curriculum(cefr: Cefr = "A2", *, path: Path | None = None) -> Curriculum:

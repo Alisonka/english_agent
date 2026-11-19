@@ -34,7 +34,8 @@ from english_agent.llm import ChatLLM, LLMError, LLMWriteError, ToolCall, tool_s
 from english_agent.llm.agent_loop import Budget, Finish, MeteredLLM, ToolError, run_subagent, run_tool_loop
 from english_agent.mentor_memory import write_dossier
 from english_agent.metrics import MENTOR_COST, MENTOR_SESSIONS, MENTOR_STEPS, POLICY_REFUSALS
-from english_agent.models.curriculum import load_curriculum
+from english_agent.models.content_order import ContentBrief
+from english_agent.models.curriculum import all_topics, load_curriculum
 from english_agent.models.mentor import Expectation, HypothesisStatus
 from english_agent.models.plan import DayPlan
 from english_agent.models.storage import LearnerRecord
@@ -229,7 +230,9 @@ class _Session:
                 return dry_run(plan, context).as_tool_result(check_plan(plan, context))
             case "diagnose":
                 return await self._diagnose(str(arguments.get("question") or ""))
-            case "order_content" | "order_exercises" | "prepare_exam":
+            case "order_content":
+                return await self._order_content(arguments)
+            case "order_exercises" | "prepare_exam":
                 raise ToolError(f"{call.name} is not available yet; plan with the content that exists")
             case "journal_note":
                 return await self._journal(arguments)
@@ -367,6 +370,18 @@ class _Session:
 
         return await run_subagent(self.budget, "diagnostician", run)
 
+    async def _order_content(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Order a remedial or contrast lesson; returns a receipt (it is written in the background)."""
+        try:
+            brief = ContentBrief.model_validate(arguments)
+        except ValidationError as error:
+            raise ToolError(f"the brief is not valid: {error.errors(include_url=False)[:3]}") from error
+        unknown = [topic for topic in brief.topic_ids if topic not in all_topics()]
+        if unknown:
+            raise ToolError(f"unknown topics: {unknown}")
+        order = await self.runtime.stores.orders.order(brief, self.learner.cefr)
+        return {"order_id": order.id, "topic_id": order.topic_id, "status": order.status, "steps": brief.steps}
+
     async def _journal(self, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
             expectation = Expectation.model_validate(arguments["expectation"]) if arguments.get("expectation") else None
@@ -479,9 +494,10 @@ def _tools() -> list[dict[str, Any]]:
         ),
         tool(
             "order_content",
-            "Order a remedial or contrast lesson (written at night).",
-            {"brief": {"type": "string"}},
-            ["brief"],
+            "Order a remedial (one topic and the error type) or a contrast (two topics) lesson. Returns a receipt "
+            "with the topic_id to plan; it is written in the background, so give the plan a fallback branch.",
+            ContentBrief.model_json_schema()["properties"],
+            ["kind", "topic_ids", "focus_ru"],
         ),
         tool("order_exercises", "Order probe questions or drills.", {"brief": {"type": "string"}}, ["brief"]),
         tool(

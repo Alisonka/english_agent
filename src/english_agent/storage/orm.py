@@ -458,3 +458,23 @@ class DayPlanRow(Base):
     trajectory: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = _created_at()
     committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ContentOrderRow(Base):
+    """A remedial or contrast lesson the Mentor ordered (`models.content_order`); shared per brief."""
+
+    __tablename__ = "content_orders"
+    __table_args__ = (
+        UniqueConstraint("topic_id", "cefr"),
+        CheckConstraint("status IN ('ordered', 'ready', 'failed')", name="status"),
+        Index("ix_content_orders_open", "created_at", postgresql_where=text("status = 'ordered'")),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    topic_id: Mapped[str] = mapped_column(String(100))  # the brief's synthetic topic id
+    cefr: Mapped[str] = mapped_column(String(2))
+    brief: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(16))
+    content_id: Mapped[int | None] = mapped_column(ForeignKey("lesson_contents.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = _created_at()
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

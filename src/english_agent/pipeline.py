@@ -38,7 +38,8 @@ from english_agent.items import step_item_from
 from english_agent.logs import bind, configure_logging
 from english_agent.metrics import LESSONS_FAILED, LESSONS_SENT
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
-from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
+from english_agent.models.content_order import ContentBrief, brief_topic
+from english_agent.models.curriculum import Curriculum, CurriculumTopic, all_topics, load_curriculum
 from english_agent.models.plan import DayPlan, StepChoice
 from english_agent.models.schedule import local_now
 from english_agent.models.storage import ErrorRecord, ItemAccuracy, LearnerRecord, LessonContentRecord
@@ -149,6 +150,7 @@ async def ensure_content(
     curriculum_version: int,
     *,
     now: datetime | None = None,
+    steps: int | None = None,
 ) -> LessonContentRecord | None:
     """The shared lesson for the topic and level: reused if written, else written now by this caller.
 
@@ -181,12 +183,38 @@ async def ensure_content(
         curriculum_version=curriculum_version,
         client=runtime.client,
         sitemaps=runtime.sitemaps,
+        steps=steps,
     )
     log.info("topic %s (%s) run: %s", topic.id, cefr, session.report.summary())
     if session.content is None:
         reason = session.report.error or "the topic could not be written"
         return await stores.contents.fail(record.id, reason, run=session.report)
     return await stores.contents.finish(record.id, session.content, run=session.report)
+
+
+ORDERS_PER_RUN = 3  # ordered lessons written per run of the job (each one is a full content run)
+
+
+async def write_ordered_content(runtime: Runtime, now: datetime) -> int:
+    """Write the oldest ordered remedial and contrast lessons; returns how many became ready.
+
+    Shared like any topic: the content goes to `lesson_contents` under the brief's topic id. An order
+    fails only when every attempt failed; one being written elsewhere waits for the next run.
+    """
+    stores, settings = runtime.stores, runtime.settings
+    ready = 0
+    for order in await stores.orders.open_orders(ORDERS_PER_RUN):
+        topic = brief_topic(order.brief, all_topics())
+        version = load_curriculum(order.cefr).version
+        content = await ensure_content(runtime, topic, order.cefr, version, now=now, steps=order.brief.steps)
+        if content is None:
+            continue
+        if content.status == "ready":
+            await stores.orders.finish(order.id, "ready", content.id, now)
+            ready += 1
+        elif content.attempts >= settings.job_max_attempts:
+            await stores.orders.finish(order.id, "failed", content.id, now)
+    return ready
 
 
 async def run_lesson_for_learner(
@@ -216,6 +244,7 @@ async def run_lesson_for_learner(
         sent = await stores.lessons.sent_steps(learner.id, level)
         progress = topic_progress(sent)
         accuracy = await _step_accuracy(stores, learner.id, [step.item_key for step in sent])
+        brief: ContentBrief | None = None  # set when the day's step is an ordered remedial or contrast
         if topic_id:
             topic = next((item for item in curriculum.topics if item.id == topic_id), None)
             if topic is None:
@@ -233,12 +262,13 @@ async def run_lesson_for_learner(
                 return OK
             span.set_attribute("plan.source", plan.source)
             span.set_attribute("plan.day_type", plan.day_type)
-            if plan.step is None:
+            choice, brief = await _executable_step(runtime, level, curriculum, plan)
+            if choice is None:
                 log.info("the plan for %s sends no step (%s)", today.isoformat(), plan.day_type)
                 return OK
-            found = _step_of(curriculum, plan.step)
+            found = _step_of(curriculum, choice, brief)
             if found is None:
-                log.error("the plan names unknown topic %r", plan.step.topic_id)
+                log.error("the plan names unknown topic %r", choice.topic_id)
                 return FAILED
             nxt, topic = found, found.topic
         span.set_attribute("topic.id", topic.id)
@@ -265,7 +295,8 @@ async def run_lesson_for_learner(
         if nxt.content_id is not None:
             content = await stores.contents.get(nxt.content_id)
         else:
-            content = await ensure_content(runtime, topic, level, curriculum.version, now=now)
+            steps = brief.steps if brief is not None else None
+            content = await ensure_content(runtime, topic, level, curriculum.version, now=now, steps=steps)
         if content is None:
             log.info("the topic %s is being written elsewhere; next tick", topic.id)
             await stores.lessons.release(row.id)
@@ -384,8 +415,24 @@ async def build_fallback_plan(
     )
 
 
-def _step_of(curriculum: Curriculum, choice: StepChoice) -> NextStep | None:
+async def _executable_step(
+    runtime: Runtime, level: Cefr, curriculum: Curriculum, plan: DayPlan
+) -> tuple[StepChoice | None, ContentBrief | None]:
+    """The step the morning sends: the plan's, or its fallback branch's when ordered content is not ready."""
+    choice = plan.step
+    if choice is None or any(topic.id == choice.topic_id for topic in curriculum.topics):
+        return choice, None
+    order = await runtime.stores.orders.by_topic(choice.topic_id, level)
+    if order is not None and order.status == "ready":
+        return choice, order.brief
+    log.info("ordered content %s is not ready: the plan's fallback branch runs", choice.topic_id)
+    return (plan.fallback.step if plan.fallback is not None else None), None
+
+
+def _step_of(curriculum: Curriculum, choice: StepChoice, brief: ContentBrief | None = None) -> NextStep | None:
     topic = next((item for item in curriculum.topics if item.id == choice.topic_id), None)
+    if topic is None and brief is not None:
+        topic = brief_topic(brief, all_topics())
     if topic is None:
         return None
     return NextStep(topic, choice.step_index, choice.variant, choice.content_id, choice.leaving_topic_id)

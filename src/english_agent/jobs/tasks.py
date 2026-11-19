@@ -34,7 +34,7 @@ from english_agent.logs import bind
 from english_agent.mentor import run_mentor_session
 from english_agent.models.cefr import Cefr
 from english_agent.models.curriculum import load_curriculum
-from english_agent.pipeline import ensure_content, next_topic, run_lesson_for_learner
+from english_agent.pipeline import ensure_content, next_topic, run_lesson_for_learner, write_ordered_content
 from english_agent.practice import deliver_practice_to
 
 log = logging.getLogger(__name__)
@@ -174,6 +174,15 @@ async def prewarm_content(deps: WorkerDeps = TaskiqDepends(worker_deps)) -> int:
         )
     log.info("prewarm: %d topic(s) wanted, %d job(s) enqueued", len(wanted), queued)
     return queued
+
+
+@broker.task(task_name="write_ordered_content", schedule=[{"cron": "*/20 * * * *"}])
+async def write_ordered_content_job(deps: WorkerDeps = TaskiqDepends(worker_deps)) -> int:
+    """The remedial and contrast lessons the Mentor ordered: written in the background, ready by morning."""
+    if not await deps.dedup.claim("orders", CONTENT_KEY_TTL):
+        return 0
+    async with _job(deps, "orders"):
+        return await write_ordered_content(deps.runtime, datetime.now(UTC))
 
 
 @broker.task(task_name="generate_content", retry_on_error=True)

@@ -99,3 +99,11 @@ def test_plan_rejects_reserved_slug() -> None:
     args["steps"][0]["slug"] = "core"
     with pytest.raises(ValidationError):
         TopicPlan.model_validate({**args, "topic_id": "there_is_are", "cefr": "A2"})
+
+
+async def test_a_fixed_step_count_is_asked_for_and_enforced() -> None:
+    args = _plan_args()
+    llm = ScriptedLLM([submit(args), submit(args)])
+    with pytest.raises(LLMWriteError, match="exactly 3 step"):
+        await plan_topic(llm, TOPIC, NOTES, steps=3)
+    assert "Target number of steps: 3" in llm.calls[0]["messages"][1]["content"]

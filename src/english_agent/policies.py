@@ -68,7 +68,7 @@ def check_plan(plan: DayPlan, context: PolicyContext) -> list[Violation]:
                     "plan a remedial on it or choose a frontier topic",
                 )
             )
-    revisits = plan.day_type in ("contrast", "reteach", "continue_topic")
+    revisits = plan.day_type in ("reteach", "continue_topic")  # remedial and contrast topics are ordered ones
     if revisits and step is not None and step.topic_id not in context.studied_topics:
         found.append(Violation("not_studied", f"{plan.day_type} needs a topic already studied; {step.topic_id} is not"))
 

@@ -7,6 +7,7 @@ from typing import Any
 
 from english_agent.llm import AssistantTurn
 from english_agent.models.cefr import Cefr
+from english_agent.models.content_order import ContentBrief, ContentOrder, OrderStatus
 from english_agent.models.lesson import Lesson
 from english_agent.models.plan import DayPlan, DayPlanRecord
 from english_agent.models.practice import QuizQuestion, TranslationGrade
@@ -875,6 +876,41 @@ class FakeEvidence:
         return counts
 
 
+class FakeOrders:
+    """`OrderStore` in memory, one order per (brief topic, level)."""
+
+    def __init__(self) -> None:
+        self.orders: dict[tuple[str, str], ContentOrder] = {}
+
+    async def order(self, brief: ContentBrief, cefr: Cefr) -> ContentOrder:
+        key = (brief.topic_id, cefr)
+        if key not in self.orders:
+            self.orders[key] = ContentOrder(
+                id=len(self.orders) + 1,
+                topic_id=brief.topic_id,
+                cefr=cefr,
+                brief=brief,
+                status="ordered",
+                content_id=None,
+                created_at=datetime.now(UTC),
+                finished_at=None,
+            )
+        return self.orders[key]
+
+    async def by_topic(self, topic_id: str, cefr: Cefr) -> ContentOrder | None:
+        return self.orders.get((topic_id, cefr))
+
+    async def open_orders(self, limit: int) -> list[ContentOrder]:
+        return [order for order in self.orders.values() if order.status == "ordered"][:limit]
+
+    async def finish(self, order_id: int, status: OrderStatus, content_id: int | None, now: datetime) -> None:
+        for key, order in self.orders.items():
+            if order.id == order_id:
+                self.orders[key] = order.model_copy(
+                    update={"status": status, "content_id": content_id, "finished_at": now}
+                )
+
+
 class FakeKnowledge:
     """`KnowledgeStore` with topics set as known by the test."""
 
@@ -943,6 +979,7 @@ def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
         plans=FakePlans(),
         knowledge=FakeKnowledge(),
         evidence=FakeEvidence(),
+        orders=FakeOrders(),
     )
     return stores, learners, lessons
 

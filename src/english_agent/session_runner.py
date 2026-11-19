@@ -225,6 +225,7 @@ async def _generate(
     *,
     cefr: Cefr,
     curriculum_version: int | None,
+    step_count: int | None = None,
 ) -> tuple[TopicContent | None, str]:
     """The content, or None and why (research found nothing). Raises on every other failure."""
     settings = stages.settings
@@ -246,7 +247,7 @@ async def _generate(
     plan_stage = stages.stage("plan")
     with _timed(plan_stage):
         plan = await plan_topic(
-            stages.writer(plan_stage), topic, notes, cefr=cefr, curriculum_version=curriculum_version
+            stages.writer(plan_stage), topic, notes, cefr=cefr, curriculum_version=curriculum_version, steps=step_count
         )
 
     # Main steps in order: each one's brief recaps the steps before it.
@@ -313,6 +314,7 @@ async def run_topic_session(
     curriculum_version: int | None = None,
     client: AsyncAnthropic | None = None,
     sitemaps: SitemapCache | None = None,
+    steps: int | None = None,
 ) -> TopicSession:
     """Write the topic's content. Never raises an `Exception`: a failed run is a session without content.
 
@@ -339,7 +341,7 @@ async def run_topic_session(
                 )
                 stages = _Stages(settings, client, meter, reports)
                 content, why_not = await _generate(
-                    stages, topic, tools, cefr=cefr, curriculum_version=curriculum_version
+                    stages, topic, tools, cefr=cefr, curriculum_version=curriculum_version, step_count=steps
                 )
             outcome, error = ("ready", None) if content is not None else ("not_found", why_not)
         except Exception as raised:  # unattended run: every failure becomes a report, not a crash
