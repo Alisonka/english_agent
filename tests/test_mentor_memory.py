@@ -10,7 +10,14 @@ from sqlalchemy import update
 from english_agent.llm import AssistantTurn, ToolCall
 from english_agent.mentor_memory import Observation, can_move, evaluate_expectation, is_stale, write_dossier
 from english_agent.models.mentor import Expectation, Hypothesis, JournalEntry
-from english_agent.storage import InvalidCitationsError, LearnerRepo, MentorMemoryRepo, SessionFactory, session_scope
+from english_agent.storage import (
+    EvidenceRepo,
+    InvalidCitationsError,
+    LearnerRepo,
+    MentorMemoryRepo,
+    SessionFactory,
+    session_scope,
+)
 from english_agent.storage.orm import ErrorRow, EvidenceRow, JournalEntryRow
 from fakes import ScriptedLLM
 
@@ -239,3 +246,12 @@ async def test_the_newest_dossier_is_the_learners(sessions: SessionFactory) -> N
     await memory.save_dossier(first)
     await memory.save_dossier(second)
     assert await memory.latest_dossier(learner) == second
+
+
+async def test_topic_answers_count_graded_answers_but_not_left_out_sentences(sessions: SessionFactory) -> None:
+    learner, other, _ = await seed(sessions)
+    evidence = EvidenceRepo(sessions)
+    topic = "present_perfect_vs_past_simple"
+    assert await evidence.topic_answers(learner, [topic, "be_present"]) == {topic: (3, 2)}
+    assert await evidence.topic_answers(other, [topic]) == {topic: (1, 0)}
+    assert await evidence.topic_answers(learner, []) == {}

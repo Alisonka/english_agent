@@ -19,6 +19,7 @@ from english_agent.models.storage import (
     CardRecord,
     ClaimOutcome,
     ErrorRecord,
+    EvidenceRecord,
     GradingInput,
     GradingSentence,
     GradingTask,
@@ -848,6 +849,25 @@ class FakePractice:
         return record
 
 
+class FakeEvidence:
+    """`EvidenceStore` over records the test adds."""
+
+    def __init__(self) -> None:
+        self.records: list[EvidenceRecord] = []
+
+    async def for_items(self, learner_id: int, item_ids: list[int], *, limit: int) -> list[EvidenceRecord]:
+        mine = [r for r in self.records if r.learner_id == learner_id and r.item_id in item_ids]
+        return sorted(mine, key=lambda r: (r.occurred_at, r.id))[-limit:]
+
+    async def topic_answers(self, learner_id: int, topic_ids: list[str]) -> dict[str, tuple[int, int]]:
+        counts: dict[str, tuple[int, int]] = {}
+        for r in self.records:
+            if r.learner_id == learner_id and r.topic_id in topic_ids:
+                total, right = counts.get(r.topic_id, (0, 0))
+                counts[r.topic_id] = (total + 1, right + int(bool(r.payload.get("is_correct"))))
+        return counts
+
+
 class FakeKnowledge:
     """`KnowledgeStore` with topics set as known by the test."""
 
@@ -900,6 +920,7 @@ def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
         contents=FakeContents(),
         plans=FakePlans(),
         knowledge=FakeKnowledge(),
+        evidence=FakeEvidence(),
     )
     return stores, learners, lessons
 

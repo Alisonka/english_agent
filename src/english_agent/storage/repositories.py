@@ -14,7 +14,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 from typing import cast as narrow
 
-from sqlalchemy import CursorResult, cast, func, select, tuple_, update
+from sqlalchemy import CursorResult, cast, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -331,6 +331,12 @@ class PlanStore(Protocol):
     ) -> DayPlanRecord: ...
 
 
+class EvidenceStore(Protocol):
+    async def for_items(self, learner_id: int, item_ids: list[int], *, limit: int) -> list[EvidenceRecord]: ...
+
+    async def topic_answers(self, learner_id: int, topic_ids: list[str]) -> dict[str, tuple[int, int]]: ...
+
+
 class KnowledgeStore(Protocol):
     async def known_topics(self, learner_id: int, now: datetime) -> set[str]: ...
 
@@ -346,6 +352,7 @@ class Stores:
     contents: LessonContentStore
     plans: PlanStore
     knowledge: KnowledgeStore
+    evidence: EvidenceStore
 
 
 def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = None) -> Stores:
@@ -360,6 +367,7 @@ def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = Non
         contents=LessonContentRepo(sessions),
         plans=PlanRepo(sessions),
         knowledge=KnowledgeRepo(sessions, scheduler),
+        evidence=EvidenceRepo(sessions),
     )
 
 
@@ -1414,6 +1422,9 @@ class ProfileRepo:
             )
 
 
+GRADED_KINDS = ("quiz_answer", "translation_sentence", "exam_answer", "probe")
+
+
 class EvidenceRepo:
     """The learner's events, and the check that an agent's citations point at real ones."""
 
@@ -1428,6 +1439,46 @@ class EvidenceRepo:
         async with session_scope(self._sessions) as session:
             rows = await session.scalars(statement.order_by(EvidenceRow.occurred_at, EvidenceRow.id))
             return [EvidenceRecord.model_validate(row) for row in rows]
+
+    async def for_items(self, learner_id: int, item_ids: list[int], *, limit: int) -> list[EvidenceRecord]:
+        """The learner's latest graded answers on these items (not cancelled), oldest first."""
+        if not item_ids:
+            return []
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(EvidenceRow)
+                .where(
+                    EvidenceRow.learner_id == learner_id,
+                    EvidenceRow.item_id.in_(item_ids),
+                    EvidenceRow.kind.in_(GRADED_KINDS),
+                    EvidenceRow.cancelled_at.is_(None),
+                )
+                .order_by(EvidenceRow.occurred_at.desc(), EvidenceRow.id.desc())
+                .limit(limit)
+            )
+            return sorted((EvidenceRecord.model_validate(row) for row in rows), key=lambda e: (e.occurred_at, e.id))
+
+    async def topic_answers(self, learner_id: int, topic_ids: list[str]) -> dict[str, tuple[int, int]]:
+        """Per topic: (graded answers, right ones), a left-out translation sentence not counted."""
+        if not topic_ids:
+            return {}
+        right = or_(
+            EvidenceRow.payload["is_correct"].as_boolean().is_(True),
+            EvidenceRow.payload["verdict"].as_string() == "correct",
+        )
+        statement = (
+            select(EvidenceRow.topic_id, func.count(), func.count().filter(right))
+            .where(
+                EvidenceRow.learner_id == learner_id,
+                EvidenceRow.topic_id.in_(topic_ids),
+                EvidenceRow.kind.in_(GRADED_KINDS),
+                EvidenceRow.cancelled_at.is_(None),
+                func.coalesce(EvidenceRow.payload["verdict"].as_string(), "") != "missing",
+            )
+            .group_by(EvidenceRow.topic_id)
+        )
+        async with session_scope(self._sessions) as session:
+            return {topic: (total, correct) for topic, total, correct in await session.execute(statement) if topic}
 
     async def invalid_citations(
         self, learner_id: int, evidence_ids: list[int], *, topic_id: str | None = None
