@@ -28,7 +28,7 @@ from english_agent.bot.deps import BotDeps
 from english_agent.grading import DISPUTE_PREFIX, GRADING
 from english_agent.models.cefr import Cefr
 from english_agent.models.schedule import LearnerSchedule, local_today, parse_clock, valid_timezone
-from english_agent.models.storage import LearnerRecord
+from english_agent.models.storage import MAX_INTEREST_LENGTH, MAX_INTERESTS, LearnerGoal, LearnerRecord
 from english_agent.telegram.render import render_quiz_summary
 from english_agent.telegram.sender import TelegramError
 
@@ -42,6 +42,8 @@ HELP = (
     "• /time 09:00 — во сколько присылать урок\n"
     "• /translation 18:00 — во сколько присылать задание на перевод\n"
     "• /timezone Europe/Moscow — твой часовой пояс\n"
+    "• /goal — зачем ты учишь английский\n"
+    "• /interests футбол, IT — темы для упражнений\n"
     "• /pause и /resume — приостановить и продолжить уроки\n"
     "• /status — текущие настройки"
 )
@@ -52,6 +54,18 @@ RESUMED = "Уроки продолжаются с той темы, на кото
 DISPUTED = "Спасибо, оценка отмечена как спорная."
 UNAVAILABLE_LEVEL = "Этот уровень пока недоступен."
 LEVEL_PREFIX = "level:"
+GOAL_PREFIX = "goal:"
+GOAL_PROMPT = "Зачем ты учишь английский? От этого зависит, какие темы пойдут первыми."
+GOALS: dict[LearnerGoal, str] = {
+    "work": "Для работы",
+    "travel": "Для путешествий",
+    "exam": "Подготовка к экзамену",
+    "general": "Для себя",
+}
+BAD_INTERESTS = (
+    "Напиши через запятую, о чём тебе интересно, например: /interests футбол, IT, кино\n"
+    f"До {MAX_INTERESTS} тем, каждая короче {MAX_INTEREST_LENGTH} символов. Очистить — /interests -"
+)
 
 # Shown in Telegram's `/` command menu (registered with setMyCommands on startup).
 COMMANDS: list[tuple[str, str]] = [
@@ -60,6 +74,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("time", "Во сколько присылать урок"),
     ("translation", "Во сколько присылать задание на перевод"),
     ("timezone", "Часовой пояс"),
+    ("goal", "Зачем учишь английский"),
+    ("interests", "Темы для упражнений"),
     ("pause", "Приостановить уроки"),
     ("resume", "Продолжить уроки"),
     ("status", "Текущие настройки"),
@@ -71,13 +87,30 @@ def level_keyboard(available: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 
+def goal_keyboard() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=label, callback_data=f"{GOAL_PREFIX}{goal}")] for goal, label in GOALS.items()]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def parse_interests(text: str) -> list[str] | None:
+    """`/interests` arguments as a list ("-" clears it); None when they break the limits."""
+    if text.strip() == "-":
+        return []
+    interests = list(dict.fromkeys(part.strip() for part in text.split(",") if part.strip()))
+    if not interests or len(interests) > MAX_INTERESTS or any(len(item) > MAX_INTEREST_LENGTH for item in interests):
+        return None
+    return interests
+
+
 def render_status(learner: LearnerRecord) -> str:
     state = "на паузе" if learner.paused_at is not None else "идут" if learner.is_active else "остановлены (/start)"
     return (
         f"Уровень: <b>{learner.cefr}</b>\n"
         f"Часовой пояс: {learner.timezone}\n"
         f"Урок: {learner.lesson_send_time:%H:%M}, перевод: {learner.translation_send_time:%H:%M}\n"
-        f"Уроки: {state}"
+        f"Уроки: {state}\n"
+        f"Цель: {GOALS[learner.goal] if learner.goal else 'не выбрана (/goal)'}\n"
+        f"Интересы: {', '.join(learner.interests) if learner.interests else 'не заданы (/interests)'}"
     )
 
 
@@ -106,6 +139,23 @@ async def my_level(message: Message, deps: BotDeps) -> None:
     learner = await deps.stores.learners.get(chat_id)
     current = learner.cefr if learner is not None else deps.settings.learner_cefr
     await deps.sender.send_text(chat_id, f"Текущий уровень: <b>{current}</b>. Сменить — /level.")
+
+
+async def goal(message: Message, deps: BotDeps) -> None:
+    await _learner(deps, str(message.chat.id))
+    await deps.sender.send_text(str(message.chat.id), GOAL_PROMPT, reply_markup=goal_keyboard())
+
+
+async def set_interests(message: Message, command: CommandObject, deps: BotDeps) -> None:
+    chat_id = str(message.chat.id)
+    interests = parse_interests(command.args or "")
+    if interests is None:
+        await deps.sender.send_text(chat_id, BAD_INTERESTS)
+        return
+    await _learner(deps, chat_id)
+    learner = await deps.stores.learners.set_interests(chat_id, interests)
+    assert learner is not None
+    await deps.sender.send_text(chat_id, render_status(learner))
 
 
 async def _change_schedule(deps: BotDeps, chat_id: str, **changes: object) -> LearnerRecord:
@@ -205,6 +255,21 @@ async def pick_level(callback: CallbackQuery, deps: BotDeps) -> None:
         )
 
 
+async def pick_goal(callback: CallbackQuery, deps: BotDeps) -> None:
+    chosen = (callback.data or "").removeprefix(GOAL_PREFIX)
+    if chosen not in GOALS:
+        await callback.answer()
+        return
+    message = callback.message
+    chat_id = str(message.chat.id if message is not None else callback.from_user.id)
+    await _learner(deps, chat_id)
+    await deps.stores.learners.set_goal(chat_id, chosen)
+    label = GOALS[chosen]
+    await callback.answer(f"Цель: {label}")
+    if message is not None and not isinstance(message, InaccessibleMessage):
+        await deps.sender.edit_text(chat_id, message.message_id, f"✅ Цель: <b>{label}</b>. Поменять — /goal.")
+
+
 async def dispute(callback: CallbackQuery, deps: BotDeps) -> None:
     answer_id = (callback.data or "").removeprefix(DISPUTE_PREFIX)
     disputed = answer_id.isdigit() and await deps.stores.practice.dispute(int(answer_id))
@@ -239,11 +304,14 @@ def build_router() -> Router:
     router.message.register(my_level, Command("mylevel"))
     router.message.register(set_time, Command("time", "translation"))
     router.message.register(set_timezone, Command("timezone"))
+    router.message.register(goal, Command("goal"))
+    router.message.register(set_interests, Command("interests"))
     router.message.register(pause, Command("pause", "resume"))
     router.message.register(status, Command("status"))
     router.message.register(text, F.text & ~F.text.startswith("/"))
     router.message.register(anything_else)
     router.callback_query.register(pick_level, F.data.startswith(LEVEL_PREFIX))
+    router.callback_query.register(pick_goal, F.data.startswith(GOAL_PREFIX))
     router.callback_query.register(dispute, F.data.startswith(DISPUTE_PREFIX))
     router.callback_query.register(other_button)
     router.poll_answer.register(poll_answer)

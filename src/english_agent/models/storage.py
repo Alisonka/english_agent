@@ -29,6 +29,12 @@ PayloadKind = Literal["lesson", "step"]
 StepVariant = Literal["main", "alt"]
 
 
+# What the learner studies for (/goal); it steers which frontier topic comes first.
+LearnerGoal = Literal["work", "travel", "exam", "general"]
+MAX_INTERESTS = 5  # /interests: themes for personal exercises
+MAX_INTEREST_LENGTH = 30
+
+
 class LearnerRecord(BaseModel):
     """A learner and their schedule. Defaults mirror the column defaults of the `learners` table."""
 
@@ -47,6 +53,8 @@ class LearnerRecord(BaseModel):
     is_active: bool = True  # False once the learner blocked the bot or finished the course
     paused_at: datetime | None = None  # /pause: no lessons and no practice until /resume
     deactivated_reason: str | None = None  # "blocked" | "course_finished"
+    goal: LearnerGoal | None = None  # None until the learner picks one
+    interests: list[str] = Field(default_factory=list, max_length=MAX_INTERESTS)
 
     @property
     def schedule(self) -> LearnerSchedule:
