@@ -29,7 +29,8 @@ from anthropic import AsyncAnthropic
 
 from english_agent.config import Settings
 from english_agent.critic import STEP_FIELDS, SUMMARY_FIELDS, review_step, review_summary, revision_feedback
-from english_agent.llm import AnthropicLLM, AssistantTurn, ChatLLM, LLMError, LLMWriteError, make_client
+from english_agent.llm import AnthropicLLM, AssistantTurn, ChatLLM, LLMWriteError, make_client
+from english_agent.llm.agent_loop import Budget
 from english_agent.metrics import CONTENT_RUNS, REVIEW_ISSUES, REVIEWS
 from english_agent.models.cefr import Cefr
 from english_agent.models.curriculum import CurriculumTopic
@@ -46,10 +47,6 @@ from english_agent.topic_planner import plan_topic
 from english_agent.tracing import get_tracer
 
 
-class BudgetExceeded(LLMError):
-    """The run reached its limit of model calls or of estimated cost."""
-
-
 class ReviewRejected(LLMWriteError):
     """The Critic still found blocking issues after the allowed rewrites."""
 
@@ -62,23 +59,11 @@ class TopicSession:
     report: RunReport
 
 
-class _Meter:
-    """The run's call and cost budget, shared by every stage (and the parallel ones)."""
-
-    def __init__(self, max_calls: int, max_cost_usd: float) -> None:
-        self.max_calls, self.max_cost_usd = max_calls, max_cost_usd
-        self.calls, self.cost_usd = 0, 0.0
-
-    def check(self) -> None:
-        if self.calls >= self.max_calls:
-            raise BudgetExceeded(f"the run used its {self.max_calls} model calls")
-        if self.cost_usd >= self.max_cost_usd:
-            raise BudgetExceeded(f"the run spent its ${self.max_cost_usd:.2f}")
+class _Meter(Budget):
+    """The run's call and cost budget, shared by every stage (and the parallel ones), with a per-stage tally."""
 
     def record(self, stage: StageReport, turn: AssistantTurn) -> None:
-        cost = turn.usage.cost_usd if turn.usage is not None and turn.usage.cost_usd is not None else 0.0
-        self.calls += 1
-        self.cost_usd += cost
+        cost = self.charge(turn)
         stage.calls += 1
         stage.cost_usd += cost
 

@@ -7,6 +7,7 @@ import pytest
 import english_agent.session_runner as runner
 from conftest import topic_content_payload
 from english_agent.llm import AssistantTurn, ToolCall, Usage
+from english_agent.llm.agent_loop import BudgetExceeded
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.models.review import ReviewIssue, StepReview, SummaryReview
 from english_agent.models.run import StageReport
@@ -196,7 +197,7 @@ async def test_the_meter_charges_every_call_and_stops_at_the_call_limit() -> Non
 
     await llm.chat([], [])
     await llm.chat([], [])
-    with pytest.raises(runner.BudgetExceeded):
+    with pytest.raises(BudgetExceeded):
         await llm.chat([], [])
 
     assert (meter.calls, stage.calls) == (2, 2)
@@ -208,5 +209,5 @@ async def test_the_meter_stops_once_the_cost_limit_is_spent() -> None:
     meter = runner._Meter(max_calls=10, max_cost_usd=0.5)
     llm = runner._MeteredLLM(ScriptedLLM([priced(0.6), priced(0.1)]), meter, StageReport(name="research"))
     await llm.chat([], [])
-    with pytest.raises(runner.BudgetExceeded, match=r"\$0.50"):
+    with pytest.raises(BudgetExceeded, match=r"\$0.50"):
         await llm.chat([], [])
