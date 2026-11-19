@@ -20,6 +20,9 @@ TABLES = {
     "quiz_answers",
     "translation_answers",
     "evidence",
+    "journal_entries",
+    "hypotheses",
+    "dossiers",
 }
 
 

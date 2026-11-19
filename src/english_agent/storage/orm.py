@@ -336,3 +336,61 @@ class EvidenceRow(Base):
     # Set when the event no longer counts (an overturned grade); cancelled evidence cannot be cited.
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created_at()
+
+
+class JournalEntryRow(Base):
+    """The Mentor's journal (`models.mentor.JournalEntry`): append-only, outcomes filled in by code."""
+
+    __tablename__ = "journal_entries"
+    __table_args__ = (
+        CheckConstraint("outcome IN ('met', 'not_met', 'insufficient')", name="outcome"),
+        Index("ix_journal_entries_learner_id_created_at", "learner_id", "created_at"),
+        # The checker reads "expectations due and not checked yet".
+        Index(
+            "ix_journal_entries_unchecked", "due_on", postgresql_where=text("outcome IS NULL AND due_on IS NOT NULL")
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    decision: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    evidence_ids: Mapped[list[int]] = mapped_column(JSONB)
+    # `Expectation.model_dump(mode="json")`; NULL for a decision that expects nothing checkable.
+    expectation: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    due_on: Mapped[date | None] = mapped_column(Date)  # copied from the expectation, for the index
+    outcome: Mapped[str | None] = mapped_column(String(16))
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created_at()
+
+
+class HypothesisRow(Base):
+    __tablename__ = "hypotheses"
+    __table_args__ = (
+        CheckConstraint("status IN ('open', 'probing', 'confirmed', 'refuted', 'stale')", name="status"),
+        Index("ix_hypotheses_learner_id_status", "learner_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    statement_ru: Mapped[str] = mapped_column(Text)
+    topic_id: Mapped[str | None] = mapped_column(String(100))
+    item_ids: Mapped[list[int]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    evidence_ids: Mapped[list[int]] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(16))
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_evidence_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DossierRow(Base):
+    """Append-only versions of `models.mentor.Dossier`; the newest is the learner's dossier."""
+
+    __tablename__ = "dossiers"
+    __table_args__ = (Index("ix_dossiers_learner_id_created_at", "learner_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    until_entry_id: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = _created_at()

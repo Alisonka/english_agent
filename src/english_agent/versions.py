@@ -48,6 +48,10 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "item_record": 1,
     "error_record": 1,
     "evidence_record": 1,  # models/storage.py: one learner event that agent decisions cite
+    # The Mentor's memory (models/mentor.py): journal with checkable expectations, hypotheses, dossier.
+    "journal_entry": 1,
+    "hypothesis": 1,
+    "dossier": 1,
     "card_record": 2,  # v2: last_reviewed_at, reviews
     "review_log_record": 3,  # v2: source_ref; v3: payload.before (the card before the rating)
     "practice_delivery_record": 2,  # v2: payload (the day's assembled practice set)
@@ -74,6 +78,7 @@ PROMPT_FILES: dict[str, Path] = {
     "review_step_system": _PROMPTS_DIR / "review_step_system.md",
     "review_summary_system": _PROMPTS_DIR / "review_summary_system.md",
     "reflect_system": _PROMPTS_DIR / "reflect_system.md",
+    "dossier_system": _PROMPTS_DIR / "dossier_system.md",
 }
 
 

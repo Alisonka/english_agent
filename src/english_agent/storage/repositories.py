@@ -19,8 +19,17 @@ from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from english_agent.config import Settings
+from english_agent.mentor_memory import STALE_AFTER, Observation, can_move, evaluate_expectation
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
+from english_agent.models.mentor import (
+    CLOSED_HYPOTHESES,
+    Dossier,
+    Expectation,
+    Hypothesis,
+    HypothesisStatus,
+    JournalEntry,
+)
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
 from english_agent.models.run import RunReport
@@ -64,9 +73,12 @@ from english_agent.srs import GOOD, ReviewScheduler, due_at, make_scheduler, qui
 from english_agent.storage.db import SessionFactory, make_engine, make_session_factory, session_scope
 from english_agent.storage.orm import (
     CardRow,
+    DossierRow,
     ErrorRow,
     EvidenceRow,
+    HypothesisRow,
     ItemRow,
+    JournalEntryRow,
     LearnerProfileRow,
     LearnerRow,
     LessonContentRow,
@@ -1288,18 +1300,228 @@ class EvidenceRepo:
         An id is invalid when no such row exists, it is another learner's, it was cancelled, or
         (with `topic_id`) it is about another topic.
         """
-        if not evidence_ids:
-            return []
-        statement = select(EvidenceRow.id).where(
-            EvidenceRow.id.in_(evidence_ids),
-            EvidenceRow.learner_id == learner_id,
-            EvidenceRow.cancelled_at.is_(None),
-        )
-        if topic_id is not None:
-            statement = statement.where(EvidenceRow.topic_id == topic_id)
         async with session_scope(self._sessions) as session:
-            valid = set(await session.scalars(statement))
-        return [evidence_id for evidence_id in evidence_ids if evidence_id not in valid]
+            return await _invalid_citations(session, learner_id, evidence_ids, topic_id=topic_id)
+
+
+class InvalidCitationsError(ValueError):
+    """A write cited evidence that cannot back it; `ids` are the offending ones."""
+
+    def __init__(self, ids: list[int]) -> None:
+        super().__init__(f"evidence ids that do not exist, are another learner's or were cancelled: {ids}")
+        self.ids = ids
+
+
+async def _invalid_citations(
+    session: AsyncSession, learner_id: int, evidence_ids: list[int], *, topic_id: str | None = None
+) -> list[int]:
+    if not evidence_ids:
+        return []
+    statement = select(EvidenceRow.id).where(
+        EvidenceRow.id.in_(evidence_ids),
+        EvidenceRow.learner_id == learner_id,
+        EvidenceRow.cancelled_at.is_(None),
+    )
+    if topic_id is not None:
+        statement = statement.where(EvidenceRow.topic_id == topic_id)
+    valid = set(await session.scalars(statement))
+    return [evidence_id for evidence_id in evidence_ids if evidence_id not in valid]
+
+
+async def _require_citations(session: AsyncSession, learner_id: int, evidence_ids: list[int]) -> None:
+    if not evidence_ids:
+        raise InvalidCitationsError([])
+    if invalid := await _invalid_citations(session, learner_id, evidence_ids):
+        raise InvalidCitationsError(invalid)
+
+
+class MentorMemoryRepo:
+    """The Mentor's journal, hypotheses and dossier; outcomes and statuses are written by code only."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    # -- journal -------------------------------------------------------------------
+
+    async def add_entry(
+        self,
+        learner_id: int,
+        *,
+        decision: str,
+        reason: str,
+        evidence_ids: list[int],
+        expectation: Expectation | None = None,
+    ) -> JournalEntry:
+        """Append a decision; raises `InvalidCitationsError` unless every cited id can back it."""
+        async with session_scope(self._sessions) as session:
+            await _require_citations(session, learner_id, evidence_ids)
+            row = JournalEntryRow(
+                learner_id=learner_id,
+                decision=decision,
+                reason=reason,
+                evidence_ids=evidence_ids,
+                expectation=expectation.model_dump(mode="json") if expectation is not None else None,
+                due_on=expectation.due_on if expectation is not None else None,
+            )
+            session.add(row)
+            await session.flush()
+            return JournalEntry.model_validate(row)
+
+    async def entries(self, learner_id: int, *, after_id: int = 0, limit: int = 100) -> list[JournalEntry]:
+        """The learner's entries newer than `after_id`, oldest first (at most `limit`, the newest ones)."""
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(JournalEntryRow)
+                .where(JournalEntryRow.learner_id == learner_id, JournalEntryRow.id > after_id)
+                .order_by(JournalEntryRow.id.desc())
+                .limit(limit)
+            )
+            return sorted((JournalEntry.model_validate(row) for row in rows), key=lambda entry: entry.id)
+
+    async def check_due_expectations(self, today: date, now: datetime) -> int:
+        """Compute the outcome of every expectation due by `today` that has none yet; returns how many.
+
+        The window is from the entry to the end of `due_on` (UTC). A translation sentence the learner
+        left out is not an answer and does not count.
+        """
+        checked = 0
+        async with session_scope(self._sessions) as session:
+            due = await session.scalars(
+                select(JournalEntryRow)
+                .where(JournalEntryRow.outcome.is_(None), JournalEntryRow.due_on <= today)
+                .with_for_update(skip_locked=True)
+            )
+            for row in due:
+                assert row.expectation is not None
+                expectation = Expectation.model_validate(row.expectation)
+                until = datetime.combine(expectation.due_on + timedelta(days=1), datetime.min.time(), UTC)
+                observations = await _observations(session, row.learner_id, expectation, row.created_at, until)
+                row.outcome, row.checked_at = evaluate_expectation(expectation, observations), now
+                checked += 1
+        return checked
+
+    # -- hypotheses ------------------------------------------------------------------
+
+    async def open_hypothesis(
+        self,
+        learner_id: int,
+        *,
+        statement_ru: str,
+        evidence_ids: list[int],
+        topic_id: str | None = None,
+        item_ids: list[int] | None = None,
+        now: datetime,
+    ) -> Hypothesis:
+        async with session_scope(self._sessions) as session:
+            await _require_citations(session, learner_id, evidence_ids)
+            row = HypothesisRow(
+                learner_id=learner_id,
+                statement_ru=statement_ru,
+                topic_id=topic_id,
+                item_ids=item_ids or [],
+                evidence_ids=evidence_ids,
+                status="open",
+                opened_at=now,
+                last_evidence_at=now,
+            )
+            session.add(row)
+            await session.flush()
+            return Hypothesis.model_validate(row)
+
+    async def move_hypothesis(
+        self, learner_id: int, hypothesis_id: int, status: HypothesisStatus, *, evidence_ids: list[int], now: datetime
+    ) -> Hypothesis:
+        """Move a hypothesis on the evidence that moved it; raises `ValueError` for a move the rules forbid."""
+        async with session_scope(self._sessions) as session:
+            row = await session.get(HypothesisRow, hypothesis_id, with_for_update=True)
+            if row is None or row.learner_id != learner_id:
+                raise ValueError(f"no hypothesis {hypothesis_id} for this learner")
+            current = narrow(HypothesisStatus, row.status)
+            if not can_move(current, status):
+                raise ValueError(f"a hypothesis cannot move from {current} to {status}")
+            await _require_citations(session, learner_id, evidence_ids)
+            row.status = status
+            row.evidence_ids = list(dict.fromkeys([*row.evidence_ids, *evidence_ids]))
+            row.last_evidence_at = now
+            if status in CLOSED_HYPOTHESES:
+                row.closed_at = now
+            await session.flush()
+            return Hypothesis.model_validate(row)
+
+    async def open_hypotheses(self, learner_id: int) -> list[Hypothesis]:
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(HypothesisRow)
+                .where(HypothesisRow.learner_id == learner_id, HypothesisRow.status.in_(("open", "probing")))
+                .order_by(HypothesisRow.id)
+            )
+            return [Hypothesis.model_validate(row) for row in rows]
+
+    async def close_stale(self, now: datetime) -> int:
+        """Mark every hypothesis without new evidence for two weeks as stale; returns how many."""
+        async with session_scope(self._sessions) as session:
+            result = await session.execute(
+                update(HypothesisRow)
+                .where(
+                    HypothesisRow.status.in_(("open", "probing")),
+                    HypothesisRow.last_evidence_at <= now - STALE_AFTER,
+                )
+                .values(status="stale", closed_at=now)
+            )
+            return int(narrow(CursorResult[Any], result).rowcount or 0)
+
+    # -- dossier -------------------------------------------------------------------
+
+    async def latest_dossier(self, learner_id: int) -> Dossier | None:
+        async with session_scope(self._sessions) as session:
+            payload = await session.scalar(
+                select(DossierRow.payload)
+                .where(DossierRow.learner_id == learner_id)
+                .order_by(DossierRow.id.desc())
+                .limit(1)
+            )
+            return None if payload is None else Dossier.model_validate(payload)
+
+    async def save_dossier(self, dossier: Dossier) -> None:
+        async with session_scope(self._sessions) as session:
+            session.add(
+                DossierRow(
+                    learner_id=dossier.learner_id,
+                    until_entry_id=dossier.until_entry_id,
+                    payload=dossier.model_dump(mode="json"),
+                )
+            )
+
+
+async def _observations(
+    session: AsyncSession, learner_id: int, expectation: Expectation, since: datetime, until: datetime
+) -> list[Observation]:
+    """The learner's graded answers on the expectation's topic or item in [since, until)."""
+    statement = (
+        select(EvidenceRow.kind, EvidenceRow.payload, ErrorRow.error_type)
+        .outerjoin(ErrorRow, ErrorRow.id == EvidenceRow.error_id)
+        .where(
+            EvidenceRow.learner_id == learner_id,
+            EvidenceRow.kind.in_(("quiz_answer", "translation_sentence", "exam_answer", "probe")),
+            EvidenceRow.cancelled_at.is_(None),
+            EvidenceRow.occurred_at >= since,
+            EvidenceRow.occurred_at < until,
+        )
+    )
+    if expectation.item_id is not None:
+        statement = statement.where(EvidenceRow.item_id == expectation.item_id)
+    else:
+        statement = statement.where(EvidenceRow.topic_id == expectation.topic_id)
+    observations: list[Observation] = []
+    for kind, payload, error_type in await session.execute(statement):
+        if kind == "translation_sentence":
+            if payload.get("verdict") == "missing":
+                continue
+            correct = payload.get("verdict") == "correct"
+        else:
+            correct = bool(payload.get("is_correct"))
+        observations.append(Observation(correct=correct, error_type=error_type or payload.get("error_type")))
+    return observations
 
 
 class MaintenanceRepo:
