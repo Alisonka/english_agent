@@ -17,6 +17,7 @@ from english_agent.config import Settings
 from english_agent.content import content_key
 from english_agent.models.curriculum import load_curriculum
 from english_agent.models.lesson import Lesson
+from english_agent.models.plan import DayPlan, StepChoice
 from english_agent.models.run import RunReport
 from english_agent.models.storage import LearnerRecord
 from english_agent.models.topic import TopicContent
@@ -424,6 +425,51 @@ async def test_tick_sends_and_records_once_per_day(
     assert (record.status, record.telegram_message_ids) == ("sent", [1])
     item = await fake_items(stores).get_by_key(f"{generated[0]}:singular")  # the first step's item
     assert item is not None and item.source_lesson_id == record.id
+
+
+async def test_the_morning_commits_a_fallback_plan_and_executes_it(
+    run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+
+    await run_tick(stores, msk(9, 0))
+
+    record = await stores.plans.get(learner.id, START)
+    assert record is not None and record.state == "fallback" and record.plan is not None
+    assert record.plan.step is not None and record.plan.step.topic_id == generated[0]
+    assert record.plan.day_type == "new_topic" and len(sent) == 1
+
+
+async def test_a_committed_plan_is_what_the_morning_sends(
+    run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+    chosen = StepChoice(topic_id="there_is_are", step_index=1)
+    agent_plan = DayPlan(
+        learner_id=learner.id, plan_date=START, day_type="new_topic", step=chosen, source="agent", created_at=msk(8)
+    )
+    await stores.plans.commit(agent_plan, now=msk(8))
+
+    await run_tick(stores, msk(9, 0))
+
+    assert generated == ["there_is_are"] and len(sent) == 1
+    record = await stores.plans.get(learner.id, START)
+    assert record is not None and record.state == "committed"  # the morning did not replace it
+
+
+async def test_a_plan_without_a_step_sends_no_lesson(
+    run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+    review = DayPlan(learner_id=learner.id, plan_date=START, day_type="review_day", source="agent", created_at=msk(8))
+    await stores.plans.commit(review, now=msk(8))
+
+    await run_tick(stores, msk(9, 0))
+
+    assert generated == [] and sent == []
 
 
 async def test_tick_serves_every_learner_on_their_own_schedule(

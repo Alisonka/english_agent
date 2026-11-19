@@ -8,6 +8,7 @@ from typing import Any
 from english_agent.llm import AssistantTurn
 from english_agent.models.cefr import Cefr
 from english_agent.models.lesson import Lesson
+from english_agent.models.plan import DayPlan, DayPlanRecord
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
 from english_agent.models.run import RunReport
@@ -847,6 +848,45 @@ class FakePractice:
         return record
 
 
+class FakeKnowledge:
+    """`KnowledgeStore` with topics set as known by the test."""
+
+    def __init__(self) -> None:
+        self.known: dict[int, set[str]] = {}
+
+    async def known_topics(self, learner_id: int, now: datetime) -> set[str]:
+        return set(self.known.get(learner_id, set()))
+
+
+class FakePlans:
+    """`PlanStore` in memory, with the same commit-once rule."""
+
+    def __init__(self) -> None:
+        self.records: dict[tuple[int, date], DayPlanRecord] = {}
+
+    async def get(self, learner_id: int, day: date) -> DayPlanRecord | None:
+        return self.records.get((learner_id, day))
+
+    async def commit(
+        self, plan: DayPlan, *, trajectory: list[dict[str, Any]] | None = None, now: datetime
+    ) -> DayPlanRecord:
+        key = (plan.learner_id, plan.plan_date)
+        current = self.records.get(key)
+        if current is not None and current.state in ("committed", "fallback"):
+            return current
+        self.records[key] = DayPlanRecord(
+            id=len(self.records) + 1,
+            learner_id=plan.learner_id,
+            plan_date=plan.plan_date,
+            state="committed" if plan.source == "agent" else "fallback",
+            plan=plan,
+            trajectory=trajectory,
+            created_at=now,
+            committed_at=now,
+        )
+        return self.records[key]
+
+
 def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
     learners, lessons = FakeLearners(), FakeLessons()
     items = FakeItems()
@@ -858,6 +898,8 @@ def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
         cards=FakeCards(items),
         profiles=FakeProfiles(learners),
         contents=FakeContents(),
+        plans=FakePlans(),
+        knowledge=FakeKnowledge(),
     )
     return stores, learners, lessons
 

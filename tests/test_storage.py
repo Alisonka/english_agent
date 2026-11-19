@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 
 from english_agent.items import core_item_from_lesson
 from english_agent.models.lesson import Lesson
+from english_agent.models.plan import DayPlan, StepChoice
 from english_agent.models.practice import TranslationGrade
 from english_agent.models.run import RunReport, StageReport
 from english_agent.models.schedule import LearnerSchedule
@@ -31,6 +32,7 @@ from english_agent.storage import (
     LessonContentRepo,
     LessonRepo,
     MaintenanceRepo,
+    PlanRepo,
     PracticeRepo,
     ProfileRepo,
     SessionFactory,
@@ -458,6 +460,28 @@ async def test_learner_goal_and_interests_are_saved(sessions: SessionFactory) ->
     assert updated is not None and (updated.goal, updated.interests) == ("exam", ["футбол", "IT"])
     assert await learners.get("42") == updated
     assert await learners.set_goal("missing", "work") is None
+
+
+async def test_a_day_plan_is_committed_once(sessions: SessionFactory) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    plans = PlanRepo(sessions)
+    at = datetime(2026, 11, 2, 20, 0, tzinfo=UTC)
+    first = DayPlan(
+        learner_id=learner.id,
+        plan_date=DAY,
+        day_type="new_topic",
+        step=StepChoice(topic_id="there_is_are", step_index=1),
+        source="agent",
+        created_at=at,
+    )
+    again = first.model_copy(update={"day_type": "review_day", "step": None, "source": "fallback"})
+
+    committed = await plans.commit(first, trajectory=[{"tool": "snapshot"}], now=at)
+    replayed = await plans.commit(again, now=at)
+
+    assert committed.state == "committed" and committed.plan == first and committed.trajectory == [{"tool": "snapshot"}]
+    assert replayed == committed and await plans.get(learner.id, DAY) == committed
+    assert await plans.get(learner.id, DAY + timedelta(days=1)) is None
 
 
 async def test_new_learner_gets_the_given_schedule(sessions: SessionFactory) -> None:

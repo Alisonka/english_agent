@@ -26,6 +26,7 @@ TABLES = {
     "learner_abilities",
     "question_stats",
     "topic_marks",
+    "day_plans",
 }
 
 

@@ -437,3 +437,24 @@ class TopicMarkRow(Base):
     mark: Mapped[str] = mapped_column(String(16), primary_key=True)
     source_ref: Mapped[str] = mapped_column(String(64))  # the test or exam that set it
     marked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DayPlanRow(Base):
+    """One learner's plan for one day (`models.plan.DayPlan`); committed once, then only executed."""
+
+    __tablename__ = "day_plans"
+    __table_args__ = (
+        UniqueConstraint("learner_id", "plan_date"),
+        CheckConstraint("state IN ('pending', 'running', 'committed', 'fallback')", name="state"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    plan_date: Mapped[date] = mapped_column(Date)
+    state: Mapped[str] = mapped_column(String(16))
+    # `DayPlan.model_dump(mode="json")`; NULL while a Mentor session is still running.
+    plan: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # The Mentor's session trace: tool calls, results, policy refusals. NULL for a fallback plan.
+    trajectory: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = _created_at()
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

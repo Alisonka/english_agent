@@ -33,21 +33,24 @@ from sqlalchemy.exc import SQLAlchemyError
 from english_agent.alerts import Alerter
 from english_agent.config import Settings, get_settings
 from english_agent.content import content_key, worker_id
+from english_agent.day_plan import fallback_plan
 from english_agent.items import step_item_from
 from english_agent.logs import bind, configure_logging
 from english_agent.metrics import LESSONS_FAILED, LESSONS_SENT
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
 from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
+from english_agent.models.plan import DayPlan, StepChoice
 from english_agent.models.schedule import local_now
 from english_agent.models.storage import ErrorRecord, ItemAccuracy, LearnerRecord, LessonContentRecord
 from english_agent.planning import lesson_due
 from english_agent.profile import current_reflection, weak_points_for_topic
-from english_agent.progression import NextStep, TopicProgress, is_done, next_step, reteach_candidate, topic_progress
+from english_agent.progression import NextStep, TopicProgress, is_done, reteach_candidate, topic_progress
 from english_agent.research.sitemaps import SitemapCache
 from english_agent.session_runner import run_topic_session
 from english_agent.storage.repositories import Stores, open_stores
 from english_agent.telegram.render import render_cheat_sheet, render_step
 from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError, make_bot
+from english_agent.topic_graph import default_graph
 from english_agent.tracing import configure_tracing, get_tracer
 
 COURSE_FINISHED = "Курс завершён: все темы пройдены."
@@ -220,17 +223,23 @@ async def run_lesson_for_learner(
                 return USAGE
             nxt = _next_in_topic(topic, progress.get(topic.id), accuracy)
         else:
-            skipped = await stores.contents.unavailable_topics(
-                level, curriculum.version, content_key(settings), max_attempts=settings.job_max_attempts
-            )
-            found = next_step(curriculum, progress, skipped, accuracy)
-            if found is None:
+            plan = await _day_plan(runtime, learner, level, curriculum, progress, accuracy, today, now)
+            if plan is None:
                 log.info("course finished at level %s", level)
                 if send:
                     await _finish_course(runtime, learner, level, progress)
                     await stores.learners.deactivate(chat_id, "course_finished")
                     await notify(sender, chat_id, COURSE_FINISHED)
                 return OK
+            span.set_attribute("plan.source", plan.source)
+            span.set_attribute("plan.day_type", plan.day_type)
+            if plan.step is None:
+                log.info("the plan for %s sends no step (%s)", today.isoformat(), plan.day_type)
+                return OK
+            found = _step_of(curriculum, plan.step)
+            if found is None:
+                log.error("the plan names unknown topic %r", plan.step.topic_id)
+                return FAILED
             nxt, topic = found, found.topic
         span.set_attribute("topic.id", topic.id)
         span.set_attribute("step.index", nxt.index)
@@ -311,6 +320,52 @@ async def run_lesson_for_learner(
         except SQLAlchemyError as error:
             log.warning("could not record the item for %s: %s", step.item_key, error)
         return OK
+
+
+async def _day_plan(
+    runtime: Runtime,
+    learner: LearnerRecord,
+    level: Cefr,
+    curriculum: Curriculum,
+    progress: dict[str, TopicProgress],
+    accuracy: dict[str, ItemAccuracy],
+    today: date,
+    now: datetime,
+) -> DayPlan | None:
+    """The committed plan for the day; when there is none, the fallback policy's, committed now.
+
+    None means the level's course is finished. The morning never calls a model: a plan the Mentor
+    did not make is made by code.
+    """
+    stores, settings = runtime.stores, runtime.settings
+    record = await stores.plans.get(learner.id, today)
+    if record is not None and record.plan is not None:
+        return record.plan
+    skipped = await stores.contents.unavailable_topics(
+        level, curriculum.version, content_key(settings), max_attempts=settings.job_max_attempts
+    )
+    plan = fallback_plan(
+        learner_id=learner.id,
+        day=today,
+        cefr=level,
+        curriculum=curriculum,
+        graph=default_graph(),
+        progress=progress,
+        skipped=skipped,
+        accuracy=accuracy,
+        known=await stores.knowledge.known_topics(learner.id, now),
+        now=now,
+    )
+    if plan is None:
+        return None
+    return (await stores.plans.commit(plan, now=now)).plan
+
+
+def _step_of(curriculum: Curriculum, choice: StepChoice) -> NextStep | None:
+    topic = next((item for item in curriculum.topics if item.id == choice.topic_id), None)
+    if topic is None:
+        return None
+    return NextStep(topic, choice.step_index, choice.variant, choice.content_id, choice.leaving_topic_id)
 
 
 async def _step_accuracy(stores: Stores, learner_id: int, item_keys: list[str]) -> dict[str, ItemAccuracy]:

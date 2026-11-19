@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import yaml
@@ -118,3 +119,9 @@ def load_graph(path: Path | None = None) -> TopicGraph:
     links = PrerequisiteFile.model_validate(yaml.safe_load(target.read_text(encoding="utf-8")))
     curricula = [load_curriculum(cefr) for cefr in CEFR_LEVELS if cefr in available_cefr_levels()]
     return build_graph(curricula, links)
+
+
+@cache
+def default_graph() -> TopicGraph:
+    """The graph from the repository's files, loaded once per process."""
+    return load_graph()
