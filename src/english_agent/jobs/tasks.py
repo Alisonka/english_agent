@@ -118,9 +118,24 @@ async def plan_day(learner_id: int, day: str, deps: WorkerDeps = TaskiqDepends(w
             if settings.reflector_model
             else None
         )
+        composer = None
+        if settings.writer_model and settings.critic_model:
+            composer = (
+                AnthropicLLM(settings, model=settings.writer_model, client=runtime.client),
+                AnthropicLLM(
+                    settings, model=settings.critic_model, effort=settings.critic_effort, client=runtime.client
+                ),
+            )
         with bind(chat_id=learner.telegram_chat_id):
             return await run_mentor_session(
-                runtime, deps.mentor, learner, plan_for, datetime.now(UTC), llm=llm, diagnostician_llm=diagnostician
+                runtime,
+                deps.mentor,
+                learner,
+                plan_for,
+                datetime.now(UTC),
+                llm=llm,
+                diagnostician_llm=diagnostician,
+                composer_llms=composer,
             )
 
 

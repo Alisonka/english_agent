@@ -478,3 +478,22 @@ class ContentOrderRow(Base):
     content_id: Mapped[int | None] = mapped_column(ForeignKey("lesson_contents.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = _created_at()
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ExerciseRow(Base):
+    """Composed exercises (`models.exercise`): shared ones form an item's growing bank."""
+
+    __tablename__ = "exercise_bank"
+    __table_args__ = (
+        CheckConstraint("kind IN ('probe', 'contrast_pair', 'drill')", name="kind"),
+        Index("ix_exercise_bank_item_id", "item_id"),
+    )
+
+    question_key: Mapped[str] = mapped_column(String(240), primary_key=True)
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="SET NULL"))
+    item_key: Mapped[str] = mapped_column(String(200))
+    topic_id: Mapped[str] = mapped_column(String(100))
+    kind: Mapped[str] = mapped_column(String(16))
+    question: Mapped[dict[str, Any]] = mapped_column(JSONB)  # `QuizQuestion.model_dump(mode="json")`
+    learner_id: Mapped[int | None] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = _created_at()

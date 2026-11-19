@@ -28,6 +28,7 @@ TABLES = {
     "topic_marks",
     "day_plans",
     "content_orders",
+    "exercise_bank",
 }
 
 

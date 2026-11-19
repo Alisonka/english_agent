@@ -56,6 +56,9 @@ SCHEMA_VERSIONS: dict[str, int] = {
     # A remedial or contrast lesson the Mentor ordered (models/content_order.py).
     "content_brief": 1,
     "content_order": 1,
+    # Exercises composed to order (models/exercise.py).
+    "exercise_order": 1,
+    "bank_exercise": 1,
     "day_plan_record": 1,
     "topic_mark": 1,  # storage/orm.py TopicMarkRow: a topic credited by placement or confirmed by an exam
     # The Mentor's memory (models/mentor.py): journal with checkable expectations, hypotheses, dossier.
@@ -67,7 +70,8 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "practice_delivery_record": 2,  # v2: payload (the day's assembled practice set)
     # The day's assembled quiz/translation set in that payload; v2: reason per item, provenance;
     # v3: profile_version and the "focus" reason.
-    "practice_block": 3,
+    # v4: the "probe" reason (a composed exercise the Mentor's plan asked for).
+    "practice_block": 4,
     "quiz_poll_record": 2,  # v2: item_id
     "translation_answer_record": 2,  # v2: grading_attempts, grading_started_at
     "translation_grade": 1,
@@ -91,6 +95,8 @@ PROMPT_FILES: dict[str, Path] = {
     "review_summary_system": _PROMPTS_DIR / "review_summary_system.md",
     "diagnose_system": _PROMPTS_DIR / "diagnose_system.md",
     "mentor_system": _PROMPTS_DIR / "mentor_system.md",
+    "compose_exercises_system": _PROMPTS_DIR / "compose_exercises_system.md",
+    "check_exercises_system": _PROMPTS_DIR / "check_exercises_system.md",
     "dossier_system": _PROMPTS_DIR / "dossier_system.md",
 }
 

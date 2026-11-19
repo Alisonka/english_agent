@@ -293,8 +293,8 @@ class PracticeDeliveryRecord(BaseModel):
 PracticeSource = Literal["today", "previous", "review"]
 # Why the Planner chose an item: today's step, the topic's least-recalled earlier step, an item due
 # for review, one the learner keeps getting wrong, one missed in today's quiz, the least recalled,
-# or one of the Reflector's focus points (due or weak).
-PlanReason = Literal["today", "previous", "due", "weak", "wrong_today", "least_recalled", "focus"]
+# one of the Reflector's focus points (due or weak), or a probe the Mentor's plan asked for.
+PlanReason = Literal["today", "previous", "due", "weak", "wrong_today", "least_recalled", "focus", "probe"]
 
 
 class AssembledQuestion(BaseModel):

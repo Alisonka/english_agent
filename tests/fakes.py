@@ -8,6 +8,7 @@ from typing import Any
 from english_agent.llm import AssistantTurn
 from english_agent.models.cefr import Cefr
 from english_agent.models.content_order import ContentBrief, ContentOrder, OrderStatus
+from english_agent.models.exercise import BankExercise
 from english_agent.models.lesson import Lesson
 from english_agent.models.plan import DayPlan, DayPlanRecord
 from english_agent.models.practice import QuizQuestion, TranslationGrade
@@ -911,6 +912,20 @@ class FakeOrders:
                 )
 
 
+class FakeExercises:
+    def __init__(self) -> None:
+        self.bank: dict[str, BankExercise] = {}
+        self.priors: dict[str, float] = {}
+
+    async def save(self, exercises: list[BankExercise], priors: dict[str, float]) -> None:
+        for exercise in exercises:
+            self.bank.setdefault(exercise.question_key, exercise)
+        self.priors.update(priors)
+
+    async def get(self, keys: list[str]) -> list[BankExercise]:
+        return [self.bank[key] for key in keys if key in self.bank]
+
+
 class FakeKnowledge:
     """`KnowledgeStore` with topics set as known by the test."""
 
@@ -980,6 +995,7 @@ def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
         knowledge=FakeKnowledge(),
         evidence=FakeEvidence(),
         orders=FakeOrders(),
+        exercises=FakeExercises(),
     )
     return stores, learners, lessons
 

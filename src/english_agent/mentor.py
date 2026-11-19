@@ -27,6 +27,7 @@ from typing import Any, Literal
 from opentelemetry.trace import Span
 from pydantic import ValidationError
 
+from english_agent.composer import compose_exercises
 from english_agent.content import content_key
 from english_agent.day_plan import frontier_known
 from english_agent.diagnostician import diagnose
@@ -36,6 +37,7 @@ from english_agent.mentor_memory import write_dossier
 from english_agent.metrics import MENTOR_COST, MENTOR_SESSIONS, MENTOR_STEPS, POLICY_REFUSALS
 from english_agent.models.content_order import ContentBrief
 from english_agent.models.curriculum import all_topics, load_curriculum
+from english_agent.models.exercise import ExerciseOrder
 from english_agent.models.mentor import Expectation, HypothesisStatus
 from english_agent.models.plan import DayPlan
 from english_agent.models.storage import LearnerRecord
@@ -85,6 +87,7 @@ async def run_mentor_session(
     *,
     llm: ChatLLM,
     diagnostician_llm: ChatLLM | None = None,
+    composer_llms: tuple[ChatLLM, ChatLLM] | None = None,  # (writer, Critic) for order_exercises
     trigger: str = "evening",
 ) -> MentorOutcome:
     """Plan `day` for the learner; every path ends with a committed plan unless the course is over."""
@@ -117,6 +120,8 @@ async def run_mentor_session(
         try:
             async with asyncio.timeout(settings.mentor_timeout_seconds):
                 await session.maybe_fold_dossier(MeteredLLM(llm, budget))
+                if composer_llms is not None:
+                    session.composer = (MeteredLLM(composer_llms[0], budget), MeteredLLM(composer_llms[1], budget))
                 plan = await session.run(MeteredLLM(llm, budget), MeteredLLM(diagnostician_llm or llm, budget))
         except (LLMError, LLMWriteError, TimeoutError) as error:
             log.warning("mentor session for learner %s failed: %s: %s", learner.id, type(error).__name__, error)
@@ -167,6 +172,7 @@ class _Session:
         self.trajectory: list[dict[str, Any]] = []
         self.steps = 0
         self._diagnostician: ChatLLM | None = None
+        self.composer: tuple[ChatLLM, ChatLLM] | None = None
 
     # -- the loop --------------------------------------------------------------------
 
@@ -232,7 +238,9 @@ class _Session:
                 return await self._diagnose(str(arguments.get("question") or ""))
             case "order_content":
                 return await self._order_content(arguments)
-            case "order_exercises" | "prepare_exam":
+            case "order_exercises":
+                return await self._order_exercises(arguments)
+            case "prepare_exam":
                 raise ToolError(f"{call.name} is not available yet; plan with the content that exists")
             case "journal_note":
                 return await self._journal(arguments)
@@ -382,6 +390,30 @@ class _Session:
         order = await self.runtime.stores.orders.order(brief, self.learner.cefr)
         return {"order_id": order.id, "topic_id": order.topic_id, "status": order.status, "steps": brief.steps}
 
+    async def _order_exercises(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Compose probes, contrast pairs or drills now (a subagent call); returns their question keys."""
+        if self.composer is None:
+            raise ToolError("order_exercises is not available in this run")
+        try:
+            order = ExerciseOrder.model_validate(arguments)
+        except ValidationError as error:
+            raise ToolError(f"the order is not valid: {error.errors(include_url=False)[:3]}") from error
+        if order.theme is not None and order.theme not in self.learner.interests:
+            raise ToolError(f"theme must be one of the learner's interests: {self.learner.interests}")
+        item = await self.runtime.stores.items.get_by_key(order.item_key)
+        if item is None:
+            raise ToolError(f"unknown item_key {order.item_key!r}")
+        writer, critic = self.composer
+
+        async def run() -> dict[str, Any]:
+            exercises, priors = await compose_exercises(
+                writer, critic, order, item, cefr=self.learner.cefr, learner_id=self.learner.id, now=self.now
+            )
+            await self.runtime.stores.exercises.save(exercises, priors)
+            return {"question_keys": [e.question_key for e in exercises], "kept": len(exercises), "asked": order.count}
+
+        return await run_subagent(self.budget, "exercise_composer", run)
+
     async def _journal(self, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
             expectation = Expectation.model_validate(arguments["expectation"]) if arguments.get("expectation") else None
@@ -499,7 +531,13 @@ def _tools() -> list[dict[str, Any]]:
             ContentBrief.model_json_schema()["properties"],
             ["kind", "topic_ids", "focus_ru"],
         ),
-        tool("order_exercises", "Order probe questions or drills.", {"brief": {"type": "string"}}, ["brief"]),
+        tool(
+            "order_exercises",
+            "Compose probes (tell a hypothesis apart), contrast pairs or drills for one item; returns question keys "
+            "to put in the plan's practice.probe_question_keys. Counts as a subagent call.",
+            ExerciseOrder.model_json_schema()["properties"],
+            ["kind", "item_key"],
+        ),
         tool(
             "prepare_exam",
             "Prepare an exam on a block of topics.",

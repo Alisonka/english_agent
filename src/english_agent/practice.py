@@ -29,6 +29,7 @@ from english_agent.logs import bind
 from english_agent.models.practice import QuizQuestion
 from english_agent.models.schedule import local_now
 from english_agent.models.storage import (
+    AssembledQuestion,
     LearnerRecord,
     LessonRecord,
     PracticeBlock,
@@ -137,6 +138,32 @@ async def _send_quiz(
         )
         message_ids.append(message_id)
     return message_ids
+
+
+MAX_PROBES = 2
+
+
+async def _with_probes(
+    stores: Stores, learner: LearnerRecord, record: LessonRecord, block: PracticeBlock
+) -> PracticeBlock:
+    """The day plan's probe questions take the last review slots (today's questions stay)."""
+    day_plan = await stores.plans.get(learner.id, record.lesson_date)
+    keys = day_plan.plan.practice.probe_question_keys if day_plan is not None and day_plan.plan is not None else []
+    found = [e for e in await stores.exercises.get(keys[:MAX_PROBES]) if e.learner_id in (None, learner.id)]
+    if not found:
+        return block
+    probes = [
+        AssembledQuestion(question=e.question, item_id=e.item_id, item_key=e.item_key, source="review", reason="probe")
+        for e in found
+    ]
+    questions = list(block.questions)
+    for probe in probes:
+        replaceable = [n for n, question in enumerate(questions) if question.source != "today"]
+        if replaceable:
+            questions[replaceable[-1]] = probe
+        else:
+            questions.append(probe)
+    return block.model_copy(update={"questions": questions})
 
 
 @dataclass(frozen=True)
@@ -267,7 +294,7 @@ async def deliver_practice_for(
         chosen += await _banks_for(
             stores, learner, day, plan.reviews, plan.review_slots, lambda bank: bool(bank.own_questions)
         )
-        block = assemble_quiz(today_bank, chosen, asked=asked, rng=rng)
+        block = await _with_probes(stores, learner, record, assemble_quiz(today_bank, chosen, asked=asked, rng=rng))
         item_count = len(block.questions)
     else:
         wrong = await stores.practice.wrong_quiz_items(record.id)
