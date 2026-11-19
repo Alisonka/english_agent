@@ -227,6 +227,8 @@ class LessonContentStore(Protocol):
         self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
     ) -> set[str]: ...
 
+    async def ready_topics(self, cefr: Cefr, curriculum_version: int, content_key: str) -> set[str]: ...
+
 
 class ItemStore(Protocol):
     async def get_by_key(self, key: str) -> ItemRecord | None: ...
@@ -325,6 +327,8 @@ class ProfileStore(Protocol):
 
 class PlanStore(Protocol):
     async def get(self, learner_id: int, day: date) -> DayPlanRecord | None: ...
+
+    async def start(self, learner_id: int, day: date) -> bool: ...
 
     async def commit(
         self, plan: DayPlan, *, trajectory: list[dict[str, Any]] | None = None, now: datetime
@@ -1189,6 +1193,19 @@ class LessonContentRepo:
             )
             return set(rows)
 
+    async def ready_topics(self, cefr: Cefr, curriculum_version: int, content_key: str) -> set[str]:
+        """Topics of this level and recipe whose content is written and checked."""
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(LessonContentRow.topic_id).where(
+                    LessonContentRow.cefr == cefr,
+                    LessonContentRow.curriculum_version == curriculum_version,
+                    LessonContentRow.content_key == content_key,
+                    LessonContentRow.status == "ready",
+                )
+            )
+            return set(rows)
+
 
 class ItemRepo:
     """Learnable items: the core item of every taught topic (see `english_agent.items`)."""
@@ -1535,6 +1552,17 @@ class PlanRepo:
                 select(DayPlanRow).where(DayPlanRow.learner_id == learner_id, DayPlanRow.plan_date == day)
             )
             return None if row is None else DayPlanRecord.model_validate(row)
+
+    async def start(self, learner_id: int, day: date) -> bool:
+        """Claim the day for a Mentor session: False when a session ran or a plan exists already."""
+        statement = (
+            insert(DayPlanRow)
+            .values(learner_id=learner_id, plan_date=day, state="running")
+            .on_conflict_do_nothing(index_elements=["learner_id", "plan_date"])
+            .returning(DayPlanRow.id)
+        )
+        async with session_scope(self._sessions) as session:
+            return await session.scalar(statement) is not None
 
     async def commit(
         self, plan: DayPlan, *, trajectory: list[dict[str, Any]] | None = None, now: datetime

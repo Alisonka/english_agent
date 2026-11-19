@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -203,3 +203,14 @@ async def test_the_tick_gives_up_abandoned_gradings_and_closes_past_days(monkeyp
     assert practice.translation_answers[answer_id].status == "failed"
     assert any("Не получилось проверить" in text for text in telegram.texts)
     assert all(name != "grade_translation" for name, *_ in enqueued)
+
+
+async def test_plan_enqueues_the_mentor_in_the_evening_window_when_it_is_on() -> None:
+    stores, learners, _ = fake_stores()
+    learner = learners.started("42", DAY)
+    settings = Settings(_env_file=None, telegram_bot_token="123:TOKEN", mentor_mode="shadow")
+    mentor = Runtime(settings, stores, fake_sender(FakeTelegram()))
+
+    assert (await plan_tick(mentor, at(21, 5))).mentor == [(learner.id, DAY + timedelta(days=1))]
+    assert (await plan_tick(mentor, at(21, 15))).mentor == []  # the window is over: the morning's fallback plans
+    assert (await plan_tick(runtime(stores), at(21, 5))).mentor == []  # MENTOR_MODE=off

@@ -37,6 +37,14 @@ CONTENT_RUNS = Counter("english_agent_content_runs_total", "Topic content runs, 
 REVIEWS = Counter("english_agent_reviews_total", "Critic reviews, by artifact and verdict", ["artifact", "verdict"])
 REVIEW_ISSUES = Counter("english_agent_review_issues_total", "Issues the Critic reported, by kind", ["kind"])
 REFLECTIONS = Counter("english_agent_reflections_total", "Reflector runs, by outcome", ["outcome"])
+MENTOR_SESSIONS = Counter("english_agent_mentor_sessions_total", "Mentor sessions, by outcome", ["outcome"])
+POLICY_REFUSALS = Counter("english_agent_policy_refusals_total", "Day plans refused by the policy layer", ["rule"])
+MENTOR_STEPS = Histogram(
+    "english_agent_mentor_steps", "Orchestrator steps per Mentor session", buckets=(2, 4, 6, 8, 10, 12, 20)
+)
+MENTOR_COST = Histogram(
+    "english_agent_mentor_cost_usd", "Estimated cost per Mentor session", buckets=(0.01, 0.05, 0.1, 0.2, 0.5, 1)
+)
 
 
 def serve_metrics(port: int) -> None:

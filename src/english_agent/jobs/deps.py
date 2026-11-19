@@ -15,12 +15,13 @@ from english_agent.grading import Grader, make_grader
 from english_agent.health import beat
 from english_agent.jobs.dedup import Deduper, RedisDeduper
 from english_agent.llm import make_client
+from english_agent.mentor import MentorRepos
 from english_agent.pipeline import Runtime
 from english_agent.reflector import Reflector, make_reflector
 from english_agent.research.sitemaps import RedisSitemapCache
 from english_agent.srs import make_scheduler
 from english_agent.storage.db import make_engine, make_session_factory
-from english_agent.storage.repositories import sql_stores
+from english_agent.storage.repositories import EvidenceRepo, KnowledgeRepo, MentorMemoryRepo, PlanRepo, sql_stores
 from english_agent.telegram.sender import Sender, make_bot
 from english_agent.telegram.throttle import RedisRateLimiter
 from english_agent.tracing import instrument_engine
@@ -32,6 +33,7 @@ class WorkerDeps:
     dedup: Deduper
     grade: Grader
     reflect: Reflector | None = None  # None: the Reflector is off
+    mentor: MentorRepos | None = None  # the Mentor's repositories, over the same pool as the stores
     _stack: AsyncExitStack = field(default_factory=AsyncExitStack)
 
     async def close(self) -> None:
@@ -59,9 +61,11 @@ async def open_worker_deps(settings: Settings) -> WorkerDeps:
         stack.callback(heartbeat.cancel)
         instrument_engine(engine)
         sender = Sender(bot)
+        sessions = make_session_factory(engine)
+        scheduler = make_scheduler(settings)
         runtime = Runtime(
             settings,
-            sql_stores(make_session_factory(engine), make_scheduler(settings)),
+            sql_stores(sessions, scheduler),
             sender,
             client=client,
             sitemaps=RedisSitemapCache(redis, ttl_days=settings.sitemap_ttl_days),
@@ -72,6 +76,12 @@ async def open_worker_deps(settings: Settings) -> WorkerDeps:
             RedisDeduper(redis),
             make_grader(settings, client),
             reflect=make_reflector(settings, client),
+            mentor=MentorRepos(
+                memory=MentorMemoryRepo(sessions),
+                knowledge=KnowledgeRepo(sessions, scheduler),
+                evidence=EvidenceRepo(sessions),
+                plans=PlanRepo(sessions),
+            ),
             _stack=stack,
         )
     except BaseException:

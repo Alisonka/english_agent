@@ -80,5 +80,9 @@ def profile_key(learner_id: int) -> str:
     return f"profile:{learner_id}"
 
 
+def mentor_key(learner_id: int, day: date) -> str:
+    return f"mentor:{learner_id}:{day.isoformat()}"
+
+
 def content_key_for(topic_id: str, cefr: str) -> str:
     return f"content:{topic_id}:{cefr}"
