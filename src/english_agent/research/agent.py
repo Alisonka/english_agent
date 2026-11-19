@@ -14,7 +14,6 @@ site order, step/fetch caps, URL allowlist, grounding of the final source.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -25,6 +24,7 @@ from opentelemetry.trace import Span, Status, StatusCode
 from pydantic import ValidationError
 
 from english_agent.llm import ChatLLM, ToolCall
+from english_agent.llm.agent_loop import Finish, ToolError, run_tool_loop
 from english_agent.models.cefr import Cefr
 from english_agent.models.curriculum import CurriculumTopic
 from english_agent.research.models import (
@@ -40,10 +40,6 @@ from english_agent.tracing import get_tracer
 from english_agent.versions import SCHEMA_VERSIONS, Provenance, build_provenance
 
 _PROMPT = (Path(__file__).resolve().parents[1] / "prompts" / "research_system.md").read_text(encoding="utf-8")
-
-
-class ToolError(Exception):
-    """Rule violation or tool failure. Reported back to the model, never raised out of the loop."""
 
 
 @dataclass  # в dataclass аннотация типа не проверяется во время выполнения
@@ -115,49 +111,35 @@ class ResearchAgent:
             {"role": "user", "content": self._topic_message(topic)},
         ]
 
-        for step in range(1, self._max_steps + 1):
-            turn = await self._llm.chat(messages, self._tool_specs)
-            messages.append(turn.to_message())
+        async def handle(call: ToolCall, step: int, span: Span) -> Any:
+            if call.name == "finish":
+                span.set_attribute("finish.found", bool(call.arguments.get("found")))
+                try:
+                    return Finish(self._finish(topic, call, state, step))
+                except ToolError as error:
+                    self._record(state, step, call, ok=False, summary=str(error))
+                    raise
+            try:
+                payload = await self._dispatch(call, state)
+            except ToolError as error:
+                self._record(state, step, call, ok=False, summary=str(error))
+                raise
+            self._record(state, step, call, ok=True, summary=self._summarize(call, payload))
+            self._annotate_tool_span(span, call, payload)
+            return payload
 
-            if not turn.tool_calls:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "Use a tool: search_site, fetch_page, or finish. Do not answer in prose.",
-                    }
-                )
-                continue
-
-            for call in turn.tool_calls:
-                with get_tracer().start_as_current_span(f"tool.{call.name}") as tool_span:
-                    tool_span.set_attribute("research.step", step)
-                    if call.name == "finish":
-                        tool_span.set_attribute("finish.found", bool(call.arguments.get("found")))
-                        try:
-                            return self._finish(topic, call, state, step)
-                        except ToolError as error:
-                            self._record(state, step, call, ok=False, summary=str(error))
-                            messages.append(self._tool_message(call, {"error": str(error)}))
-                            tool_span.record_exception(error)
-                            tool_span.set_status(Status(StatusCode.ERROR, str(error)))
-                            continue
-                    try:
-                        payload = await self._dispatch(call, state)
-                        self._record(
-                            state,
-                            step,
-                            call,
-                            ok=True,
-                            summary=self._summarize(call, payload),
-                        )
-                        self._annotate_tool_span(tool_span, call, payload)
-                    except ToolError as error:
-                        payload = {"error": str(error)}
-                        self._record(state, step, call, ok=False, summary=str(error))
-                        tool_span.record_exception(error)
-                        tool_span.set_status(Status(StatusCode.ERROR, str(error)))
-                    messages.append(self._tool_message(call, payload))
-
+        result: ResearchResult | None
+        result, _ = await run_tool_loop(
+            self._llm,
+            messages,
+            self._tool_specs,
+            handle,
+            max_steps=self._max_steps,
+            nudge="Use a tool: search_site, fetch_page, or finish. Do not answer in prose.",
+            step_attribute="research.step",
+        )
+        if result is not None:
+            return result
         return ResearchResult(
             topic_id=topic.id,
             status="failed",
@@ -292,14 +274,6 @@ class ResearchAgent:
             f"Today: {self._today.isoformat()}\n"
             "Start with englex."
         )
-
-    @staticmethod
-    def _tool_message(call: ToolCall, payload: Any) -> dict[str, Any]:
-        return {
-            "role": "tool",
-            "tool_call_id": call.id,
-            "content": json.dumps(payload, ensure_ascii=False),
-        }
 
     @staticmethod
     def _record(state: _State, step: int, call: ToolCall, *, ok: bool, summary: str) -> None:
