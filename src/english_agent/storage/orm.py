@@ -183,6 +183,7 @@ class ErrorRow(Base):
     error_type: Mapped[str | None] = mapped_column(String(64))
     explanation_ru: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _created_at()
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # overturned by the Arbiter
 
 
 class CardRow(Base):
@@ -300,6 +301,8 @@ class TranslationAnswerRow(Base):
     graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     grading_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     grading_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The Arbiter's independent grade after a dispute (`TranslationGrade`); NULL: not disputed or not yet.
+    arbiter: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 EVIDENCE_KINDS = (

@@ -46,7 +46,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "lesson_record": 4,  # v2: content_id; v3: status/claim/attempts; v4: step columns + payload_kind
     "lesson_content_record": 3,  # v2: payload_kind (lesson | topic); v3: run (the generation report)
     "item_record": 1,
-    "error_record": 1,
+    "error_record": 2,  # v2: cancelled_at (overturned by the Arbiter)
     "evidence_record": 2,  # one learner event that agent decisions cite; v2: payload question_key and elo
     # Mastery estimates (models/knowledge.py, english_agent/knowledge.py).
     "learner_ability": 1,
@@ -73,7 +73,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     # v4: the "probe" reason (a composed exercise the Mentor's plan asked for).
     "practice_block": 4,
     "quiz_poll_record": 2,  # v2: item_id
-    "translation_answer_record": 2,  # v2: grading_attempts, grading_started_at
+    "translation_answer_record": 3,  # v2: grading_attempts, grading_started_at; v3: arbiter
     "translation_grade": 1,
     # What the grader sees: the day's sentences, their context; v2: learner (Reflection); v3: reflection v2.
     "grading_input": 3,

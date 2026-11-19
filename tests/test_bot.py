@@ -12,7 +12,7 @@ from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from conftest import lesson_payload
 from english_agent.bot.app import build_dispatcher
 from english_agent.bot.deps import BotDeps, InProcessJobs
-from english_agent.bot.handlers import parse_interests
+from english_agent.bot.handlers import DISPUTED, parse_interests
 from english_agent.config import Settings
 from english_agent.grading import Grader, grade_answer, refresh_profile_safely
 from english_agent.models.curriculum import load_curriculum
@@ -400,7 +400,7 @@ async def test_dispute_flags_the_grade() -> None:
 
     assert practice.translation_answers[1].disputed is True
     answer = bot.telegram.calls[-1]
-    assert isinstance(answer, AnswerCallbackQuery) and answer.text == "Спасибо, оценка отмечена как спорная."
+    assert isinstance(answer, AnswerCallbackQuery) and answer.text == DISPUTED
 
 
 # --- background jobs of the bot process -------------------------------------------

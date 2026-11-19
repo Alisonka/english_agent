@@ -80,6 +80,10 @@ def profile_key(learner_id: int) -> str:
     return f"profile:{learner_id}"
 
 
+def arbiter_key(answer_id: int) -> str:
+    return f"arbiter:{answer_id}"
+
+
 def mentor_key(learner_id: int, day: date) -> str:
     return f"mentor:{learner_id}:{day.isoformat()}"
 

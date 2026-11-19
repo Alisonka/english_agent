@@ -7,6 +7,7 @@ loaded completely inside the transaction (no lazy loading), which async SQLAlche
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -115,6 +116,8 @@ from english_agent.storage.orm import (
     TranslationAnswerRow,
 )
 from english_agent.versions import SCHEMA_VERSIONS
+
+log = logging.getLogger(__name__)
 
 
 class LessonAlreadySentError(Exception):
@@ -295,6 +298,12 @@ class PracticeStore(Protocol):
     async def fail_translation_answer(self, answer_id: int, reason: str) -> None: ...
 
     async def dispute(self, answer_id: int) -> bool: ...
+
+    async def for_arbitration(self, answer_id: int) -> GradingTask | None: ...
+
+    async def overturn(
+        self, answer_id: int, arbiter: TranslationGrade, sentences: list[int], now: datetime
+    ) -> list[int]: ...
 
 
 class CardStore(Protocol):
@@ -549,6 +558,55 @@ async def _seed_critic_priors(session: AsyncSession, content: TopicContent) -> N
     if rows:
         statement = insert(QuestionStatRow).values(rows).on_conflict_do_nothing(index_elements=["question_key"])
         await session.execute(statement)
+
+
+async def _revert_elo(session: AsyncSession, learner_id: int, payload: dict[str, Any]) -> None:
+    """Take one answer's Elo move back from the learner's ratings and the question's difficulty."""
+    delta = EloDelta.model_validate(payload["elo"])
+    moves = {"overall": delta.learner, **delta.tags}
+    for row in await session.scalars(
+        select(LearnerAbilityRow)
+        .where(LearnerAbilityRow.learner_id == learner_id, LearnerAbilityRow.scope.in_(list(moves)))
+        .with_for_update()
+    ):
+        row.rating -= moves[row.scope]
+        row.answers = max(0, row.answers - 1)
+    key = payload.get("question_key")
+    question = await session.get(QuestionStatRow, key, with_for_update=True) if key else None
+    if question is not None:
+        question.difficulty -= delta.question
+        question.answers = max(0, question.answers - 1)
+
+
+async def _rebuild_card(session: AsyncSession, scheduler: ReviewScheduler, source_ref: str, now: datetime) -> None:
+    """Rebuild a card as if the rating `source_ref` had not happened (the log stays, marked overturned)."""
+    log_row = await session.scalar(select(ReviewLogRow).where(ReviewLogRow.source_ref == source_ref))
+    if log_row is None:
+        return
+    before = (log_row.payload or {}).get("before")
+    log_row.payload = {**(log_row.payload or {}), "overturned_at": now.isoformat()}
+    if before is None:
+        log.warning("card %s rated before pre-rating states were logged: not rebuilt", log_row.card_id)
+        return
+    card = await session.get_one(CardRow, log_row.card_id, with_for_update=True)
+    state = before["fsrs_state"]
+    last = datetime.fromisoformat(before["last_reviewed_at"]) if before["last_reviewed_at"] else None
+    reviews, due = before["reviews"], datetime.fromisoformat(before["due_at"])
+    later = await session.scalars(
+        select(ReviewLogRow)
+        .where(
+            ReviewLogRow.card_id == card.id,
+            # Strictly after it: ratings of one answer share a time, and `before` already holds the earlier ones.
+            tuple_(ReviewLogRow.reviewed_at, ReviewLogRow.id) > tuple_(log_row.reviewed_at, log_row.id),
+        )
+        .order_by(ReviewLogRow.reviewed_at, ReviewLogRow.id)
+    )
+    for later_log in later:
+        if (later_log.payload or {}).get("overturned_at"):
+            continue
+        state, _ = scheduler.review(state, later_log.rating, later_log.reviewed_at)
+        last, reviews, due = later_log.reviewed_at, reviews + 1, due_at(state)
+    card.fsrs_state, card.due_at, card.last_reviewed_at, card.reviews = state, due, last, reviews
 
 
 async def _apply_elo(
@@ -1421,7 +1479,9 @@ class ProfileRepo:
             )
             errors = (
                 await session.scalars(
-                    select(ErrorRow).where(ErrorRow.learner_id == learner_id, ErrorRow.created_at >= since)
+                    select(ErrorRow).where(
+                        ErrorRow.learner_id == learner_id, ErrorRow.created_at >= since, ErrorRow.cancelled_at.is_(None)
+                    )
                 )
             ).all()
             item_ids = {error.item_id for error in errors if error.item_id is not None}
@@ -2427,7 +2487,9 @@ class PracticeRepo:
         async with session_scope(self._sessions) as session:
             rows = await session.scalars(
                 select(ErrorRow)
-                .where(ErrorRow.learner_id == learner_id, ErrorRow.item_id.in_(item_ids))
+                .where(
+                    ErrorRow.learner_id == learner_id, ErrorRow.item_id.in_(item_ids), ErrorRow.cancelled_at.is_(None)
+                )
                 .order_by(ErrorRow.created_at)
             )
             return [ErrorRecord.model_validate(row) for row in rows]
@@ -2528,3 +2590,42 @@ class PracticeRepo:
                 payload={"translation_answer_id": row.id},
             )
             return True
+
+    async def for_arbitration(self, answer_id: int) -> GradingTask | None:
+        """The disputed answer's grading input, once: None if it is not disputed or the Arbiter has ruled."""
+        async with session_scope(self._sessions) as session:
+            row = await session.get(TranslationAnswerRow, answer_id)
+            if row is None or row.status != "graded" or not row.disputed or row.arbiter is not None:
+                return None
+        return await self.translation_for_grading(answer_id)
+
+    async def overturn(
+        self, answer_id: int, arbiter: TranslationGrade, sentences: list[int], now: datetime
+    ) -> list[int]:
+        """Record the Arbiter's grade and undo the overturned sentences; returns the ones undone.
+
+        In one transaction, per sentence: the error and the evidence are cancelled, the ability and the
+        question's difficulty lose that answer's Elo move, and the card is rebuilt from its state before
+        the rating with every later rating applied again. A card rated before the pre-rating state was
+        logged is left as it is (logged).
+        """
+        undone: list[int] = []
+        async with session_scope(self._sessions) as session:
+            row = await session.get_one(TranslationAnswerRow, answer_id, with_for_update=True)
+            if row.arbiter is not None:
+                return []  # one dispute per answer
+            row.arbiter = arbiter.model_dump(mode="json")
+            for n in sentences:
+                ref = f"translation_answer:{answer_id}:{n}"
+                evidence = await session.scalar(select(EvidenceRow).where(EvidenceRow.source_ref == ref))
+                if evidence is not None and evidence.cancelled_at is None:
+                    evidence.cancelled_at = now
+                    if evidence.error_id is not None:
+                        error = await session.get(ErrorRow, evidence.error_id)
+                        if error is not None:
+                            error.cancelled_at = now
+                    if "elo" in evidence.payload:
+                        await _revert_elo(session, evidence.learner_id, evidence.payload)
+                await _rebuild_card(session, self._scheduler, ref, now)
+                undone.append(n)
+        return undone

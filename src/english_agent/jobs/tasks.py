@@ -15,10 +15,12 @@ from datetime import UTC, date, datetime, timedelta
 
 from taskiq import TaskiqDepends
 
+from english_agent.arbiter import arbitrate
 from english_agent.content import content_key
 from english_agent.grading import give_up_grading, grade_answer, refresh_profile_safely
 from english_agent.jobs.broker import broker
 from english_agent.jobs.dedup import (
+    arbiter_key,
     content_key_for,
     enqueue,
     grading_key,
@@ -158,6 +160,14 @@ async def grade_translation(answer_id: int, deps: WorkerDeps = TaskiqDepends(wor
         return await grade_answer(
             deps.runtime.stores, deps.runtime.sender, deps.grade, answer_id, retry_transient=True, reflect=deps.reflect
         )
+
+
+@broker.task(task_name="arbitrate_dispute", retry_on_error=True)
+async def arbitrate_dispute(answer_id: int, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> str:
+    async with _job(deps, arbiter_key(answer_id), answer_id=answer_id):
+        if deps.arbiter is None:
+            return "off"
+        return await arbitrate(deps.runtime.stores, deps.runtime.sender, deps.arbiter, answer_id)
 
 
 @broker.task(task_name="refresh_profile", retry_on_error=True)

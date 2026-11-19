@@ -51,7 +51,7 @@ BAD_TIME = "Напиши время в формате ЧЧ:ММ, наприме�
 BAD_TIMEZONE = "Не знаю такой часовой пояс. Пример: /timezone Europe/Moscow или /timezone Asia/Vladivostok"
 PAUSED = "Уроки на паузе. Продолжить — /resume."
 RESUMED = "Уроки продолжаются с той темы, на которой остановились."
-DISPUTED = "Спасибо, оценка отмечена как спорная."
+DISPUTED = "Спасибо! Оценку проверят ещё раз, независимо, и пришлют ответ."
 UNAVAILABLE_LEVEL = "Этот уровень пока недоступен."
 LEVEL_PREFIX = "level:"
 GOAL_PREFIX = "goal:"
@@ -274,6 +274,8 @@ async def dispute(callback: CallbackQuery, deps: BotDeps) -> None:
     answer_id = (callback.data or "").removeprefix(DISPUTE_PREFIX)
     disputed = answer_id.isdigit() and await deps.stores.practice.dispute(int(answer_id))
     await callback.answer(DISPUTED if disputed else None)
+    if disputed:
+        await deps.jobs.arbitrate(int(answer_id))
 
 
 async def other_button(callback: CallbackQuery) -> None:

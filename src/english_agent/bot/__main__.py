@@ -21,6 +21,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 from redis.asyncio import Redis
 
+from english_agent.arbiter import make_arbiter
 from english_agent.bot.app import ALLOWED_UPDATES, build_dispatcher
 from english_agent.bot.deps import BotDeps, InProcessJobs, JobDispatcher
 from english_agent.config import Settings, get_settings
@@ -51,7 +52,13 @@ async def _jobs(
     if redis is None:
         client = make_client(settings)
         stack.push_async_callback(client.close)
-        jobs = InProcessJobs(stores, sender, make_grader(settings, client), reflect=make_reflector(settings, client))
+        jobs = InProcessJobs(
+            stores,
+            sender,
+            make_grader(settings, client),
+            reflect=make_reflector(settings, client),
+            arbiter=make_arbiter(settings, client),
+        )
         stack.push_async_callback(jobs.drain, SHUTDOWN_GRACE_SECONDS)
         return jobs
     from english_agent.jobs.broker import broker  # imported only with a queue to talk to

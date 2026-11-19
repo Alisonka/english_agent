@@ -37,6 +37,7 @@ CONTENT_RUNS = Counter("english_agent_content_runs_total", "Topic content runs, 
 REVIEWS = Counter("english_agent_reviews_total", "Critic reviews, by artifact and verdict", ["artifact", "verdict"])
 REVIEW_ISSUES = Counter("english_agent_review_issues_total", "Issues the Critic reported, by kind", ["kind"])
 REFLECTIONS = Counter("english_agent_reflections_total", "Reflector runs, by outcome", ["outcome"])
+ARBITRATIONS = Counter("english_agent_arbitrations_total", "Disputed grades, by the Arbiter's ruling", ["outcome"])
 MENTOR_SESSIONS = Counter("english_agent_mentor_sessions_total", "Mentor sessions, by outcome", ["outcome"])
 POLICY_REFUSALS = Counter("english_agent_policy_refusals_total", "Day plans refused by the policy layer", ["rule"])
 MENTOR_STEPS = Histogram(

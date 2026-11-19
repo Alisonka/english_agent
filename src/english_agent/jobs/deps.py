@@ -10,6 +10,7 @@ from redis.asyncio import Redis
 from taskiq import Context, TaskiqDepends
 
 from english_agent.alerts import Alerter
+from english_agent.arbiter import make_arbiter
 from english_agent.config import Settings
 from english_agent.grading import Grader, make_grader
 from english_agent.health import beat
@@ -33,6 +34,7 @@ class WorkerDeps:
     dedup: Deduper
     grade: Grader
     reflect: Reflector | None = None  # None: the Reflector is off
+    arbiter: Grader | None = None  # None: disputes are only marked
     mentor: MentorRepos | None = None  # the Mentor's repositories, over the same pool as the stores
     _stack: AsyncExitStack = field(default_factory=AsyncExitStack)
 
@@ -76,6 +78,7 @@ async def open_worker_deps(settings: Settings) -> WorkerDeps:
             RedisDeduper(redis),
             make_grader(settings, client),
             reflect=make_reflector(settings, client),
+            arbiter=make_arbiter(settings, client),
             mentor=MentorRepos(
                 memory=MentorMemoryRepo(sessions),
                 knowledge=KnowledgeRepo(sessions, scheduler),

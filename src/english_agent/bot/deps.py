@@ -15,6 +15,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from english_agent.arbiter import arbitrate
 from english_agent.config import Settings
 from english_agent.grading import Grader, grade_answer, refresh_profile_safely
 from english_agent.reflector import Reflector
@@ -28,6 +29,8 @@ class JobDispatcher(Protocol):
     async def grade_translation(self, answer_id: int) -> None: ...
 
     async def refresh_profile(self, learner_id: int) -> None: ...
+
+    async def arbitrate(self, answer_id: int) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -49,9 +52,11 @@ class InProcessJobs:
         grade: Grader,
         *,
         reflect: Reflector | None = None,
+        arbiter: Grader | None = None,
         concurrency: int = 4,
     ) -> None:
         self._stores, self._sender, self._grade, self._reflect = stores, sender, grade, reflect
+        self._arbiter = arbiter
         self._gate = asyncio.Semaphore(concurrency)
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -80,6 +85,12 @@ class InProcessJobs:
 
     async def refresh_profile(self, learner_id: int) -> None:
         self._spawn(f"profile:{learner_id}", refresh_profile_safely(self._stores, learner_id, self._reflect))
+
+    async def arbitrate(self, answer_id: int) -> None:
+        if self._arbiter is None:
+            log.info("dispute on answer %s: the Arbiter is off", answer_id)
+            return
+        self._spawn(f"arbiter:{answer_id}", arbitrate(self._stores, self._sender, self._arbiter, answer_id))
 
     @property
     def pending(self) -> int:
