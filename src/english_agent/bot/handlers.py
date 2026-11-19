@@ -42,6 +42,7 @@ HELP = (
     "• /time 09:00 — во сколько присылать урок\n"
     "• /translation 18:00 — во сколько присылать задание на перевод\n"
     "• /timezone Europe/Moscow — твой часовой пояс\n"
+    "• /ask вопрос — спросить про пройденное\n"
     "• /goal — зачем ты учишь английский\n"
     "• /interests футбол, IT — темы для упражнений\n"
     "• /pause и /resume — приостановить и продолжить уроки\n"
@@ -54,6 +55,7 @@ RESUMED = "Уроки продолжаются с той темы, на кото
 DISPUTED = "Спасибо! Оценку проверят ещё раз, независимо, и пришлют ответ."
 UNAVAILABLE_LEVEL = "Этот уровень пока недоступен."
 LEVEL_PREFIX = "level:"
+ASK_USAGE = "Напиши вопрос после команды, например: /ask почему здесь has, а не have?"
 GOAL_PREFIX = "goal:"
 GOAL_PROMPT = "Зачем ты учишь английский? От этого зависит, какие темы пойдут первыми."
 GOALS: dict[LearnerGoal, str] = {
@@ -74,6 +76,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("time", "Во сколько присылать урок"),
     ("translation", "Во сколько присылать задание на перевод"),
     ("timezone", "Часовой пояс"),
+    ("ask", "Задать вопрос по материалу"),
     ("goal", "Зачем учишь английский"),
     ("interests", "Темы для упражнений"),
     ("pause", "Приостановить уроки"),
@@ -139,6 +142,16 @@ async def my_level(message: Message, deps: BotDeps) -> None:
     learner = await deps.stores.learners.get(chat_id)
     current = learner.cefr if learner is not None else deps.settings.learner_cefr
     await deps.sender.send_text(chat_id, f"Текущий уровень: <b>{current}</b>. Сменить — /level.")
+
+
+async def ask(message: Message, command: CommandObject, deps: BotDeps) -> None:
+    chat_id = str(message.chat.id)
+    text = (command.args or "").strip()
+    if not text:
+        await deps.sender.send_text(chat_id, ASK_USAGE)
+        return
+    learner = await _learner(deps, chat_id)
+    await deps.jobs.answer_question(learner.id, text)
 
 
 async def goal(message: Message, deps: BotDeps) -> None:
@@ -306,6 +319,7 @@ def build_router() -> Router:
     router.message.register(my_level, Command("mylevel"))
     router.message.register(set_time, Command("time", "translation"))
     router.message.register(set_timezone, Command("timezone"))
+    router.message.register(ask, Command("ask"))
     router.message.register(goal, Command("goal"))
     router.message.register(set_interests, Command("interests"))
     router.message.register(pause, Command("pause", "resume"))

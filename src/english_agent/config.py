@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     # Grades the learner's translation; effort is the Claude API `output_config.effort`.
     grader_model: str = "claude-haiku-5-5"
     grader_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    # The Interlocutor answers learners' questions about the material (/ask). Empty TUTOR_MODEL: off.
+    tutor_model: str = "claude-sonnet-5-5"
+    tutor_daily_limit: int = Field(default=10, ge=0)
     # A disputed grade is checked again, independently, by a stronger model. Empty ARBITER_MODEL: off.
     arbiter_model: str = "claude-opus-5-5"
     arbiter_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
