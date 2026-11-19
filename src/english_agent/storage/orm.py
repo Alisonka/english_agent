@@ -13,6 +13,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -394,3 +395,32 @@ class DossierRow(Base):
     until_entry_id: Mapped[int] = mapped_column(Integer)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = _created_at()
+
+
+class LearnerAbilityRow(Base):
+    """The learner's ability (`knowledge.py`): one overall rating and one offset per tag group."""
+
+    __tablename__ = "learner_abilities"
+
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(64), primary_key=True)  # "overall" or a topic tag
+    rating: Mapped[float] = mapped_column(Float)
+    answers: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class QuestionStatRow(Base):
+    """A shared bank question's difficulty, calibrated on every learner's answers."""
+
+    __tablename__ = "question_stats"
+    __table_args__ = (Index("ix_question_stats_item_id", "item_id"),)
+
+    question_key: Mapped[str] = mapped_column(String(240), primary_key=True)
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="SET NULL"))
+    topic_id: Mapped[str | None] = mapped_column(String(100))
+    kind: Mapped[str] = mapped_column(String(16))
+    difficulty: Mapped[float] = mapped_column(Float)
+    prior: Mapped[float] = mapped_column(Float)  # the starting estimate, before any answer
+    prior_source: Mapped[str] = mapped_column(String(16))  # "level" (topic level + kind) or "critic"
+    answers: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)

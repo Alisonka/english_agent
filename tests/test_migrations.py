@@ -23,6 +23,8 @@ TABLES = {
     "journal_entries",
     "hypotheses",
     "dossiers",
+    "learner_abilities",
+    "question_stats",
 }
 
 

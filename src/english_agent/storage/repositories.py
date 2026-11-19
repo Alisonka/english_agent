@@ -19,8 +19,10 @@ from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from english_agent.config import Settings
+from english_agent.knowledge import EloDelta, elo_step, question_key, start_ability, start_difficulty, topic_meta
 from english_agent.mentor_memory import STALE_AFTER, Observation, can_move, evaluate_expectation
 from english_agent.models.cefr import Cefr
+from english_agent.models.knowledge import LearnerAbility, QuestionStat
 from english_agent.models.lesson import Lesson
 from english_agent.models.mentor import (
     CLOSED_HYPOTHESES,
@@ -79,11 +81,13 @@ from english_agent.storage.orm import (
     HypothesisRow,
     ItemRow,
     JournalEntryRow,
+    LearnerAbilityRow,
     LearnerProfileRow,
     LearnerRow,
     LessonContentRow,
     LessonRow,
     PracticeDeliveryRow,
+    QuestionStatRow,
     QuizAnswerRow,
     QuizPollRow,
     ReviewLogRow,
@@ -414,27 +418,100 @@ async def _add_evidence(
     item_id: int | None = None,
     error_id: int | None = None,
     payload: dict[str, Any] | None = None,
+    question_text: str | None = None,
+    question_kind: str | None = None,
+    correct: bool | None = None,
 ) -> None:
     """Record one event inside the caller's transaction; a replayed `source_ref` is a no-op.
 
     The topic is the item's own (practice is cumulative: a sentence may come from an earlier topic),
-    else the lesson's.
+    else the lesson's. A graded answer to a bank question (`question_text`, `correct`) also moves the
+    learner's ability and the question's difficulty; the move is kept in the payload as `elo`.
     """
-    topic_id = await session.scalar(select(ItemRow.topic_id).where(ItemRow.id == item_id)) if item_id else None
-    await session.execute(
+    item = await session.get(ItemRow, item_id) if item_id else None
+    topic_id = (item.topic_id if item is not None else None) or lesson_topic_id
+    values = dict(payload or {})
+    key = question_key(item.key, question_text) if item is not None and question_text else None
+    if key is not None:
+        values["question_key"] = key
+    evidence_id = await session.scalar(
         insert(EvidenceRow)
         .values(
             learner_id=learner_id,
             kind=kind,
             source_ref=source_ref,
-            topic_id=topic_id or lesson_topic_id,
+            topic_id=topic_id,
             item_id=item_id,
             error_id=error_id,
-            payload=payload or {},
+            payload=values,
             occurred_at=occurred_at,
         )
         .on_conflict_do_nothing(index_elements=["source_ref"])
+        .returning(EvidenceRow.id)
     )
+    if evidence_id is None or key is None or correct is None:
+        return
+    delta = await _apply_elo(session, learner_id, key, item_id, topic_id, question_kind or "quiz", correct)
+    await session.execute(
+        update(EvidenceRow).where(EvidenceRow.id == evidence_id).values(payload={**values, "elo": delta.model_dump()})
+    )
+
+
+async def _apply_elo(
+    session: AsyncSession,
+    learner_id: int,
+    key: str,
+    item_id: int | None,
+    topic_id: str | None,
+    kind: str,
+    correct: bool,
+) -> EloDelta:
+    """Move the learner's ability (overall and per tag) and the question's difficulty for one answer."""
+    meta = topic_meta(topic_id)
+    cefr = narrow(Cefr, await session.scalar(select(LearnerRow.cefr).where(LearnerRow.id == learner_id)))
+    scopes = ["overall", *(meta.tags if meta is not None else ())]
+    starts = [{"learner_id": learner_id, "scope": scope, "rating": 0.0} for scope in scopes]
+    starts[0]["rating"] = start_ability(cefr)
+    await session.execute(
+        insert(LearnerAbilityRow)
+        .values([{**start, "updated_at": func.now()} for start in starts])
+        .on_conflict_do_nothing(index_elements=["learner_id", "scope"])
+    )
+    prior = start_difficulty(meta, kind)
+    await session.execute(
+        insert(QuestionStatRow)
+        .values(
+            question_key=key,
+            item_id=item_id,
+            topic_id=topic_id,
+            kind=kind,
+            difficulty=prior,
+            prior=prior,
+            prior_source="level",
+            updated_at=func.now(),
+        )
+        .on_conflict_do_nothing(index_elements=["question_key"])
+    )
+    abilities = {
+        row.scope: row
+        for row in await session.scalars(
+            select(LearnerAbilityRow)
+            .where(LearnerAbilityRow.learner_id == learner_id, LearnerAbilityRow.scope.in_(scopes))
+            .with_for_update()
+        )
+    }
+    question = await session.get_one(QuestionStatRow, key, with_for_update=True)
+    overall = abilities["overall"]
+    tags = {scope: abilities[scope].rating for scope in scopes[1:]}
+    delta = elo_step(overall.rating, tags, question.difficulty, question.answers, correct)
+    overall.rating += delta.learner
+    for scope, move in delta.tags.items():
+        abilities[scope].rating += move
+    for row in abilities.values():
+        row.answers += 1
+    question.difficulty += delta.question
+    question.answers += 1
+    return delta
 
 
 async def _core_item(session: AsyncSession, topic_id: str) -> ItemRow | None:
@@ -1335,6 +1412,44 @@ async def _require_citations(session: AsyncSession, learner_id: int, evidence_id
         raise InvalidCitationsError(invalid)
 
 
+class KnowledgeRepo:
+    """Read side of the mastery estimates; they are written with each graded answer (`_add_evidence`)."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def ability(self, learner_id: int) -> LearnerAbility | None:
+        """None until the learner's first graded answer."""
+        async with session_scope(self._sessions) as session:
+            rows = (
+                await session.scalars(select(LearnerAbilityRow).where(LearnerAbilityRow.learner_id == learner_id))
+            ).all()
+        overall = next((row for row in rows if row.scope == "overall"), None)
+        if overall is None:
+            return None
+        tags = {row.scope: row.rating for row in rows if row.scope != "overall"}
+        return LearnerAbility(overall=overall.rating, tags=tags, answers=overall.answers)
+
+    async def questions(self, keys: list[str]) -> dict[str, QuestionStat]:
+        if not keys:
+            return {}
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(select(QuestionStatRow).where(QuestionStatRow.question_key.in_(keys)))
+            return {row.question_key: QuestionStat.model_validate(row) for row in rows}
+
+    async def item_questions(self, item_ids: list[int]) -> list[QuestionStat]:
+        """Every calibrated question of these items (for the item's mastery)."""
+        if not item_ids:
+            return []
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(QuestionStatRow)
+                .where(QuestionStatRow.item_id.in_(item_ids))
+                .order_by(QuestionStatRow.question_key)
+            )
+            return [QuestionStat.model_validate(row) for row in rows]
+
+
 class MentorMemoryRepo:
     """The Mentor's journal, hypotheses and dossier; outcomes and statuses are written by code only."""
 
@@ -1718,6 +1833,9 @@ class PracticeRepo:
                 item_id=poll.item_id,
                 error_id=error.id if error is not None else None,
                 payload={"poll_id": poll.id, "is_correct": is_correct},
+                question_text=question.question,
+                question_kind="quiz",
+                correct=is_correct,
             )
             if poll.item_id is not None:
                 await _review_card(
@@ -1936,6 +2054,12 @@ class PracticeRepo:
                     return block.sentences[n - 1].item_id if 1 <= n <= len(block.sentences) else None
                 return core.id if core is not None else None
 
+            def task_text(n: int) -> str | None:
+                """The sentence the learner translated (step days only: legacy blocks kept no tasks)."""
+                if block is not None and 1 <= n <= len(block.sentences):
+                    return block.sentences[n - 1].task.ru
+                return None
+
             for sentence in grade.sentences:
                 error = None
                 if sentence.verdict == "fixed":
@@ -1960,6 +2084,9 @@ class PracticeRepo:
                     item_id=item_for(sentence.n),
                     error_id=error.id if error is not None else None,
                     payload={"verdict": sentence.verdict, "error_type": sentence.error_type},
+                    question_text=task_text(sentence.n),
+                    question_kind="translation",
+                    correct=None if sentence.verdict == "missing" else sentence.verdict == "correct",
                 )
             for sentence in grade.sentences:
                 rating = translation_rating(sentence.verdict)
