@@ -196,6 +196,36 @@ async def test_review_is_applied_once_per_source_ref(sessions: SessionFactory, l
         assert logs[0].payload is not None and logs[0].payload["fsrs"]["rating"] == GOOD
 
 
+async def test_review_log_keeps_the_card_before_the_rating(sessions: SessionFactory, lesson: Lesson) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    item_id = (await ItemRepo(sessions).get_or_create(_draft(lesson)))[0].id
+    cards = CardRepo(sessions, SCHEDULER)
+    now = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+
+    first = await cards.review(learner.id, item_id, GOOD, now, source="quiz", source_ref="quiz_answer:1")
+    await cards.review(learner.id, item_id, AGAIN, now + timedelta(days=2), source="quiz", source_ref="quiz_answer:2")
+
+    async with session_scope(sessions) as session:
+        logs = (await session.scalars(select(ReviewLogRow).order_by(ReviewLogRow.id))).all()
+    befores = [log.payload["before"] for log in logs if log.payload is not None]
+    # A new card: the fresh FSRS state (its card_id is random), due at the first rating, never reviewed.
+    fresh = SCHEDULER.new_card(now)
+    fresh["card_id"] = befores[0]["fsrs_state"]["card_id"]
+    assert befores[0] == {
+        "fsrs_state": fresh,
+        "due_at": now.isoformat(),
+        "last_reviewed_at": None,
+        "reviews": 0,
+    }
+    # The second rating saw the card exactly as the first one left it.
+    assert befores[1] == {
+        "fsrs_state": first.fsrs_state,
+        "due_at": first.due_at.isoformat(),
+        "last_reviewed_at": now.isoformat(),
+        "reviews": 1,
+    }
+
+
 # --- practice -------------------------------------------------------------------
 
 
