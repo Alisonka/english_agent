@@ -87,6 +87,7 @@ PROMPT_FILES: dict[str, Path] = {
     "review_step_system": _PROMPTS_DIR / "review_step_system.md",
     "review_summary_system": _PROMPTS_DIR / "review_summary_system.md",
     "diagnose_system": _PROMPTS_DIR / "diagnose_system.md",
+    "mentor_system": _PROMPTS_DIR / "mentor_system.md",
     "dossier_system": _PROMPTS_DIR / "dossier_system.md",
 }
 

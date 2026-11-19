@@ -473,6 +473,13 @@ class FakeContents:
     async def get(self, content_id: int) -> LessonContentRecord | None:
         return next((row for row in self.rows.values() if row.id == content_id), None)
 
+    async def ready_topics(self, cefr: Cefr, curriculum_version: int, content_key: str) -> set[str]:
+        return {
+            topic_id
+            for (topic_id, level, version, key), row in self.rows.items()
+            if (level, version, key) == (cefr, curriculum_version, content_key) and row.status == "ready"
+        }
+
     async def unavailable_topics(
         self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
     ) -> set[str]:
@@ -886,6 +893,21 @@ class FakePlans:
 
     async def get(self, learner_id: int, day: date) -> DayPlanRecord | None:
         return self.records.get((learner_id, day))
+
+    async def start(self, learner_id: int, day: date) -> bool:
+        if (learner_id, day) in self.records:
+            return False
+        self.records[(learner_id, day)] = DayPlanRecord(
+            id=len(self.records) + 1,
+            learner_id=learner_id,
+            plan_date=day,
+            state="running",
+            plan=None,
+            trajectory=None,
+            created_at=datetime.now(UTC),
+            committed_at=None,
+        )
+        return True
 
     async def commit(
         self, plan: DayPlan, *, trajectory: list[dict[str, Any]] | None = None, now: datetime

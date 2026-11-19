@@ -23,12 +23,15 @@ from english_agent.jobs.dedup import (
     enqueue,
     grading_key,
     lesson_key,
+    mentor_key,
     practice_key,
     profile_key,
 )
 from english_agent.jobs.deps import WorkerDeps, worker_deps
 from english_agent.jobs.planner import plan_tick
+from english_agent.llm import AnthropicLLM
 from english_agent.logs import bind
+from english_agent.mentor import run_mentor_session
 from english_agent.models.cefr import Cefr
 from english_agent.models.curriculum import load_curriculum
 from english_agent.pipeline import ensure_content, next_topic, run_lesson_for_learner
@@ -38,6 +41,7 @@ log = logging.getLogger(__name__)
 
 # How long a de-duplication key outlives a worker that died holding it.
 LESSON_KEY_TTL = 30 * 60
+MENTOR_KEY_TTL = 15 * 60  # one session; its window is 10 minutes
 PRACTICE_KEY_TTL = 10 * 60
 GRADING_KEY_TTL = 10 * 60
 PROFILE_KEY_TTL = 5 * 60  # a refresh may include a Reflector call
@@ -70,6 +74,10 @@ async def schedule_tick(deps: WorkerDeps = TaskiqDepends(worker_deps)) -> None:
         sent += await enqueue(
             deps.dedup, practice_key(learner_id, day), PRACTICE_KEY_TTL, deliver_practice, learner_id, day.isoformat()
         )
+    for learner_id, day in plan.mentor:
+        sent += await enqueue(
+            deps.dedup, mentor_key(learner_id, day), MENTOR_KEY_TTL, plan_day, learner_id, day.isoformat()
+        )
     for answer_id in plan.gradings:
         sent += await enqueue(deps.dedup, grading_key(answer_id), GRADING_KEY_TTL, grade_translation, answer_id)
     for answer_id in plan.abandoned_gradings:
@@ -90,6 +98,30 @@ async def deliver_lesson(learner_id: int, day: str, deps: WorkerDeps = TaskiqDep
         with bind(chat_id=learner.telegram_chat_id):
             async with asyncio.timeout(LESSON_TIMEOUT_SECONDS):
                 return await run_lesson_for_learner(deps.runtime, learner, lesson_day)
+
+
+@broker.task(task_name="plan_day")
+async def plan_day(learner_id: int, day: str, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> str:
+    """The Mentor's session for one learner's `day` (or the fallback plan when it cannot plan)."""
+    plan_for = date.fromisoformat(day)
+    async with _job(deps, mentor_key(learner_id, plan_for), learner_id=learner_id):
+        runtime = deps.runtime
+        learner = await runtime.stores.learners.get_by_id(learner_id)
+        if learner is None or not learner.receives_lessons or deps.mentor is None:
+            return "skipped"
+        settings = runtime.settings
+        llm = AnthropicLLM(settings, model=settings.mentor_model, effort=settings.mentor_effort, client=runtime.client)
+        diagnostician = (
+            AnthropicLLM(
+                settings, model=settings.reflector_model, effort=settings.reflector_effort, client=runtime.client
+            )
+            if settings.reflector_model
+            else None
+        )
+        with bind(chat_id=learner.telegram_chat_id):
+            return await run_mentor_session(
+                runtime, deps.mentor, learner, plan_for, datetime.now(UTC), llm=llm, diagnostician_llm=diagnostician
+            )
 
 
 @broker.task(task_name="deliver_practice")

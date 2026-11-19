@@ -7,7 +7,7 @@ tested against in-memory stores without a broker.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from english_agent.grading import MAX_GRADING_ATTEMPTS
 from english_agent.models.schedule import local_now
@@ -25,6 +25,16 @@ class Plan:
     practice: list[tuple[int, date]] = field(default_factory=list)
     gradings: list[int] = field(default_factory=list)  # answer ids to (re)grade
     abandoned_gradings: list[int] = field(default_factory=list)  # answer ids out of attempts
+    mentor: list[tuple[int, date]] = field(default_factory=list)  # (learner id, the local day to plan)
+
+
+MENTOR_WINDOW = timedelta(minutes=10)  # missed it (a worker was down)? The morning's fallback plans the day.
+
+
+def mentor_due(local: datetime, evening: time) -> bool:
+    """Whether the learner's evening planning window is open: from `evening` for `MENTOR_WINDOW`."""
+    start = datetime.combine(local.date(), evening, tzinfo=local.tzinfo)
+    return start <= local < start + MENTOR_WINDOW
 
 
 async def plan_tick(runtime: Runtime, now: datetime) -> Plan:
@@ -43,6 +53,8 @@ async def plan_tick(runtime: Runtime, now: datetime) -> Plan:
         kinds = claimed.get(state.lesson_id, set()) if state is not None else set()
         if practice_due(learner, state, kinds, now, settings):
             plan.practice.append((learner.id, day))
+        if settings.mentor_mode != "off" and mentor_due(local_now(learner.timezone, now), settings.mentor_evening_time):
+            plan.mentor.append((learner.id, day + timedelta(days=1)))
 
     for answer_id, attempts in await stores.practice.stale_gradings(now - timedelta(minutes=GRADING_STALE_MINUTES)):
         (plan.gradings if attempts < MAX_GRADING_ATTEMPTS else plan.abandoned_gradings).append(answer_id)

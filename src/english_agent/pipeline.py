@@ -337,14 +337,40 @@ async def _day_plan(
     None means the level's course is finished. The morning never calls a model: a plan the Mentor
     did not make is made by code.
     """
-    stores, settings = runtime.stores, runtime.settings
-    record = await stores.plans.get(learner.id, today)
+    record = await runtime.stores.plans.get(learner.id, today)
     if record is not None and record.plan is not None:
         return record.plan
+    plan = await build_fallback_plan(runtime, learner, level, curriculum, progress, accuracy, today, now)
+    if plan is None:
+        return None
+    return (await runtime.stores.plans.commit(plan, now=now)).plan
+
+
+async def fallback_for_day(runtime: Runtime, learner: LearnerRecord, day: date, now: datetime) -> DayPlan | None:
+    """The deterministic plan for `day` from the learner's current progress (not committed)."""
+    level = learner.cefr
+    curriculum = load_curriculum(level)
+    sent = await runtime.stores.lessons.sent_steps(learner.id, level)
+    progress = topic_progress(sent)
+    accuracy = await _step_accuracy(runtime.stores, learner.id, [step.item_key for step in sent])
+    return await build_fallback_plan(runtime, learner, level, curriculum, progress, accuracy, day, now)
+
+
+async def build_fallback_plan(
+    runtime: Runtime,
+    learner: LearnerRecord,
+    level: Cefr,
+    curriculum: Curriculum,
+    progress: dict[str, TopicProgress],
+    accuracy: dict[str, ItemAccuracy],
+    today: date,
+    now: datetime,
+) -> DayPlan | None:
+    stores, settings = runtime.stores, runtime.settings
     skipped = await stores.contents.unavailable_topics(
         level, curriculum.version, content_key(settings), max_attempts=settings.job_max_attempts
     )
-    plan = fallback_plan(
+    return fallback_plan(
         learner_id=learner.id,
         day=today,
         cefr=level,
@@ -356,9 +382,6 @@ async def _day_plan(
         known=await stores.knowledge.known_topics(learner.id, now),
         now=now,
     )
-    if plan is None:
-        return None
-    return (await stores.plans.commit(plan, now=now)).plan
 
 
 def _step_of(curriculum: Curriculum, choice: StepChoice) -> NextStep | None:
