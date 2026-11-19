@@ -46,6 +46,7 @@ from english_agent.models.mentor import (
     HypothesisStatus,
     JournalEntry,
 )
+from english_agent.models.plan import DayPlan, DayPlanRecord
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
 from english_agent.models.run import RunReport
@@ -89,6 +90,7 @@ from english_agent.srs import GOOD, ReviewScheduler, due_at, make_scheduler, qui
 from english_agent.storage.db import SessionFactory, make_engine, make_session_factory, session_scope
 from english_agent.storage.orm import (
     CardRow,
+    DayPlanRow,
     DossierRow,
     ErrorRow,
     EvidenceRow,
@@ -321,6 +323,18 @@ class ProfileStore(Protocol):
     async def inputs(self, learner_id: int, now: datetime, *, window_days: int) -> ProfileInputs: ...
 
 
+class PlanStore(Protocol):
+    async def get(self, learner_id: int, day: date) -> DayPlanRecord | None: ...
+
+    async def commit(
+        self, plan: DayPlan, *, trajectory: list[dict[str, Any]] | None = None, now: datetime
+    ) -> DayPlanRecord: ...
+
+
+class KnowledgeStore(Protocol):
+    async def known_topics(self, learner_id: int, now: datetime) -> set[str]: ...
+
+
 @dataclass(frozen=True)
 class Stores:
     learners: LearnerStore
@@ -330,6 +344,8 @@ class Stores:
     cards: CardStore
     profiles: ProfileStore
     contents: LessonContentStore
+    plans: PlanStore
+    knowledge: KnowledgeStore
 
 
 def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = None) -> Stores:
@@ -342,6 +358,8 @@ def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = Non
         cards=CardRepo(sessions, scheduler),
         profiles=ProfileRepo(sessions),
         contents=LessonContentRepo(sessions),
+        plans=PlanRepo(sessions),
+        knowledge=KnowledgeRepo(sessions, scheduler),
     )
 
 
@@ -1452,6 +1470,42 @@ async def _require_citations(session: AsyncSession, learner_id: int, evidence_id
         raise InvalidCitationsError([])
     if invalid := await _invalid_citations(session, learner_id, evidence_ids):
         raise InvalidCitationsError(invalid)
+
+
+class PlanRepo:
+    """Day plans: committed once per learner and day; committing again returns the plan already there."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def get(self, learner_id: int, day: date) -> DayPlanRecord | None:
+        async with session_scope(self._sessions) as session:
+            row = await session.scalar(
+                select(DayPlanRow).where(DayPlanRow.learner_id == learner_id, DayPlanRow.plan_date == day)
+            )
+            return None if row is None else DayPlanRecord.model_validate(row)
+
+    async def commit(
+        self, plan: DayPlan, *, trajectory: list[dict[str, Any]] | None = None, now: datetime
+    ) -> DayPlanRecord:
+        """Fix the plan for its day; a day already committed keeps its plan (a replayed commit is a no-op)."""
+        state = "committed" if plan.source == "agent" else "fallback"
+        values = {"state": state, "plan": plan.model_dump(mode="json"), "trajectory": trajectory, "committed_at": now}
+        statement = insert(DayPlanRow).values(learner_id=plan.learner_id, plan_date=plan.plan_date, **values)
+        statement = statement.on_conflict_do_update(
+            index_elements=["learner_id", "plan_date"],
+            set_=values,
+            where=DayPlanRow.state.in_(("pending", "running")),
+        )
+        async with session_scope(self._sessions) as session:
+            await session.execute(statement)
+            row = await session.scalar(
+                select(DayPlanRow).where(
+                    DayPlanRow.learner_id == plan.learner_id, DayPlanRow.plan_date == plan.plan_date
+                )
+            )
+            assert row is not None
+            return DayPlanRecord.model_validate(row)
 
 
 class KnowledgeRepo:

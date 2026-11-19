@@ -101,14 +101,19 @@ def next_step(
     progress: dict[str, TopicProgress],
     skipped: set[str],
     accuracy: dict[str, ItemAccuracy],
+    *,
+    frontier: set[str] | None = None,
 ) -> NextStep | None:
     """The learner's next step, or None once every topic is done or skipped.
 
     A re-teach of the current (or just-finished) topic is preferred over advancing. Starting a new
     topic carries `leaving` = the topic just finished, so the caller can send its cheat sheet.
+    With `frontier`, a new topic is the first one in order whose prerequisites are known; when no
+    remaining topic is on the frontier, the order alone decides (a lesson always comes).
     """
     ordered = sorted(curriculum.topics, key=lambda topic: topic.order)
     last_done: CurriculumTopic | None = None
+    off_frontier: NextStep | None = None
     for topic in ordered:
         if topic.id in skipped:
             continue
@@ -125,8 +130,11 @@ def next_step(
         owed = _owed_reteach(last_done, progress, accuracy)
         if owed is not None:
             return owed
-        return NextStep(topic, 1, "main", None, last_done.id if last_done is not None else None)
-    return _owed_reteach(last_done, progress, accuracy)
+        candidate = NextStep(topic, 1, "main", None, last_done.id if last_done is not None else None)
+        if frontier is None or topic.id in frontier:
+            return candidate
+        off_frontier = off_frontier or candidate
+    return _owed_reteach(last_done, progress, accuracy) or off_frontier
 
 
 def _owed_reteach(
