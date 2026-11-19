@@ -37,6 +37,7 @@ from english_agent.knowledge import (
 from english_agent.mentor_memory import STALE_AFTER, Observation, can_move, evaluate_expectation
 from english_agent.models.cefr import Cefr
 from english_agent.models.content_order import ContentBrief, ContentOrder, OrderStatus
+from english_agent.models.exercise import BankExercise
 from english_agent.models.knowledge import LearnerAbility, QuestionStat
 from english_agent.models.lesson import Lesson
 from english_agent.models.mentor import (
@@ -96,6 +97,7 @@ from english_agent.storage.orm import (
     DossierRow,
     ErrorRow,
     EvidenceRow,
+    ExerciseRow,
     HypothesisRow,
     ItemRow,
     JournalEntryRow,
@@ -353,6 +355,12 @@ class OrderStore(Protocol):
     async def finish(self, order_id: int, status: OrderStatus, content_id: int | None, now: datetime) -> None: ...
 
 
+class ExerciseStore(Protocol):
+    async def save(self, exercises: list[BankExercise], priors: dict[str, float]) -> None: ...
+
+    async def get(self, keys: list[str]) -> list[BankExercise]: ...
+
+
 class KnowledgeStore(Protocol):
     async def known_topics(self, learner_id: int, now: datetime) -> set[str]: ...
 
@@ -370,6 +378,7 @@ class Stores:
     knowledge: KnowledgeStore
     evidence: EvidenceStore
     orders: OrderStore
+    exercises: ExerciseStore
 
 
 def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = None) -> Stores:
@@ -386,6 +395,7 @@ def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = Non
         knowledge=KnowledgeRepo(sessions, scheduler),
         evidence=EvidenceRepo(sessions),
         orders=ContentOrderRepo(sessions),
+        exercises=ExerciseRepo(sessions),
     )
 
 
@@ -1596,6 +1606,51 @@ class ContentOrderRepo:
         async with session_scope(self._sessions) as session:
             row = await session.get_one(ContentOrderRow, order_id)
             row.status, row.content_id, row.finished_at = status, content_id, now
+
+
+class ExerciseRepo:
+    """Composed exercises; each starts at the Critic's difficulty estimate in `question_stats`."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def save(self, exercises: list[BankExercise], priors: dict[str, float]) -> None:
+        if not exercises:
+            return
+        rows = [{**e.model_dump(mode="json", exclude={"created_at"}), "created_at": e.created_at} for e in exercises]
+        stats = [
+            {
+                "question_key": e.question_key,
+                "item_id": e.item_id,
+                "topic_id": e.topic_id,
+                "kind": "quiz",
+                "difficulty": priors[e.question_key],
+                "prior": priors[e.question_key],
+                "prior_source": "critic",
+                "updated_at": func.now(),
+            }
+            for e in exercises
+            if e.question_key in priors
+        ]
+        async with session_scope(self._sessions) as session:
+            await session.execute(
+                insert(ExerciseRow).values(rows).on_conflict_do_nothing(index_elements=["question_key"])
+            )
+            if stats:
+                await session.execute(
+                    insert(QuestionStatRow).values(stats).on_conflict_do_nothing(index_elements=["question_key"])
+                )
+
+    async def get(self, keys: list[str]) -> list[BankExercise]:
+        """The exercises with these keys, in the order asked (unknown keys are left out)."""
+        if not keys:
+            return []
+        async with session_scope(self._sessions) as session:
+            rows = {
+                row.question_key: row
+                for row in await session.scalars(select(ExerciseRow).where(ExerciseRow.question_key.in_(keys)))
+            }
+            return [BankExercise.model_validate(rows[key]) for key in keys if key in rows]
 
 
 class PlanRepo:

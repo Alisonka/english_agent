@@ -9,8 +9,11 @@ import pytest
 from aiogram.methods import SendMessage, SendPoll
 
 from english_agent.config import Settings
+from english_agent.models.exercise import BankExercise
 from english_agent.models.lesson import Lesson
-from english_agent.models.storage import LearnerRecord, LessonRecord, PracticeDeliveryRecord
+from english_agent.models.plan import DayPlan, PracticeDirective
+from english_agent.models.practice import QuizQuestion
+from english_agent.models.storage import LearnerRecord, LessonRecord, PracticeBlock, PracticeDeliveryRecord
 from english_agent.practice import deliver_due_practice, due_practice, shuffle_options
 from english_agent.storage import Stores
 from fakes import fake_items, fake_practice, fake_stores
@@ -201,3 +204,44 @@ async def test_blocked_chat_is_deactivated_and_others_still_get_their_quiz(lesso
     assert await deliver_due_practice(sender, settings(), stores, at(11)) == [("43", "quiz")]
     blocked = learners.by_chat["42"]
     assert (blocked.is_active, blocked.deactivated_reason) == (False, "blocked")
+
+
+async def test_the_plans_probe_questions_join_the_quiz(stores: Stores, lesson: Lesson) -> None:
+    student = await stores.learners.get("42")
+    assert student is not None
+    learner_id = student.id
+    probe = QuizQuestion(
+        kind="gap_fill",
+        question="There ___ two cats in the garden.",
+        options=["is", "are", "be"],
+        correct_option=1,
+        explanation_ru="Два кота: множественное число, are.",
+    )
+    exercise = BankExercise(
+        question_key="there_is_are:core:abc",
+        item_id=None,
+        item_key="there_is_are:core",
+        topic_id="there_is_are",
+        kind="probe",
+        question=probe,
+        learner_id=None,
+        created_at=LESSON_AT,
+    )
+    await stores.exercises.save([exercise], {})
+    plan = DayPlan(
+        learner_id=learner_id,
+        plan_date=DAY,
+        day_type="review_day",
+        practice=PracticeDirective(probe_question_keys=["there_is_are:core:abc", "unknown:key"]),
+        source="agent",
+        created_at=LESSON_AT,
+    )
+    await stores.plans.commit(plan, now=LESSON_AT)
+    telegram = FakeTelegram()
+
+    await deliver_due_practice(fake_sender(telegram), settings(), stores, at(11), rng=random.Random(1))
+
+    polls = telegram.of(SendPoll)
+    assert len(polls) == 4 and polls[-1].question == probe.question  # today's three stay, the probe joins
+    [block] = [PracticeBlock.model_validate(d.payload) for d in fake_practice(stores).deliveries.values()]
+    assert block.questions[-1].reason == "probe"
