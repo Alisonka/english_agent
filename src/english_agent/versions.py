@@ -47,7 +47,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "item_record": 1,
     "error_record": 1,
     "card_record": 2,  # v2: last_reviewed_at, reviews
-    "review_log_record": 2,  # v2: source_ref
+    "review_log_record": 3,  # v2: source_ref; v3: payload.before (the card before the rating)
     "practice_delivery_record": 2,  # v2: payload (the day's assembled practice set)
     # The day's assembled quiz/translation set in that payload; v2: reason per item, provenance;
     # v3: profile_version and the "focus" reason.

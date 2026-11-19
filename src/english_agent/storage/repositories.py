@@ -350,6 +350,13 @@ async def _review_card(
     # Checked under the card lock, so two threads with the same event cannot both apply it.
     if await session.scalar(select(ReviewLogRow.id).where(ReviewLogRow.source_ref == source_ref)) is not None:
         return card, False
+    # The card as it was before this rating: a later rollback (the Arbiter) restores it from here.
+    before = {
+        "fsrs_state": card.fsrs_state,
+        "due_at": card.due_at.isoformat(),
+        "last_reviewed_at": card.last_reviewed_at.isoformat() if card.last_reviewed_at else None,
+        "reviews": card.reviews,
+    }
     state, log = scheduler.review(card.fsrs_state, rating, at)
     card.fsrs_state, card.due_at = state, due_at(state)
     card.last_reviewed_at, card.reviews = at, card.reviews + 1
@@ -360,7 +367,7 @@ async def _review_card(
             reviewed_at=at,
             source=source,
             source_ref=source_ref,
-            payload={"fsrs": log, **(payload or {})},
+            payload={"fsrs": log, **(payload or {}), "before": before},
         )
     )
     await session.flush()
