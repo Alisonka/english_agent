@@ -47,7 +47,10 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "lesson_content_record": 3,  # v2: payload_kind (lesson | topic); v3: run (the generation report)
     "item_record": 1,
     "error_record": 1,
-    "evidence_record": 1,  # models/storage.py: one learner event that agent decisions cite
+    "evidence_record": 2,  # one learner event that agent decisions cite; v2: payload question_key and elo
+    # Mastery estimates (models/knowledge.py, english_agent/knowledge.py).
+    "learner_ability": 1,
+    "question_stat": 1,
     # The Mentor's memory (models/mentor.py): journal with checkable expectations, hypotheses, dossier.
     "journal_entry": 1,
     "hypothesis": 1,
