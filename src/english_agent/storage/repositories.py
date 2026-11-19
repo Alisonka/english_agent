@@ -24,6 +24,7 @@ from english_agent.knowledge import (
     ElementStatus,
     EloDelta,
     TopicMark,
+    critic_difficulty,
     element_status,
     elo_step,
     probability,
@@ -469,6 +470,31 @@ async def _add_evidence(
     await session.execute(
         update(EvidenceRow).where(EvidenceRow.id == evidence_id).values(payload={**values, "elo": delta.model_dump()})
     )
+
+
+async def _seed_critic_priors(session: AsyncSession, content: TopicContent) -> None:
+    """Start every quiz question of a new topic at the Critic's estimate; calibrated questions are kept."""
+    rows: list[dict[str, Any]] = []
+    for step in [*content.steps, *content.alternatives]:
+        review = step.review
+        if step.practice is None or review is None or len(review.quiz_difficulty) != len(step.practice.quiz):
+            continue
+        for question, rating in zip(step.practice.quiz, review.quiz_difficulty, strict=True):
+            prior = critic_difficulty(content.cefr, rating)
+            rows.append(
+                {
+                    "question_key": question_key(f"{step.topic_id}:{question.item_slug}", question.question),
+                    "topic_id": step.topic_id,
+                    "kind": "quiz",
+                    "difficulty": prior,
+                    "prior": prior,
+                    "prior_source": "critic",
+                    "updated_at": func.now(),
+                }
+            )
+    if rows:
+        statement = insert(QuestionStatRow).values(rows).on_conflict_do_nothing(index_elements=["question_key"])
+        await session.execute(statement)
 
 
 async def _apply_elo(
@@ -1097,6 +1123,8 @@ class LessonContentRepo:
         async with session_scope(self._sessions) as session:
             row = await session.get_one(LessonContentRow, content_id, with_for_update=True)
             row.status, row.payload, row.error = "ready", content.model_dump(mode="json"), None
+            if isinstance(content, TopicContent):
+                await _seed_critic_priors(session, content)
             row.run = run.model_dump(mode="json") if run is not None else None
             row.payload_kind = "topic" if is_topic else "lesson"
             row.schema_version = SCHEMA_VERSIONS["topic_content" if is_topic else "lesson"]

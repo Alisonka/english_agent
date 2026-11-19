@@ -4,6 +4,8 @@ Input: the learner's level, the step's plan entry (title, key idea, whether it i
 
 1. `quiz_keys`: answer every quiz question yourself, in order: the 0-based index of the option you consider correct. Decide on the grammar alone. If no option or more than one option is correct, still give your best index and report an `ambiguous_options` issue for that question. For an `alt` step there is no quiz: `quiz_keys` is `[]`.
 
+   `quiz_difficulty`: for every quiz question, in the same order, how hard it is for a learner of the given level: 1 very easy, 2 easy, 3 typical for the level, 4 hard, 5 very hard. Judge what the learner must know and notice to answer, not how long the question is. `[]` for an `alt` step.
+
 2. `issues`: list concrete problems. For each: `where` (the field, e.g. `message.key_idea_ru`, `message.examples[1].en`, `practice.quiz[3].options`, `practice.translation[0].reference_en`), `kind`, `blocking`, and `fix` (one or two sentences, in English, saying exactly what to change).
 
 Blocking (`blocking: true`) — the learner would learn something wrong or be graded unfairly:
