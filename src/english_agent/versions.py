@@ -51,6 +51,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     # Mastery estimates (models/knowledge.py, english_agent/knowledge.py).
     "learner_ability": 1,
     "question_stat": 1,
+    "topic_mark": 1,  # storage/orm.py TopicMarkRow: a topic credited by placement or confirmed by an exam
     # The Mentor's memory (models/mentor.py): journal with checkable expectations, hypotheses, dossier.
     "journal_entry": 1,
     "hypothesis": 1,

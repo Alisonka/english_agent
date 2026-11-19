@@ -19,7 +19,20 @@ from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from english_agent.config import Settings
-from english_agent.knowledge import EloDelta, elo_step, question_key, start_ability, start_difficulty, topic_meta
+from english_agent.knowledge import (
+    KNOWN,
+    ElementStatus,
+    EloDelta,
+    TopicMark,
+    element_status,
+    elo_step,
+    probability,
+    question_key,
+    start_ability,
+    start_difficulty,
+    topic_meta,
+    topic_status,
+)
 from english_agent.mentor_memory import STALE_AFTER, Observation, can_move, evaluate_expectation
 from english_agent.models.cefr import Cefr
 from english_agent.models.knowledge import LearnerAbility, QuestionStat
@@ -91,6 +104,7 @@ from english_agent.storage.orm import (
     QuizAnswerRow,
     QuizPollRow,
     ReviewLogRow,
+    TopicMarkRow,
     TranslationAnswerRow,
 )
 from english_agent.versions import SCHEMA_VERSIONS
@@ -1413,10 +1427,121 @@ async def _require_citations(session: AsyncSession, learner_id: int, evidence_id
 
 
 class KnowledgeRepo:
-    """Read side of the mastery estimates; they are written with each graded answer (`_add_evidence`)."""
+    """Mastery estimates (written with each graded answer, `_add_evidence`), topic marks and statuses."""
 
-    def __init__(self, sessions: SessionFactory) -> None:
+    def __init__(self, sessions: SessionFactory, scheduler: ReviewScheduler | None = None) -> None:
         self._sessions = sessions
+        self._scheduler = scheduler or ReviewScheduler()
+
+    async def mark_topics(
+        self, learner_id: int, topic_ids: list[str], mark: TopicMark, *, source_ref: str, at: datetime
+    ) -> None:
+        """Credit topics (placement test) or confirm them (exam); marking again keeps the first time."""
+        if not topic_ids:
+            return
+        async with session_scope(self._sessions) as session:
+            await session.execute(
+                insert(TopicMarkRow)
+                .values(
+                    [
+                        {
+                            "learner_id": learner_id,
+                            "topic_id": topic,
+                            "mark": mark,
+                            "source_ref": source_ref,
+                            "marked_at": at,
+                        }
+                        for topic in topic_ids
+                    ]
+                )
+                .on_conflict_do_nothing(index_elements=["learner_id", "topic_id", "mark"])
+            )
+
+    async def topic_statuses(self, learner_id: int, now: datetime) -> dict[str, ElementStatus]:
+        """Every topic the learner has a signal on (a sent step, a card, a mark); the rest are not open.
+
+        An item's status comes from its card's recall, its mastery (mean P over its calibrated
+        questions) and the topic's marks; a topic is as known as its weakest item and, until all
+        its steps were sent, at most "learning".
+        """
+        async with session_scope(self._sessions) as session:
+            marks: dict[str, set[str]] = {}
+            for topic, mark in await session.execute(
+                select(TopicMarkRow.topic_id, TopicMarkRow.mark).where(TopicMarkRow.learner_id == learner_id)
+            ):
+                marks.setdefault(topic, set()).add(mark)
+            taught = {
+                topic: (sent, total)
+                for topic, sent, total in await session.execute(
+                    select(
+                        LessonRow.topic_id,
+                        func.count(func.distinct(LessonRow.step_index)),
+                        func.max(LessonRow.step_count),
+                    )
+                    .where(LessonRow.learner_id == learner_id, LessonRow.status == "sent", LessonRow.variant == "main")
+                    .group_by(LessonRow.topic_id)
+                )
+            }
+            cards = (
+                await session.execute(
+                    select(CardRow.item_id, ItemRow.topic_id, CardRow.fsrs_state, CardRow.reviews)
+                    .join(ItemRow, ItemRow.id == CardRow.item_id)
+                    .where(CardRow.learner_id == learner_id)
+                )
+            ).all()
+            item_ids = [item_id for item_id, *_ in cards]
+            difficulties: dict[int, list[float]] = {}
+            if item_ids:
+                for question_item, difficulty in await session.execute(
+                    select(QuestionStatRow.item_id, QuestionStatRow.difficulty).where(
+                        QuestionStatRow.item_id.in_(item_ids)
+                    )
+                ):
+                    if question_item is not None:
+                        difficulties.setdefault(question_item, []).append(difficulty)
+            abilities = {
+                row.scope: row.rating
+                for row in await session.scalars(
+                    select(LearnerAbilityRow).where(LearnerAbilityRow.learner_id == learner_id)
+                )
+            }
+
+        items: dict[str, list[ElementStatus]] = {}
+        for item_id, topic, state, reviews in cards:
+            mastery = None
+            if "overall" in abilities and difficulties.get(item_id):
+                meta = topic_meta(topic)
+                offsets = [abilities[tag] for tag in (meta.tags if meta is not None else ()) if tag in abilities]
+                chances = [probability(abilities["overall"], offsets, d) for d in difficulties[item_id]]
+                mastery = sum(chances) / len(chances)
+            items.setdefault(topic, []).append(
+                element_status(
+                    reviews=reviews,
+                    recall=self._scheduler.retrievability(state, now) if reviews else None,
+                    mastery=mastery,
+                    credited="credited" in marks.get(topic, set()),
+                    confirmed="confirmed" in marks.get(topic, set()),
+                )
+            )
+
+        statuses: dict[str, ElementStatus] = {}
+        for topic in set(marks) | set(taught) | set(items):
+            topic_marks = marks.get(topic, set())
+            if topic in items:
+                status = topic_status(items[topic])
+            elif topic_marks:
+                status = "confirmed" if "confirmed" in topic_marks else "credited"
+            else:
+                status = "learning"  # sent, not answered yet
+            sent, total = taught.get(topic, (0, 0))
+            if topic in taught and sent < total and not topic_marks and status in KNOWN:
+                status = "learning"
+            statuses[topic] = status
+        return statuses
+
+    async def known_topics(self, learner_id: int, now: datetime) -> set[str]:
+        """Topics that open what depends on them (credited, mastered, confirmed): the frontier's input."""
+        return {topic for topic, status in (await self.topic_statuses(learner_id, now)).items() if status in KNOWN}
 
     async def ability(self, learner_id: int) -> LearnerAbility | None:
         """None until the learner's first graded answer."""

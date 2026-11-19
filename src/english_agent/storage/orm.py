@@ -424,3 +424,16 @@ class QuestionStatRow(Base):
     prior_source: Mapped[str] = mapped_column(String(16))  # "level" (topic level + kind) or "critic"
     answers: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class TopicMarkRow(Base):
+    """A topic credited by the placement test or confirmed by an exam, for one learner."""
+
+    __tablename__ = "topic_marks"
+    __table_args__ = (CheckConstraint("mark IN ('credited', 'confirmed')", name="mark"),)
+
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"), primary_key=True)
+    topic_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    mark: Mapped[str] = mapped_column(String(16), primary_key=True)
+    source_ref: Mapped[str] = mapped_column(String(64))  # the test or exam that set it
+    marked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -16,6 +16,7 @@ import hashlib
 import math
 from dataclasses import dataclass
 from functools import cache
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -99,3 +100,64 @@ def elo_step(
         tags=dict.fromkeys(tag_offsets, TAG_K * surprise),
         question=-question_k * surprise,
     )
+
+
+# --- element status -----------------------------------------------------------------
+
+TopicMark = Literal["credited", "confirmed"]
+ElementStatus = Literal["not_open", "credited", "learning", "shaky", "mastered", "confirmed"]
+# Statuses that count as "known" for the frontier: a topic opens what depends on it.
+KNOWN: frozenset[ElementStatus] = frozenset({"credited", "mastered", "confirmed"})
+MASTERED_REVIEWS = 3
+MASTERED_RECALL = 0.8
+MASTERED_MASTERY = 0.75
+SHAKY_RECALL = 0.6
+SHAKY_MASTERY = 0.5
+# Worst first: a topic is as known as its weakest item.
+_RANK: dict[ElementStatus, int] = {
+    "not_open": 0,
+    "shaky": 1,
+    "learning": 2,
+    "credited": 3,
+    "mastered": 4,
+    "confirmed": 5,
+}
+
+
+def element_status(
+    *,
+    reviews: int,
+    recall: float | None,
+    mastery: float | None,
+    credited: bool = False,
+    confirmed: bool = False,
+) -> ElementStatus:
+    """One item's status from its memory (FSRS recall), its mastery (mean P on its questions) and the marks.
+
+    Shaky beats every mark: a credited or exam-confirmed item that the learner now gets wrong or
+    forgets goes back into the route.
+    """
+    shaky = reviews >= 2 and (
+        (recall is not None and recall < SHAKY_RECALL) or (mastery is not None and mastery < SHAKY_MASTERY)
+    )
+    if shaky:
+        return "shaky"
+    if confirmed:
+        return "confirmed"
+    if reviews == 0:
+        return "credited" if credited else "not_open"
+    mastered = (
+        reviews >= MASTERED_REVIEWS
+        and recall is not None
+        and recall >= MASTERED_RECALL
+        and mastery is not None
+        and mastery >= MASTERED_MASTERY
+    )
+    if mastered:
+        return "mastered"
+    return "credited" if credited else "learning"
+
+
+def topic_status(items: list[ElementStatus]) -> ElementStatus:
+    """A topic is as known as its weakest item; a topic without items has not been opened."""
+    return min(items, key=_RANK.__getitem__) if items else "not_open"

@@ -25,6 +25,7 @@ TABLES = {
     "dossiers",
     "learner_abilities",
     "question_stats",
+    "topic_marks",
 }
 
 
