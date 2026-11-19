@@ -38,7 +38,7 @@ async def _run(settings: Settings, command: str) -> int:
     bot = make_bot(settings)
     try:
         if command == "chats":
-            seen = dict(label for update in await bot.get_updates() if (label := chat_label(update)))
+            seen = dict(pair for update in await bot.get_updates() if (pair := chat_label(update)))
             if not seen:
                 print("No chats yet: open your bot in Telegram, send it /start, then run this again.")
                 return 1

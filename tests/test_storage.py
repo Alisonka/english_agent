@@ -135,15 +135,19 @@ def _draft(lesson: Lesson, slug: str = "core") -> ItemDraft:
 async def test_item_get_or_create_keeps_the_first_version(sessions: SessionFactory, lesson: Lesson) -> None:
     items = ItemRepo(sessions)
     assert await items.get_by_key("there_is_are:core") is None
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    lessons = LessonRepo(sessions)
+    first = await lessons.record_sent(learner.id, DAY, lesson, [1], curriculum_version=1)
+    second = await lessons.record_sent(learner.id, DAY + timedelta(days=1), lesson, [2], curriculum_version=1)
 
-    created, was_created = await items.get_or_create(_draft(lesson), source_lesson_id=7)
+    created, was_created = await items.get_or_create(_draft(lesson), source_lesson_id=first.id)
     again, was_created_again = await items.get_or_create(
-        _draft(lesson).model_copy(update={"form": "changed"}), source_lesson_id=8
+        _draft(lesson).model_copy(update={"form": "changed"}), source_lesson_id=second.id
     )
 
     assert (was_created, was_created_again) == (True, False)
     assert again == created
-    assert (created.source_lesson_id, created.form, created.version) == (7, "There is + noun", 1)
+    assert (created.source_lesson_id, created.form, created.version) == (first.id, "There is + noun", 1)
     assert created.sources == lesson.sources
     assert await items.get_by_key("there_is_are:core") == created
 
