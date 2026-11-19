@@ -60,6 +60,8 @@ class InlineJobs:
     def __init__(self, stores: Stores, sender: Sender, grade: Grader) -> None:
         self.stores, self.sender, self.grade = stores, sender, grade
         self.graded: list[int] = []
+        self.arbitrated: list[int] = []
+        self.asked: list[tuple[int, str]] = []
 
     async def grade_translation(self, answer_id: int) -> None:
         self.graded.append(answer_id)
@@ -67,6 +69,12 @@ class InlineJobs:
 
     async def refresh_profile(self, learner_id: int) -> None:
         await refresh_profile_safely(self.stores, learner_id)
+
+    async def arbitrate(self, answer_id: int) -> None:
+        self.arbitrated.append(answer_id)
+
+    async def answer_question(self, learner_id: int, text: str) -> None:
+        self.asked.append((learner_id, text))
 
 
 class Harness:
@@ -399,6 +407,7 @@ async def test_dispute_flags_the_grade() -> None:
     await bot.tap("dispute:1", message_id=None)
 
     assert practice.translation_answers[1].disputed is True
+    assert bot.jobs.arbitrated == [1]  # the Arbiter is asked to rule
     answer = bot.telegram.calls[-1]
     assert isinstance(answer, AnswerCallbackQuery) and answer.text == DISPUTED
 
@@ -444,3 +453,11 @@ async def test_draining_cancels_jobs_that_overrun() -> None:
 
     assert started and jobs.pending == 0
     assert practice.translation_answers[answer.id].status == "pending"  # left for a later retry
+
+
+async def test_ask_needs_a_question_and_hands_it_to_the_interlocutor() -> None:
+    bot = Harness()
+    await bot.text("/ask")
+    assert "Напиши вопрос" in bot.telegram.texts[-1] and bot.jobs.asked == []
+    await bot.text("/ask почему there are?")
+    assert bot.jobs.asked == [(bot.learners.by_chat["42"].id, "почему there are?")]

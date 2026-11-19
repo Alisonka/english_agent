@@ -18,6 +18,7 @@ from taskiq import TaskiqDepends
 from english_agent.arbiter import arbitrate
 from english_agent.content import content_key
 from english_agent.grading import give_up_grading, grade_answer, refresh_profile_safely
+from english_agent.interlocutor import make_tutor
 from english_agent.jobs.broker import broker
 from english_agent.jobs.dedup import (
     arbiter_key,
@@ -168,6 +169,15 @@ async def arbitrate_dispute(answer_id: int, deps: WorkerDeps = TaskiqDepends(wor
         if deps.arbiter is None:
             return "off"
         return await arbitrate(deps.runtime.stores, deps.runtime.sender, deps.arbiter, answer_id)
+
+
+@broker.task(task_name="answer_tutor_question")
+async def answer_tutor_question(learner_id: int, text: str, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> None:
+    runtime = deps.runtime
+    tutor = make_tutor(runtime.settings, runtime.stores, runtime.sender, runtime.client)
+    if tutor is not None:
+        with bind(learner_id=learner_id):
+            await tutor(learner_id, text)
 
 
 @broker.task(task_name="refresh_profile", retry_on_error=True)

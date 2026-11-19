@@ -876,6 +876,38 @@ class FakeEvidence:
         mine = [r for r in self.records if r.learner_id == learner_id and r.item_id in item_ids]
         return sorted(mine, key=lambda r: (r.occurred_at, r.id))[-limit:]
 
+    async def count_since(self, learner_id: int, kind: str, since: datetime) -> int:
+        return sum(1 for r in self.records if r.learner_id == learner_id and r.kind == kind and r.occurred_at >= since)
+
+    async def record(
+        self,
+        learner_id: int,
+        kind: str,
+        *,
+        source_ref: str,
+        topic_id: str | None,
+        payload: dict[str, Any],
+        at: datetime,
+    ) -> None:
+        if any(r.source_ref == source_ref for r in self.records):
+            return
+        self.records.append(
+            EvidenceRecord.model_validate(
+                {
+                    "id": len(self.records) + 1,
+                    "learner_id": learner_id,
+                    "kind": kind,
+                    "source_ref": source_ref,
+                    "topic_id": topic_id,
+                    "item_id": None,
+                    "error_id": None,
+                    "payload": payload,
+                    "occurred_at": at,
+                    "cancelled_at": None,
+                }
+            )
+        )
+
     async def topic_answers(self, learner_id: int, topic_ids: list[str]) -> dict[str, tuple[int, int]]:
         counts: dict[str, tuple[int, int]] = {}
         for r in self.records:

@@ -353,6 +353,19 @@ class EvidenceStore(Protocol):
 
     async def topic_answers(self, learner_id: int, topic_ids: list[str]) -> dict[str, tuple[int, int]]: ...
 
+    async def count_since(self, learner_id: int, kind: EvidenceKind, since: datetime) -> int: ...
+
+    async def record(
+        self,
+        learner_id: int,
+        kind: EvidenceKind,
+        *,
+        source_ref: str,
+        topic_id: str | None,
+        payload: dict[str, Any],
+        at: datetime,
+    ) -> None: ...
+
 
 class OrderStore(Protocol):
     async def order(self, brief: ContentBrief, cefr: Cefr) -> ContentOrder: ...
@@ -1580,6 +1593,37 @@ class EvidenceRepo:
         )
         async with session_scope(self._sessions) as session:
             return {topic: (total, correct) for topic, total, correct in await session.execute(statement) if topic}
+
+    async def count_since(self, learner_id: int, kind: EvidenceKind, since: datetime) -> int:
+        async with session_scope(self._sessions) as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(EvidenceRow)
+                .where(EvidenceRow.learner_id == learner_id, EvidenceRow.kind == kind, EvidenceRow.occurred_at >= since)
+            )
+            return int(count or 0)
+
+    async def record(
+        self,
+        learner_id: int,
+        kind: EvidenceKind,
+        *,
+        source_ref: str,
+        topic_id: str | None,
+        payload: dict[str, Any],
+        at: datetime,
+    ) -> None:
+        """An event that is not an answer (a tutor question, a missed day); a replayed source_ref is a no-op."""
+        async with session_scope(self._sessions) as session:
+            await _add_evidence(
+                session,
+                learner_id=learner_id,
+                kind=kind,
+                source_ref=source_ref,
+                occurred_at=at,
+                lesson_topic_id=topic_id,
+                payload=payload,
+            )
 
     async def invalid_citations(
         self, learner_id: int, evidence_ids: list[int], *, topic_id: str | None = None
