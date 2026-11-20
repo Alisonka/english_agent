@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3](https://github.com/Alisonka/english_agent/compare/v0.1.2...v0.1.3) (2026-11-20)
+
+
+### Added
+
+* **bot:** Interlocutor answers questions on studied material ([114d873](https://github.com/Alisonka/english_agent/commit/114d873daa8e90fe091f5ea1fd8a7011316a9898))
+* **bot:** learner goal and interests commands ([c56dd16](https://github.com/Alisonka/english_agent/commit/c56dd16292dbc18b80d86ead31935eeba8c87b6a))
+* Critic, review Planner and Reflector ([4a3b569](https://github.com/Alisonka/english_agent/commit/4a3b569de0a7a5edeed059ae201b68d76545104d))
+* **critic:** starting difficulty estimate for every bank question ([1f88876](https://github.com/Alisonka/english_agent/commit/1f88876a484f139e711c04c2774dcb3695c3a4b0))
+* **curriculum:** prerequisite graph with load-time validation and the learner's frontier ([21bb07c](https://github.com/Alisonka/english_agent/commit/21bb07cc69a88cee23a3c97c6d40830f11d9b74b))
+* **evals:** synthetic learners with a hidden knowledge map ([5a24013](https://github.com/Alisonka/english_agent/commit/5a240133c545856f341237904ef77ee07a9bbde4))
+* **exam:** Examiner blueprint, adaptive delivery by code, report ([dd578f7](https://github.com/Alisonka/english_agent/commit/dd578f7d5bc93e6b94339b21e883385b0346a2c3))
+* **generation:** a Critic checks every step and cheat sheet; one runner owns the content run ([ff212ac](https://github.com/Alisonka/english_agent/commit/ff212ac8d3f26af541f9504b2ed04a6d2389ee08))
+* **generation:** Exercise composer for probes, contrast pairs and drills ([ccaca9e](https://github.com/Alisonka/english_agent/commit/ccaca9ee90629c83f0a599d0adca572728461462))
+* **generation:** remedial and contrast briefs with shared keys, ordered as background jobs ([045032a](https://github.com/Alisonka/english_agent/commit/045032a37e0b5fe7ee69d0a63a0a693179b96fba))
+* **grading:** Arbiter re-grades disputes independently and compensates ([b843a7e](https://github.com/Alisonka/english_agent/commit/b843a7edf11840b717a42d82e6fa6c621bc73e70))
+* **learner:** ability and question difficulty (Elo) moved by every graded answer ([1f716d2](https://github.com/Alisonka/english_agent/commit/1f716d22d0a781f2645ce53bf8e6b016dc4bb60c))
+* **learner:** element and topic status from memory, mastery and marks ([9e7ecae](https://github.com/Alisonka/english_agent/commit/9e7ecae20f4b1c00c3a7c5adc3f6517e9d179060))
+* **mentor:** journal with checkable expectations, hypotheses, weekly dossier ([ac4b81e](https://github.com/Alisonka/english_agent/commit/ac4b81edbd7a02cb4fdb05b0507aee181245573f))
+* **mentor:** orchestrator session with tools, limits, shadow mode and fallback ([f6e1454](https://github.com/Alisonka/english_agent/commit/f6e1454399564b3576483d952df77022db7a3cfb))
+* **onboarding:** adaptive placement test that builds the knowledge map ([baab3f9](https://github.com/Alisonka/english_agent/commit/baab3f962c376bed41c57025f2ed556690611c2b))
+* **planning:** day plan as a document, deterministic fallback policy, morning executes the plan ([869dee0](https://github.com/Alisonka/english_agent/commit/869dee059dfcb598d15c255f54c8b21e5b17a851))
+* **planning:** policy layer and plan dry-run ([ce2693b](https://github.com/Alisonka/english_agent/commit/ce2693b8f228265fdcf22405a1f8d88c74c5655d))
+* **practice:** a Planner picks the day's reviews from the learner's own cards ([069acac](https://github.com/Alisonka/english_agent/commit/069acac579aaaf42dbaa29775990f2ecef7b2cfa))
+* **profile:** a Reflector reads each learner's new errors and steers practice and feedback ([6b34c1e](https://github.com/Alisonka/english_agent/commit/6b34c1ee8db4a31b40cc9948a624befff4801b05))
+* **profile:** Diagnostician with read tools replaces the one-shot Reflector ([09ebb2d](https://github.com/Alisonka/english_agent/commit/09ebb2d75bf02d4bfa2db419ebc0d39d6d526bce))
+* **storage:** one evidence table every agent decision must cite ([94b4d3d](https://github.com/Alisonka/english_agent/commit/94b4d3de6cacc87009385cbf688d7ab85f7a70e4))
+
+
+### Fixed
+
+* **ci:** green the gate on SQLAlchemy 2.1, fsrs 6.3 and aiogram 3.31 typing ([6890498](https://github.com/Alisonka/english_agent/commit/6890498a3e36ce8b1c967145043de51ea5f90461))
+* **progression:** finish the topic in progress before an earlier untouched one ([347c12a](https://github.com/Alisonka/english_agent/commit/347c12ab48598f0b9f84bb709d4fd7f08b064127))
+* **srs:** keep the pre-rating card state in every review log ([f98c942](https://github.com/Alisonka/english_agent/commit/f98c94283f7e8529656496d0d9828bfb53124f6c))
+
+
+### Changed
+
+* **llm:** one tool loop and one budget meter for every agent ([b060e80](https://github.com/Alisonka/english_agent/commit/b060e801b0f709530232f56ca3a6dd4760ee10d1))
+* **pipeline:** remove the legacy single-lesson writer ([dee2d11](https://github.com/Alisonka/english_agent/commit/dee2d1156da071bdb66505c3d5c0265abde2abda))
+
 ## [0.1.2](https://github.com/Alisonka/english_agent/compare/v0.1.1...v0.1.2) (2026-11-15)
 
 
