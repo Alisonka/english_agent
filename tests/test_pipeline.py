@@ -15,6 +15,7 @@ from conftest import topic_content_payload
 from english_agent import pipeline
 from english_agent.config import Settings
 from english_agent.content import content_key
+from english_agent.examiner import continue_exam
 from english_agent.models.content_order import ContentBrief
 from english_agent.models.curriculum import load_curriculum
 from english_agent.models.lesson import Lesson
@@ -25,7 +26,7 @@ from english_agent.models.topic import TopicContent
 from english_agent.session_runner import TopicSession
 from english_agent.storage import Stores, open_stores
 from english_agent.telegram import Sender, make_bot
-from fakes import FakeLearners, FakeLessons, fake_contents, fake_items, fake_stores
+from fakes import FakeExams, FakeKnowledge, FakeLearners, FakeLessons, fake_contents, fake_items, fake_stores
 from telegram_fake import FakeTelegram, blocked_by, fake_sender
 
 
@@ -791,3 +792,47 @@ async def test_ordered_content_not_ready_by_morning_runs_the_fallback_branch(
     await run_tick(stores, msk(9, 0))
 
     assert generated == [] and sent == []  # a review day: no lesson, no content written in the morning
+
+
+# --- exams -------------------------------------------------------------------------
+
+
+async def test_an_exam_day_runs_adaptively_scores_by_code_and_confirms_mastered_topics(
+    run_tick: Tick, generated: list[str], fake_telegram: None, telegram: FakeTelegram
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+    await run_tick(stores, msk(9, 0))  # the first step of the first topic: its bank is the exam's pool
+    topic = generated[0]
+    tomorrow = START + timedelta(days=1)
+    exam_day = DayPlan(
+        learner_id=learner.id,
+        plan_date=tomorrow,
+        day_type="exam",
+        exam_topic_ids=[topic],
+        source="agent",
+        created_at=msk(8),
+    )
+    await stores.plans.commit(exam_day, now=msk(8))
+
+    await run_tick(stores, msk(9, 0, tomorrow))
+
+    exams = stores.exams
+    assert isinstance(exams, FakeExams)
+    [exam] = exams.exams.values()
+    sender = fake_sender(telegram)
+    for _ in range(10):  # answer every question right until the exam ends
+        if exams.exams[exam.id].state == "finished":
+            break
+        poll_id, (_, key, _) = next((pid, poll) for pid, poll in exams.polls.items() if not poll[2])
+        right = next(q.question.correct_option for q in exam.pool if q.question_key == key)
+        assert await exams.record_answer(poll_id, "42", [right]) == exam.id
+        await continue_exam(stores, sender, exam.id, None)
+    finished = exams.exams[exam.id]
+    assert finished.state == "finished" and finished.report is not None
+    assert [r.verdict for r in finished.report.topics] == ["mastered"]
+    assert "Итоги экзамена" in telegram.texts[-1]
+    knowledge = stores.knowledge
+    assert isinstance(knowledge, FakeKnowledge) and knowledge.marks[learner.id] == {topic: "confirmed"}
+    keys = [a.question_key for a in finished.answers]
+    assert len(keys) == len(set(keys)) >= 2  # adaptive, never the same question twice

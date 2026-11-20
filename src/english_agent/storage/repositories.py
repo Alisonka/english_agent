@@ -38,6 +38,7 @@ from english_agent.knowledge import (
 from english_agent.mentor_memory import STALE_AFTER, Observation, can_move, evaluate_expectation
 from english_agent.models.cefr import Cefr
 from english_agent.models.content_order import ContentBrief, ContentOrder, OrderStatus
+from english_agent.models.exam import ExamRecord, ExamReport, PoolQuestion
 from english_agent.models.exercise import BankExercise
 from english_agent.models.knowledge import LearnerAbility, QuestionStat
 from english_agent.models.lesson import Lesson
@@ -98,6 +99,8 @@ from english_agent.storage.orm import (
     DossierRow,
     ErrorRow,
     EvidenceRow,
+    ExamPollRow,
+    ExamRow,
     ExerciseRow,
     HypothesisRow,
     ItemRow,
@@ -355,6 +358,8 @@ class EvidenceStore(Protocol):
 
     async def count_since(self, learner_id: int, kind: EvidenceKind, since: datetime) -> int: ...
 
+    async def question_keys(self, learner_id: int) -> set[str]: ...
+
     async def record(
         self,
         learner_id: int,
@@ -386,6 +391,34 @@ class ExerciseStore(Protocol):
 class KnowledgeStore(Protocol):
     async def known_topics(self, learner_id: int, now: datetime) -> set[str]: ...
 
+    async def questions(self, keys: list[str]) -> dict[str, QuestionStat]: ...
+
+    async def ability(self, learner_id: int) -> LearnerAbility | None: ...
+
+    async def mark_topics(
+        self, learner_id: int, topic_ids: list[str], mark: TopicMark, *, source_ref: str, at: datetime
+    ) -> None: ...
+
+
+class ExamStore(Protocol):
+    async def create(
+        self, learner_id: int, day: date, topic_ids: list[str], ability: float, pool: list[PoolQuestion]
+    ) -> ExamRecord | None: ...
+
+    async def get(self, exam_id: int) -> ExamRecord | None: ...
+
+    async def add_poll(self, exam_id: int, telegram_poll_id: str, question_key: str) -> None: ...
+
+    async def has_open_poll(self, exam_id: int) -> bool: ...
+
+    async def record_answer(
+        self, telegram_poll_id: str, telegram_chat_id: str, option_ids: list[int]
+    ) -> int | None: ...
+
+    async def finish(self, exam_id: int, report: ExamReport, now: datetime) -> None: ...
+
+    async def last_exam_on(self, learner_id: int) -> date | None: ...
+
 
 @dataclass(frozen=True)
 class Stores:
@@ -401,6 +434,7 @@ class Stores:
     evidence: EvidenceStore
     orders: OrderStore
     exercises: ExerciseStore
+    exams: ExamStore
 
 
 def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = None) -> Stores:
@@ -418,6 +452,7 @@ def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = Non
         evidence=EvidenceRepo(sessions),
         orders=ContentOrderRepo(sessions),
         exercises=ExerciseRepo(sessions),
+        exams=ExamRepo(sessions),
     )
 
 
@@ -1594,6 +1629,13 @@ class EvidenceRepo:
         async with session_scope(self._sessions) as session:
             return {topic: (total, correct) for topic, total, correct in await session.execute(statement) if topic}
 
+    async def question_keys(self, learner_id: int) -> set[str]:
+        """Every bank question the learner has answered (an exam asks only unseen ones)."""
+        key = EvidenceRow.payload["question_key"].as_string()
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(select(key).where(EvidenceRow.learner_id == learner_id, key.is_not(None)))
+            return {row for row in rows if row}
+
     async def count_since(self, learner_id: int, kind: EvidenceKind, since: datetime) -> int:
         async with session_scope(self._sessions) as session:
             count = await session.scalar(
@@ -1755,6 +1797,95 @@ class ExerciseRepo:
                 for row in await session.scalars(select(ExerciseRow).where(ExerciseRow.question_key.in_(keys)))
             }
             return [BankExercise.model_validate(rows[key]) for key in keys if key in rows]
+
+
+class ExamRepo:
+    """Exams as they run: one per learner and day; each answer is evidence and moves the ability."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def create(
+        self, learner_id: int, day: date, topic_ids: list[str], ability: float, pool: list[PoolQuestion]
+    ) -> ExamRecord | None:
+        """Start the day's exam; None when it was started already."""
+        statement = (
+            insert(ExamRow)
+            .values(
+                learner_id=learner_id,
+                plan_date=day,
+                state="running",
+                topic_ids=topic_ids,
+                ability_start=ability,
+                ability=ability,
+                pool=[question.model_dump(mode="json") for question in pool],
+            )
+            .on_conflict_do_nothing(index_elements=["learner_id", "plan_date"])
+            .returning(ExamRow.id)
+        )
+        async with session_scope(self._sessions) as session:
+            exam_id = await session.scalar(statement)
+        return None if exam_id is None else await self.get(exam_id)
+
+    async def get(self, exam_id: int) -> ExamRecord | None:
+        async with session_scope(self._sessions) as session:
+            row = await session.get(ExamRow, exam_id)
+            return None if row is None else ExamRecord.model_validate(row)
+
+    async def add_poll(self, exam_id: int, telegram_poll_id: str, question_key: str) -> None:
+        async with session_scope(self._sessions) as session:
+            session.add(ExamPollRow(telegram_poll_id=telegram_poll_id, exam_id=exam_id, question_key=question_key))
+
+    async def has_open_poll(self, exam_id: int) -> bool:
+        async with session_scope(self._sessions) as session:
+            open_poll = await session.scalar(
+                select(ExamPollRow.telegram_poll_id).where(
+                    ExamPollRow.exam_id == exam_id, ExamPollRow.answered.is_(False)
+                )
+            )
+            return open_poll is not None
+
+    async def record_answer(self, telegram_poll_id: str, telegram_chat_id: str, option_ids: list[int]) -> int | None:
+        """Store one exam answer (evidence, Elo, the exam's estimate); the exam id, or None if not an open exam poll."""
+        now = datetime.now(UTC)
+        async with session_scope(self._sessions) as session:
+            poll = await session.get(ExamPollRow, telegram_poll_id, with_for_update=True)
+            if poll is None or poll.answered:
+                return None
+            exam = await session.get_one(ExamRow, poll.exam_id, with_for_update=True)
+            learner = await session.get(LearnerRow, exam.learner_id)
+            if exam.state != "running" or learner is None or learner.telegram_chat_id != telegram_chat_id:
+                return None
+            asked = next(PoolQuestion.model_validate(q) for q in exam.pool if q["question_key"] == poll.question_key)
+            correct = option_ids == [asked.question.correct_option]
+            poll.answered = True
+            exam.answers = [
+                *exam.answers,
+                {"question_key": asked.question_key, "topic_id": asked.topic_id, "correct": correct},
+            ]
+            await _add_evidence(
+                session,
+                learner_id=exam.learner_id,
+                kind="exam_answer",
+                source_ref=f"exam:{exam.id}:{asked.question_key}"[:64],
+                occurred_at=now,
+                lesson_topic_id=asked.topic_id,
+                item_id=asked.item_id,
+                payload={"exam_id": exam.id, "is_correct": correct},
+                question_text=asked.question.question,
+                question_kind="quiz",
+                correct=correct,
+            )
+            return exam.id
+
+    async def finish(self, exam_id: int, report: ExamReport, now: datetime) -> None:
+        async with session_scope(self._sessions) as session:
+            row = await session.get_one(ExamRow, exam_id, with_for_update=True)
+            row.state, row.report, row.finished_at = "finished", report.model_dump(mode="json"), now
+
+    async def last_exam_on(self, learner_id: int) -> date | None:
+        async with session_scope(self._sessions) as session:
+            return await session.scalar(select(func.max(ExamRow.plan_date)).where(ExamRow.learner_id == learner_id))
 
 
 class PlanRepo:

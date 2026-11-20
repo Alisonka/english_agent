@@ -8,7 +8,9 @@ from typing import Any
 from english_agent.llm import AssistantTurn
 from english_agent.models.cefr import Cefr
 from english_agent.models.content_order import ContentBrief, ContentOrder, OrderStatus
+from english_agent.models.exam import ExamAnswer, ExamRecord, ExamReport, PoolQuestion
 from english_agent.models.exercise import BankExercise
+from english_agent.models.knowledge import LearnerAbility, QuestionStat
 from english_agent.models.lesson import Lesson
 from english_agent.models.plan import DayPlan, DayPlanRecord
 from english_agent.models.practice import QuizQuestion, TranslationGrade
@@ -876,6 +878,13 @@ class FakeEvidence:
         mine = [r for r in self.records if r.learner_id == learner_id and r.item_id in item_ids]
         return sorted(mine, key=lambda r: (r.occurred_at, r.id))[-limit:]
 
+    async def question_keys(self, learner_id: int) -> set[str]:
+        return {
+            str(r.payload["question_key"])
+            for r in self.records
+            if r.learner_id == learner_id and "question_key" in r.payload
+        }
+
     async def count_since(self, learner_id: int, kind: str, since: datetime) -> int:
         return sum(1 for r in self.records if r.learner_id == learner_id and r.kind == kind and r.occurred_at >= since)
 
@@ -966,14 +975,92 @@ class FakeExercises:
         return [self.bank[key] for key in keys if key in self.bank]
 
 
+class FakeExams:
+    """`ExamStore` in memory: polls map to exams; answers are kept, evidence is not written."""
+
+    def __init__(self, learners: FakeLearners) -> None:
+        self.learners = learners
+        self.exams: dict[int, ExamRecord] = {}
+        self.polls: dict[str, tuple[int, str, bool]] = {}
+
+    async def create(
+        self, learner_id: int, day: date, topic_ids: list[str], ability: float, pool: list[PoolQuestion]
+    ) -> ExamRecord | None:
+        if any(e.learner_id == learner_id and e.plan_date == day for e in self.exams.values()):
+            return None
+        exam = ExamRecord(
+            id=len(self.exams) + 1,
+            learner_id=learner_id,
+            plan_date=day,
+            state="running",
+            topic_ids=topic_ids,
+            ability_start=ability,
+            ability=ability,
+            pool=pool,
+            answers=[],
+            report=None,
+            started_at=datetime.now(UTC),
+            finished_at=None,
+        )
+        self.exams[exam.id] = exam
+        return exam
+
+    async def get(self, exam_id: int) -> ExamRecord | None:
+        return self.exams.get(exam_id)
+
+    async def add_poll(self, exam_id: int, telegram_poll_id: str, question_key: str) -> None:
+        self.polls[telegram_poll_id] = (exam_id, question_key, False)
+
+    async def has_open_poll(self, exam_id: int) -> bool:
+        return any(e == exam_id and not answered for e, _, answered in self.polls.values())
+
+    async def record_answer(self, telegram_poll_id: str, telegram_chat_id: str, option_ids: list[int]) -> int | None:
+        if telegram_poll_id not in self.polls:
+            return None
+        exam_id, key, answered = self.polls[telegram_poll_id]
+        exam = self.exams[exam_id]
+        if answered or exam.state != "running":
+            return None
+        asked = next(q for q in exam.pool if q.question_key == key)
+        answer = ExamAnswer(
+            question_key=key, topic_id=asked.topic_id, correct=option_ids == [asked.question.correct_option]
+        )
+        self.polls[telegram_poll_id] = (exam_id, key, True)
+        self.exams[exam_id] = exam.model_copy(update={"answers": [*exam.answers, answer]})
+        return exam_id
+
+    async def finish(self, exam_id: int, report: ExamReport, now: datetime) -> None:
+        self.exams[exam_id] = self.exams[exam_id].model_copy(
+            update={"state": "finished", "report": report, "finished_at": now}
+        )
+
+    async def last_exam_on(self, learner_id: int) -> date | None:
+        days = [e.plan_date for e in self.exams.values() if e.learner_id == learner_id]
+        return max(days) if days else None
+
+
 class FakeKnowledge:
     """`KnowledgeStore` with topics set as known by the test."""
 
     def __init__(self) -> None:
         self.known: dict[int, set[str]] = {}
+        self.stats: dict[str, QuestionStat] = {}
+        self.abilities: dict[int, LearnerAbility] = {}
+        self.marks: dict[int, dict[str, str]] = {}
 
     async def known_topics(self, learner_id: int, now: datetime) -> set[str]:
         return set(self.known.get(learner_id, set()))
+
+    async def questions(self, keys: list[str]) -> dict[str, QuestionStat]:
+        return {key: self.stats[key] for key in keys if key in self.stats}
+
+    async def ability(self, learner_id: int) -> LearnerAbility | None:
+        return self.abilities.get(learner_id)
+
+    async def mark_topics(
+        self, learner_id: int, topic_ids: list[str], mark: str, *, source_ref: str, at: datetime
+    ) -> None:
+        self.marks.setdefault(learner_id, {}).update(dict.fromkeys(topic_ids, mark))
 
 
 class FakePlans:
@@ -1036,6 +1123,7 @@ def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
         evidence=FakeEvidence(),
         orders=FakeOrders(),
         exercises=FakeExercises(),
+        exams=FakeExams(learners),
     )
     return stores, learners, lessons
 
