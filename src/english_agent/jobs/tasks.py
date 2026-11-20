@@ -17,6 +17,7 @@ from taskiq import TaskiqDepends
 
 from english_agent.arbiter import arbitrate
 from english_agent.content import content_key
+from english_agent.examiner import continue_exam
 from english_agent.grading import give_up_grading, grade_answer, refresh_profile_safely
 from english_agent.interlocutor import make_tutor
 from english_agent.jobs.broker import broker
@@ -24,6 +25,7 @@ from english_agent.jobs.dedup import (
     arbiter_key,
     content_key_for,
     enqueue,
+    exam_key,
     grading_key,
     lesson_key,
     mentor_key,
@@ -178,6 +180,19 @@ async def answer_tutor_question(learner_id: int, text: str, deps: WorkerDeps = T
     if tutor is not None:
         with bind(learner_id=learner_id):
             await tutor(learner_id, text)
+
+
+@broker.task(task_name="continue_exam")
+async def continue_exam_job(exam_id: int, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> str:
+    async with _job(deps, exam_key(exam_id), exam_id=exam_id):
+        runtime = deps.runtime
+        settings = runtime.settings
+        writer = (
+            AnthropicLLM(settings, model=settings.examiner_model, client=runtime.client)
+            if settings.examiner_model
+            else None
+        )
+        return await continue_exam(runtime.stores, runtime.sender, exam_id, writer)
 
 
 @broker.task(task_name="refresh_profile", retry_on_error=True)

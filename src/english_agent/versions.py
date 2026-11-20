@@ -59,6 +59,9 @@ SCHEMA_VERSIONS: dict[str, int] = {
     # Exercises composed to order (models/exercise.py).
     "exercise_order": 1,
     "bank_exercise": 1,
+    # Exams (models/exam.py): the record as it runs and the report.
+    "exam_record": 1,
+    "exam_report": 1,
     "day_plan_record": 1,
     "topic_mark": 1,  # storage/orm.py TopicMarkRow: a topic credited by placement or confirmed by an exam
     # The Mentor's memory (models/mentor.py): journal with checkable expectations, hypotheses, dossier.
@@ -98,6 +101,7 @@ PROMPT_FILES: dict[str, Path] = {
     "compose_exercises_system": _PROMPTS_DIR / "compose_exercises_system.md",
     "check_exercises_system": _PROMPTS_DIR / "check_exercises_system.md",
     "tutor_system": _PROMPTS_DIR / "tutor_system.md",
+    "exam_report_system": _PROMPTS_DIR / "exam_report_system.md",
     "dossier_system": _PROMPTS_DIR / "dossier_system.md",
 }
 

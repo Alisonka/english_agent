@@ -8,6 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from english_agent.items import core_item_from_lesson
+from english_agent.knowledge import question_key
+from english_agent.models.exam import PoolQuestion
 from english_agent.models.lesson import Lesson
 from english_agent.models.plan import DayPlan, StepChoice
 from english_agent.models.practice import TranslationGrade
@@ -26,6 +28,7 @@ from english_agent.srs import AGAIN, GOOD, ReviewScheduler
 from english_agent.storage import (
     CardRepo,
     EvidenceRepo,
+    ExamRepo,
     ItemRepo,
     LearnerRepo,
     LessonAlreadySentError,
@@ -847,3 +850,37 @@ async def test_content_get_and_claim_delivery_payload(sessions: SessionFactory, 
     practice = PracticeRepo(sessions, SCHEDULER)
     delivery = await practice.claim_delivery(lesson_row.id, "quiz", 4, payload={"source": "test"})
     assert delivery is not None and delivery.payload == {"source": "test"}
+
+
+async def test_an_exam_answer_is_evidence_and_moves_the_ability(sessions: SessionFactory, lesson: Lesson) -> None:
+    _, _, item_id = await _quiz_setup(sessions, lesson)
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    question = lesson.quiz[0]
+    key = question_key("there_is_are:core", question.question)
+    pool = [
+        PoolQuestion(
+            question_key=key,
+            topic_id="there_is_are",
+            item_id=item_id,
+            item_key="there_is_are:core",
+            difficulty=-1.0,
+            question=question,
+        )
+    ]
+    exams = ExamRepo(sessions)
+    exam = await exams.create(learner.id, DAY, ["there_is_are"], 0.0, pool)
+    assert exam is not None and await exams.create(learner.id, DAY, ["there_is_are"], 0.0, pool) is None
+    await exams.add_poll(exam.id, "exam-poll-1", key)
+    assert await exams.has_open_poll(exam.id)
+
+    assert await exams.record_answer("exam-poll-1", "43", [question.correct_option]) is None  # another chat
+    assert await exams.record_answer("exam-poll-1", "42", [question.correct_option]) == exam.id
+    assert await exams.record_answer("exam-poll-1", "42", [question.correct_option]) is None  # answered once
+
+    stored = await exams.get(exam.id)
+    assert stored is not None and [(a.question_key, a.correct) for a in stored.answers] == [(key, True)]
+    assert not await exams.has_open_poll(exam.id)
+    [evidence] = await EvidenceRepo(sessions).since(learner.id, datetime.min.replace(tzinfo=UTC))
+    assert evidence.kind == "exam_answer" and evidence.payload["question_key"] == key and "elo" in evidence.payload
+    assert await EvidenceRepo(sessions).question_keys(learner.id) == {key}
+    assert await exams.last_exam_on(learner.id) == DAY

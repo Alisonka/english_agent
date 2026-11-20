@@ -34,6 +34,7 @@ from english_agent.alerts import Alerter
 from english_agent.config import Settings, get_settings
 from english_agent.content import content_key, worker_id
 from english_agent.day_plan import fallback_plan
+from english_agent.examiner import start_exam
 from english_agent.items import step_item_from
 from english_agent.logs import bind, configure_logging
 from english_agent.metrics import LESSONS_FAILED, LESSONS_SENT
@@ -262,6 +263,10 @@ async def run_lesson_for_learner(
                 return OK
             span.set_attribute("plan.source", plan.source)
             span.set_attribute("plan.day_type", plan.day_type)
+            if plan.day_type == "exam":
+                if send:
+                    await start_exam(stores, sender, learner, plan.exam_topic_ids, today)
+                return OK
             choice, brief = await _executable_step(runtime, level, curriculum, plan)
             if choice is None:
                 log.info("the plan for %s sends no step (%s)", today.isoformat(), plan.day_type)

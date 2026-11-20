@@ -28,7 +28,7 @@ from english_agent.config import Settings, get_settings
 from english_agent.grading import make_grader
 from english_agent.health import beat
 from english_agent.interlocutor import make_tutor
-from english_agent.llm import make_client
+from english_agent.llm import AnthropicLLM, make_client
 from english_agent.logs import configure_logging
 from english_agent.metrics import serve_metrics
 from english_agent.paths import available_cefr_levels
@@ -60,6 +60,9 @@ async def _jobs(
             reflect=make_reflector(settings, client),
             arbiter=make_arbiter(settings, client),
             tutor=make_tutor(settings, stores, sender, client),
+            exam_writer=AnthropicLLM(settings, model=settings.examiner_model, client=client)
+            if settings.examiner_model
+            else None,
         )
         stack.push_async_callback(jobs.drain, SHUTDOWN_GRACE_SECONDS)
         return jobs

@@ -31,6 +31,7 @@ from english_agent.composer import compose_exercises
 from english_agent.content import content_key
 from english_agent.day_plan import frontier_known
 from english_agent.diagnostician import diagnose
+from english_agent.examiner import exam_pool
 from english_agent.llm import ChatLLM, LLMError, LLMWriteError, ToolCall, tool_schema
 from english_agent.llm.agent_loop import Budget, Finish, MeteredLLM, ToolError, run_subagent, run_tool_loop
 from english_agent.mentor_memory import write_dossier
@@ -241,7 +242,7 @@ class _Session:
             case "order_exercises":
                 return await self._order_exercises(arguments)
             case "prepare_exam":
-                raise ToolError(f"{call.name} is not available yet; plan with the content that exists")
+                return await self._prepare_exam([str(topic) for topic in arguments.get("topic_ids") or []])
             case "journal_note":
                 return await self._journal(arguments)
             case "hypothesis":
@@ -351,6 +352,7 @@ class _Session:
             due_reviews=len(await stores.cards.due(learner.id, self.now)),
             ready_topics=frozenset(ready),
             invalid_evidence=tuple(invalid),
+            last_exam_on=await stores.exams.last_exam_on(learner.id),
         )
 
     # -- delegation and writes -------------------------------------------------------------
@@ -413,6 +415,14 @@ class _Session:
             return {"question_keys": [e.question_key for e in exercises], "kept": len(exercises), "asked": order.count}
 
         return await run_subagent(self.budget, "exercise_composer", run)
+
+    async def _prepare_exam(self, topic_ids: list[str]) -> dict[str, Any]:
+        """How many unseen questions each topic has for an exam (code runs and scores the exam itself)."""
+        if not topic_ids:
+            raise ToolError("give the topic_ids of the block")
+        pool = await exam_pool(self.runtime.stores, self.learner, topic_ids)
+        counts = {topic: sum(1 for q in pool if q.topic_id == topic) for topic in topic_ids}
+        return {"unseen_questions": counts, "ready": all(count >= 2 for count in counts.values())}
 
     async def _journal(self, arguments: dict[str, Any]) -> dict[str, Any]:
         try:

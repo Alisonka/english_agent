@@ -500,3 +500,36 @@ class ExerciseRow(Base):
     question: Mapped[dict[str, Any]] = mapped_column(JSONB)  # `QuizQuestion.model_dump(mode="json")`
     learner_id: Mapped[int | None] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
     created_at: Mapped[datetime] = _created_at()
+
+
+class ExamRow(Base):
+    """One exam (`models.exam.ExamRecord`): its pool, answers and ability estimate as it runs."""
+
+    __tablename__ = "exams"
+    __table_args__ = (
+        UniqueConstraint("learner_id", "plan_date"),
+        CheckConstraint("state IN ('running', 'finished')", name="state"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    plan_date: Mapped[date] = mapped_column(Date)
+    state: Mapped[str] = mapped_column(String(16))
+    topic_ids: Mapped[list[str]] = mapped_column(JSONB)
+    ability_start: Mapped[float] = mapped_column(Float)
+    ability: Mapped[float] = mapped_column(Float)
+    pool: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    answers: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    report: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    started_at: Mapped[datetime] = _created_at()
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ExamPollRow(Base):
+    __tablename__ = "exam_polls"
+
+    telegram_poll_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    exam_id: Mapped[int] = mapped_column(ForeignKey("exams.id", ondelete="CASCADE"), index=True)
+    question_key: Mapped[str] = mapped_column(String(240))
+    answered: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    created_at: Mapped[datetime] = _created_at()

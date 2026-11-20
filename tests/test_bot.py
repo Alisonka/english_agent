@@ -16,6 +16,7 @@ from english_agent.bot.handlers import DISPUTED, parse_interests
 from english_agent.config import Settings
 from english_agent.grading import Grader, grade_answer, refresh_profile_safely
 from english_agent.models.curriculum import load_curriculum
+from english_agent.models.exam import PoolQuestion
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.storage import LearnerRecord
@@ -62,6 +63,7 @@ class InlineJobs:
         self.graded: list[int] = []
         self.arbitrated: list[int] = []
         self.asked: list[tuple[int, str]] = []
+        self.exams: list[int] = []
 
     async def grade_translation(self, answer_id: int) -> None:
         self.graded.append(answer_id)
@@ -75,6 +77,9 @@ class InlineJobs:
 
     async def answer_question(self, learner_id: int, text: str) -> None:
         self.asked.append((learner_id, text))
+
+    async def continue_exam(self, exam_id: int) -> None:
+        self.exams.append(exam_id)
 
 
 class Harness:
@@ -461,3 +466,26 @@ async def test_ask_needs_a_question_and_hands_it_to_the_interlocutor() -> None:
     assert "Напиши вопрос" in bot.telegram.texts[-1] and bot.jobs.asked == []
     await bot.text("/ask почему there are?")
     assert bot.jobs.asked == [(bot.learners.by_chat["42"].id, "почему there are?")]
+
+
+async def test_an_exam_poll_answer_moves_the_exam_on() -> None:
+    bot = Harness()
+    learner = await bot.learners.get_or_create("42", "A2")
+    question = QuizQuestion.model_validate(QUIZ[0])
+    pool = [
+        PoolQuestion(
+            question_key="k",
+            topic_id="there_is_are",
+            item_id=None,
+            item_key="there_is_are:core",
+            difficulty=0.0,
+            question=question,
+        )
+    ]
+    exam = await bot.stores.exams.create(learner.id, date(2026, 11, 6), ["there_is_are"], 0.0, pool)
+    assert exam is not None
+    await bot.stores.exams.add_poll(exam.id, "exam-1", "k")
+
+    await bot.vote("exam-1", question.correct_option)
+
+    assert bot.jobs.exams == [exam.id]

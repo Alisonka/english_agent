@@ -29,6 +29,8 @@ TABLES = {
     "day_plans",
     "content_orders",
     "exercise_bank",
+    "exams",
+    "exam_polls",
 }
 
 

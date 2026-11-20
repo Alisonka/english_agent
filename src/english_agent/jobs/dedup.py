@@ -80,6 +80,10 @@ def profile_key(learner_id: int) -> str:
     return f"profile:{learner_id}"
 
 
+def exam_key(exam_id: int) -> str:
+    return f"exam:{exam_id}"
+
+
 def arbiter_key(answer_id: int) -> str:
     return f"arbiter:{answer_id}"
 

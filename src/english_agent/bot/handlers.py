@@ -303,6 +303,10 @@ async def poll_answer(answer: PollAnswer, deps: BotDeps) -> None:
     if result is not None and result.completed:
         await deps.sender.send_text(chat_id, render_quiz_summary(result.results))
         await deps.jobs.refresh_profile(result.learner_id)
+    if result is None:  # not a quiz poll: maybe an exam question
+        exam_id = await deps.stores.exams.record_answer(answer.poll_id, chat_id, list(answer.option_ids))
+        if exam_id is not None:
+            await deps.jobs.continue_exam(exam_id)
 
 
 async def on_error(event: ErrorEvent) -> bool:
