@@ -32,6 +32,7 @@ class AdaptiveTest:
     min_per_topic: int = 2
     max_per_topic: int = 4
     max_total: int = 25
+    min_total: int = 0  # the test runs at least this long (the placement test: 15)
     settle: float = 0.15  # |last move| below this, with enough answers: the topic is settled
     answers: list[tuple[Candidate, bool]] = field(default_factory=list)
     _last_move: dict[str, float] = field(default_factory=dict)
@@ -48,7 +49,9 @@ class AdaptiveTest:
 
     @property
     def finished(self) -> bool:
-        return len(self.answers) >= self.max_total or not any(self.topic_open(t) for t in self.topics)
+        if len(self.answers) >= self.max_total:
+            return True
+        return len(self.answers) >= self.min_total and not any(self.topic_open(t) for t in self.topics)
 
     def next(self, pool: list[Candidate]) -> Candidate | None:
         """The next question, or None when the test is over or nothing fitting is left."""
@@ -56,6 +59,8 @@ class AdaptiveTest:
             return None
         seen = {candidate.question_key for candidate, _ in self.answers}
         open_topics = sorted((t for t in self.topics if self.topic_open(t)), key=lambda t: (self.per_topic(t), t))
+        if not open_topics:  # every group settled but the minimum is not reached: keep asking, least asked first
+            open_topics = sorted(self.topics, key=lambda t: (self.per_topic(t), t))
         for topic in open_topics:
             fitting = [c for c in pool if c.topic_id == topic and c.question_key not in seen]
             if fitting:

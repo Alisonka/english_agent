@@ -27,6 +27,7 @@ from english_agent.models.curriculum import all_topics, load_curriculum
 from english_agent.models.exam import ExamRecord, ExamReport, ExamReportDraft, PoolQuestion, TopicResult, verdict_for
 from english_agent.models.practice import QuizQuestion
 from english_agent.models.storage import LearnerRecord
+from english_agent.placement import finish_placement, placement_test
 from english_agent.storage import Stores
 from english_agent.telegram.sender import Sender, TelegramError
 from english_agent.versions import SCHEMA_VERSIONS, build_provenance
@@ -102,12 +103,15 @@ async def start_exam(
 def _test(exam: ExamRecord) -> tuple[AdaptiveTest, list[Candidate]]:
     pool = [Candidate(q.question_key, q.topic_id, q.difficulty) for q in exam.pool]
     by_key = {c.question_key: c for c in pool}
-    test = AdaptiveTest(
-        ability=exam.ability_start,
-        topics=exam.topic_ids,
-        max_per_topic=QUESTIONS_PER_TOPIC,
-        max_total=min(MAX_QUESTIONS, QUESTIONS_PER_TOPIC * len(exam.topic_ids)),
-    )
+    if exam.kind == "placement":
+        test = placement_test(exam)
+    else:
+        test = AdaptiveTest(
+            ability=exam.ability_start,
+            topics=exam.topic_ids,
+            max_per_topic=QUESTIONS_PER_TOPIC,
+            max_total=min(MAX_QUESTIONS, QUESTIONS_PER_TOPIC * len(exam.topic_ids)),
+        )
     for answer in exam.answers:
         test.record(by_key[answer.question_key], answer.correct)
     return test, pool
@@ -125,6 +129,9 @@ async def continue_exam(stores: Stores, sender: Sender, exam_id: int, writer: Ch
         return "waiting"  # one question at a time: the last one is not answered yet
     test, pool = _test(exam)
     nxt = test.next(pool)
+    if nxt is None and exam.kind == "placement":
+        await finish_placement(stores, sender, exam, learner)
+        return "finished"
     if nxt is not None:
         question = next(q for q in exam.pool if q.question_key == nxt.question_key).question
         _, poll_id = await sender.send_poll(

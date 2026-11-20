@@ -507,13 +507,15 @@ class ExamRow(Base):
 
     __tablename__ = "exams"
     __table_args__ = (
-        UniqueConstraint("learner_id", "plan_date"),
+        UniqueConstraint("learner_id", "plan_date", "kind"),
         CheckConstraint("state IN ('running', 'finished')", name="state"),
+        CheckConstraint("kind IN ('exam', 'placement')", name="kind"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
     plan_date: Mapped[date] = mapped_column(Date)
+    kind: Mapped[str] = mapped_column(String(16), default="exam", server_default=text("'exam'"))
     state: Mapped[str] = mapped_column(String(16))
     topic_ids: Mapped[list[str]] = mapped_column(JSONB)
     ability_start: Mapped[float] = mapped_column(Float)
