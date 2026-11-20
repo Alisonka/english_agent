@@ -25,19 +25,25 @@ from aiogram.types import (
 )
 
 from english_agent.bot.deps import BotDeps
+from english_agent.content import content_key
 from english_agent.grading import DISPUTE_PREFIX, GRADING
 from english_agent.models.cefr import Cefr
 from english_agent.models.schedule import LearnerSchedule, local_today, parse_clock, valid_timezone
 from english_agent.models.storage import MAX_INTEREST_LENGTH, MAX_INTERESTS, LearnerGoal, LearnerRecord
+from english_agent.placement import start_placement
 from english_agent.telegram.render import render_quiz_summary
 from english_agent.telegram.sender import TelegramError
 
 log = logging.getLogger(__name__)
 
-PROMPT = "Выбери свой уровень английского. Поменять можно в любой момент командой /level."
+PROMPT = (
+    "Выбери свой уровень английского или пройди короткий тест: /placement. "
+    "Поменять уровень можно в любой момент командой /level."
+)
 HELP = (
     "Я присылаю ежедневные уроки по твоему уровню.\n"
     "• /level — выбрать или сменить уровень\n"
+    "• /placement — тест, чтобы определить уровень\n"
     "• /mylevel — какой уровень сейчас стоит\n"
     "• /time 09:00 — во сколько присылать урок\n"
     "• /translation 18:00 — во сколько присылать задание на перевод\n"
@@ -73,6 +79,7 @@ BAD_INTERESTS = (
 COMMANDS: list[tuple[str, str]] = [
     ("level", "Выбрать или сменить уровень"),
     ("mylevel", "Показать текущий уровень"),
+    ("placement", "Тест на уровень"),
     ("time", "Во сколько присылать урок"),
     ("translation", "Во сколько присылать задание на перевод"),
     ("timezone", "Часовой пояс"),
@@ -142,6 +149,15 @@ async def my_level(message: Message, deps: BotDeps) -> None:
     learner = await deps.stores.learners.get(chat_id)
     current = learner.cefr if learner is not None else deps.settings.learner_cefr
     await deps.sender.send_text(chat_id, f"Текущий уровень: <b>{current}</b>. Сменить — /level.")
+
+
+async def placement(message: Message, deps: BotDeps) -> None:
+    chat_id = str(message.chat.id)
+    learner = await _learner(deps, chat_id)
+    today = local_today(learner.timezone, datetime.now(UTC))
+    exam = await start_placement(deps.stores, deps.sender, learner, today, content_key(deps.settings))
+    if exam is not None:
+        await deps.jobs.continue_exam(exam.id)
 
 
 async def ask(message: Message, command: CommandObject, deps: BotDeps) -> None:
@@ -323,6 +339,7 @@ def build_router() -> Router:
     router.message.register(my_level, Command("mylevel"))
     router.message.register(set_time, Command("time", "translation"))
     router.message.register(set_timezone, Command("timezone"))
+    router.message.register(placement, Command("placement"))
     router.message.register(ask, Command("ask"))
     router.message.register(goal, Command("goal"))
     router.message.register(set_interests, Command("interests"))

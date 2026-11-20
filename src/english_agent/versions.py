@@ -60,7 +60,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "exercise_order": 1,
     "bank_exercise": 1,
     # Exams (models/exam.py): the record as it runs and the report.
-    "exam_record": 1,
+    "exam_record": 2,  # v2: kind (an exam, or the placement test)
     "exam_report": 1,
     "day_plan_record": 1,
     "topic_mark": 1,  # storage/orm.py TopicMarkRow: a topic credited by placement or confirmed by an exam

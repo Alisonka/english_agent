@@ -38,7 +38,7 @@ from english_agent.knowledge import (
 from english_agent.mentor_memory import STALE_AFTER, Observation, can_move, evaluate_expectation
 from english_agent.models.cefr import Cefr
 from english_agent.models.content_order import ContentBrief, ContentOrder, OrderStatus
-from english_agent.models.exam import ExamRecord, ExamReport, PoolQuestion
+from english_agent.models.exam import ExamKind, ExamRecord, ExamReport, PoolQuestion
 from english_agent.models.exercise import BankExercise
 from english_agent.models.knowledge import LearnerAbility, QuestionStat
 from english_agent.models.lesson import Lesson
@@ -239,6 +239,8 @@ class LessonContentStore(Protocol):
 
     async def ready_topics(self, cefr: Cefr, curriculum_version: int, content_key: str) -> set[str]: ...
 
+    async def ready_contents(self, content_key: str) -> list[LessonContentRecord]: ...
+
 
 class ItemStore(Protocol):
     async def get_by_key(self, key: str) -> ItemRecord | None: ...
@@ -402,7 +404,13 @@ class KnowledgeStore(Protocol):
 
 class ExamStore(Protocol):
     async def create(
-        self, learner_id: int, day: date, topic_ids: list[str], ability: float, pool: list[PoolQuestion]
+        self,
+        learner_id: int,
+        day: date,
+        topic_ids: list[str],
+        ability: float,
+        pool: list[PoolQuestion],
+        kind: ExamKind = "exam",
     ) -> ExamRecord | None: ...
 
     async def get(self, exam_id: int) -> ExamRecord | None: ...
@@ -1323,6 +1331,16 @@ class LessonContentRepo:
             )
             return set(rows)
 
+    async def ready_contents(self, content_key: str) -> list[LessonContentRecord]:
+        """Every written and checked topic of this recipe, all levels (the placement test's bank)."""
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(LessonContentRow)
+                .where(LessonContentRow.content_key == content_key, LessonContentRow.status == "ready")
+                .order_by(LessonContentRow.id)
+            )
+            return [LessonContentRecord.model_validate(row) for row in rows]
+
     async def ready_topics(self, cefr: Cefr, curriculum_version: int, content_key: str) -> set[str]:
         """Topics of this level and recipe whose content is written and checked."""
         async with session_scope(self._sessions) as session:
@@ -1806,21 +1824,28 @@ class ExamRepo:
         self._sessions = sessions
 
     async def create(
-        self, learner_id: int, day: date, topic_ids: list[str], ability: float, pool: list[PoolQuestion]
+        self,
+        learner_id: int,
+        day: date,
+        topic_ids: list[str],
+        ability: float,
+        pool: list[PoolQuestion],
+        kind: ExamKind = "exam",
     ) -> ExamRecord | None:
-        """Start the day's exam; None when it was started already."""
+        """Start the day's exam (or placement test); None when it was started already."""
         statement = (
             insert(ExamRow)
             .values(
                 learner_id=learner_id,
                 plan_date=day,
+                kind=kind,
                 state="running",
                 topic_ids=topic_ids,
                 ability_start=ability,
                 ability=ability,
                 pool=[question.model_dump(mode="json") for question in pool],
             )
-            .on_conflict_do_nothing(index_elements=["learner_id", "plan_date"])
+            .on_conflict_do_nothing(index_elements=["learner_id", "plan_date", "kind"])
             .returning(ExamRow.id)
         )
         async with session_scope(self._sessions) as session:
@@ -1885,7 +1910,9 @@ class ExamRepo:
 
     async def last_exam_on(self, learner_id: int) -> date | None:
         async with session_scope(self._sessions) as session:
-            return await session.scalar(select(func.max(ExamRow.plan_date)).where(ExamRow.learner_id == learner_id))
+            return await session.scalar(
+                select(func.max(ExamRow.plan_date)).where(ExamRow.learner_id == learner_id, ExamRow.kind == "exam")
+            )
 
 
 class PlanRepo:

@@ -8,7 +8,7 @@ from typing import Any
 from english_agent.llm import AssistantTurn
 from english_agent.models.cefr import Cefr
 from english_agent.models.content_order import ContentBrief, ContentOrder, OrderStatus
-from english_agent.models.exam import ExamAnswer, ExamRecord, ExamReport, PoolQuestion
+from english_agent.models.exam import ExamAnswer, ExamKind, ExamRecord, ExamReport, PoolQuestion
 from english_agent.models.exercise import BankExercise
 from english_agent.models.knowledge import LearnerAbility, QuestionStat
 from english_agent.models.lesson import Lesson
@@ -476,6 +476,9 @@ class FakeContents:
 
     async def get(self, content_id: int) -> LessonContentRecord | None:
         return next((row for row in self.rows.values() if row.id == content_id), None)
+
+    async def ready_contents(self, content_key: str) -> list[LessonContentRecord]:
+        return [row for (_, _, _, key), row in self.rows.items() if key == content_key and row.status == "ready"]
 
     async def ready_topics(self, cefr: Cefr, curriculum_version: int, content_key: str) -> set[str]:
         return {
@@ -984,14 +987,21 @@ class FakeExams:
         self.polls: dict[str, tuple[int, str, bool]] = {}
 
     async def create(
-        self, learner_id: int, day: date, topic_ids: list[str], ability: float, pool: list[PoolQuestion]
+        self,
+        learner_id: int,
+        day: date,
+        topic_ids: list[str],
+        ability: float,
+        pool: list[PoolQuestion],
+        kind: ExamKind = "exam",
     ) -> ExamRecord | None:
-        if any(e.learner_id == learner_id and e.plan_date == day for e in self.exams.values()):
+        if any(e.learner_id == learner_id and e.plan_date == day and e.kind == kind for e in self.exams.values()):
             return None
         exam = ExamRecord(
             id=len(self.exams) + 1,
             learner_id=learner_id,
             plan_date=day,
+            kind=kind,
             state="running",
             topic_ids=topic_ids,
             ability_start=ability,

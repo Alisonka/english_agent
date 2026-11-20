@@ -11,6 +11,7 @@ from english_agent.models.practice import QuizQuestion
 from english_agent.versions import Provenance
 
 ExamState = Literal["running", "finished"]
+ExamKind = Literal["exam", "placement"]
 TopicVerdict = Literal["mastered", "shaky", "not_mastered"]
 MASTERED_AT = 0.8
 SHAKY_AT = 0.5
@@ -66,6 +67,7 @@ class ExamRecord(BaseModel):
     id: int
     learner_id: int
     plan_date: date
+    kind: ExamKind = "exam"
     state: ExamState
     topic_ids: list[str]
     ability_start: float
