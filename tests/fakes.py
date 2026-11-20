@@ -7,7 +7,12 @@ from typing import Any
 
 from english_agent.llm import AssistantTurn
 from english_agent.models.cefr import Cefr
+from english_agent.models.content_order import ContentBrief, ContentOrder, OrderStatus
+from english_agent.models.exam import ExamAnswer, ExamKind, ExamRecord, ExamReport, PoolQuestion
+from english_agent.models.exercise import BankExercise
+from english_agent.models.knowledge import LearnerAbility, QuestionStat
 from english_agent.models.lesson import Lesson
+from english_agent.models.plan import DayPlan, DayPlanRecord
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
 from english_agent.models.run import RunReport
@@ -18,12 +23,14 @@ from english_agent.models.storage import (
     CardRecord,
     ClaimOutcome,
     ErrorRecord,
+    EvidenceRecord,
     GradingInput,
     GradingSentence,
     GradingTask,
     ItemAccuracy,
     ItemDraft,
     ItemRecord,
+    LearnerGoal,
     LearnerProfileRecord,
     LearnerRecord,
     LessonClaim,
@@ -153,6 +160,12 @@ class FakeLearners:
 
     async def deactivate(self, telegram_chat_id: str, reason: str) -> None:
         self._change(telegram_chat_id, is_active=False, deactivated_reason=reason)
+
+    async def set_goal(self, telegram_chat_id: str, goal: LearnerGoal) -> LearnerRecord | None:
+        return self._change(telegram_chat_id, goal=goal)
+
+    async def set_interests(self, telegram_chat_id: str, interests: list[str]) -> LearnerRecord | None:
+        return self._change(telegram_chat_id, interests=interests)
 
     def started(self, telegram_chat_id: str, on: date, cefr: Cefr = "A2", **changes: Any) -> LearnerRecord:
         """Test helper: a learner whose course started on `on`."""
@@ -463,6 +476,16 @@ class FakeContents:
 
     async def get(self, content_id: int) -> LessonContentRecord | None:
         return next((row for row in self.rows.values() if row.id == content_id), None)
+
+    async def ready_contents(self, content_key: str) -> list[LessonContentRecord]:
+        return [row for (_, _, _, key), row in self.rows.items() if key == content_key and row.status == "ready"]
+
+    async def ready_topics(self, cefr: Cefr, curriculum_version: int, content_key: str) -> set[str]:
+        return {
+            topic_id
+            for (topic_id, level, version, key), row in self.rows.items()
+            if (level, version, key) == (cefr, curriculum_version, content_key) and row.status == "ready"
+        }
 
     async def unavailable_topics(
         self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
@@ -834,10 +857,264 @@ class FakePractice:
         self._update_answer(answer_id, disputed=True)
         return True
 
+    async def for_arbitration(self, answer_id: int) -> GradingTask | None:
+        return None  # arbitration runs against PostgreSQL (tests/test_arbiter.py)
+
+    async def overturn(
+        self, answer_id: int, arbiter: TranslationGrade, sentences: list[int], now: datetime
+    ) -> list[int]:
+        return []
+
     def _update_answer(self, answer_id: int, **changes: object) -> TranslationAnswerRecord:
         record = self.translation_answers[answer_id].model_copy(update=changes)
         self.translation_answers[answer_id] = record
         return record
+
+
+class FakeEvidence:
+    """`EvidenceStore` over records the test adds."""
+
+    def __init__(self) -> None:
+        self.records: list[EvidenceRecord] = []
+
+    async def for_items(self, learner_id: int, item_ids: list[int], *, limit: int) -> list[EvidenceRecord]:
+        mine = [r for r in self.records if r.learner_id == learner_id and r.item_id in item_ids]
+        return sorted(mine, key=lambda r: (r.occurred_at, r.id))[-limit:]
+
+    async def question_keys(self, learner_id: int) -> set[str]:
+        return {
+            str(r.payload["question_key"])
+            for r in self.records
+            if r.learner_id == learner_id and "question_key" in r.payload
+        }
+
+    async def count_since(self, learner_id: int, kind: str, since: datetime) -> int:
+        return sum(1 for r in self.records if r.learner_id == learner_id and r.kind == kind and r.occurred_at >= since)
+
+    async def record(
+        self,
+        learner_id: int,
+        kind: str,
+        *,
+        source_ref: str,
+        topic_id: str | None,
+        payload: dict[str, Any],
+        at: datetime,
+    ) -> None:
+        if any(r.source_ref == source_ref for r in self.records):
+            return
+        self.records.append(
+            EvidenceRecord.model_validate(
+                {
+                    "id": len(self.records) + 1,
+                    "learner_id": learner_id,
+                    "kind": kind,
+                    "source_ref": source_ref,
+                    "topic_id": topic_id,
+                    "item_id": None,
+                    "error_id": None,
+                    "payload": payload,
+                    "occurred_at": at,
+                    "cancelled_at": None,
+                }
+            )
+        )
+
+    async def topic_answers(self, learner_id: int, topic_ids: list[str]) -> dict[str, tuple[int, int]]:
+        counts: dict[str, tuple[int, int]] = {}
+        for r in self.records:
+            if r.learner_id == learner_id and r.topic_id in topic_ids:
+                total, right = counts.get(r.topic_id, (0, 0))
+                counts[r.topic_id] = (total + 1, right + int(bool(r.payload.get("is_correct"))))
+        return counts
+
+
+class FakeOrders:
+    """`OrderStore` in memory, one order per (brief topic, level)."""
+
+    def __init__(self) -> None:
+        self.orders: dict[tuple[str, str], ContentOrder] = {}
+
+    async def order(self, brief: ContentBrief, cefr: Cefr) -> ContentOrder:
+        key = (brief.topic_id, cefr)
+        if key not in self.orders:
+            self.orders[key] = ContentOrder(
+                id=len(self.orders) + 1,
+                topic_id=brief.topic_id,
+                cefr=cefr,
+                brief=brief,
+                status="ordered",
+                content_id=None,
+                created_at=datetime.now(UTC),
+                finished_at=None,
+            )
+        return self.orders[key]
+
+    async def by_topic(self, topic_id: str, cefr: Cefr) -> ContentOrder | None:
+        return self.orders.get((topic_id, cefr))
+
+    async def open_orders(self, limit: int) -> list[ContentOrder]:
+        return [order for order in self.orders.values() if order.status == "ordered"][:limit]
+
+    async def finish(self, order_id: int, status: OrderStatus, content_id: int | None, now: datetime) -> None:
+        for key, order in self.orders.items():
+            if order.id == order_id:
+                self.orders[key] = order.model_copy(
+                    update={"status": status, "content_id": content_id, "finished_at": now}
+                )
+
+
+class FakeExercises:
+    def __init__(self) -> None:
+        self.bank: dict[str, BankExercise] = {}
+        self.priors: dict[str, float] = {}
+
+    async def save(self, exercises: list[BankExercise], priors: dict[str, float]) -> None:
+        for exercise in exercises:
+            self.bank.setdefault(exercise.question_key, exercise)
+        self.priors.update(priors)
+
+    async def get(self, keys: list[str]) -> list[BankExercise]:
+        return [self.bank[key] for key in keys if key in self.bank]
+
+
+class FakeExams:
+    """`ExamStore` in memory: polls map to exams; answers are kept, evidence is not written."""
+
+    def __init__(self, learners: FakeLearners) -> None:
+        self.learners = learners
+        self.exams: dict[int, ExamRecord] = {}
+        self.polls: dict[str, tuple[int, str, bool]] = {}
+
+    async def create(
+        self,
+        learner_id: int,
+        day: date,
+        topic_ids: list[str],
+        ability: float,
+        pool: list[PoolQuestion],
+        kind: ExamKind = "exam",
+    ) -> ExamRecord | None:
+        if any(e.learner_id == learner_id and e.plan_date == day and e.kind == kind for e in self.exams.values()):
+            return None
+        exam = ExamRecord(
+            id=len(self.exams) + 1,
+            learner_id=learner_id,
+            plan_date=day,
+            kind=kind,
+            state="running",
+            topic_ids=topic_ids,
+            ability_start=ability,
+            ability=ability,
+            pool=pool,
+            answers=[],
+            report=None,
+            started_at=datetime.now(UTC),
+            finished_at=None,
+        )
+        self.exams[exam.id] = exam
+        return exam
+
+    async def get(self, exam_id: int) -> ExamRecord | None:
+        return self.exams.get(exam_id)
+
+    async def add_poll(self, exam_id: int, telegram_poll_id: str, question_key: str) -> None:
+        self.polls[telegram_poll_id] = (exam_id, question_key, False)
+
+    async def has_open_poll(self, exam_id: int) -> bool:
+        return any(e == exam_id and not answered for e, _, answered in self.polls.values())
+
+    async def record_answer(self, telegram_poll_id: str, telegram_chat_id: str, option_ids: list[int]) -> int | None:
+        if telegram_poll_id not in self.polls:
+            return None
+        exam_id, key, answered = self.polls[telegram_poll_id]
+        exam = self.exams[exam_id]
+        if answered or exam.state != "running":
+            return None
+        asked = next(q for q in exam.pool if q.question_key == key)
+        answer = ExamAnswer(
+            question_key=key, topic_id=asked.topic_id, correct=option_ids == [asked.question.correct_option]
+        )
+        self.polls[telegram_poll_id] = (exam_id, key, True)
+        self.exams[exam_id] = exam.model_copy(update={"answers": [*exam.answers, answer]})
+        return exam_id
+
+    async def finish(self, exam_id: int, report: ExamReport, now: datetime) -> None:
+        self.exams[exam_id] = self.exams[exam_id].model_copy(
+            update={"state": "finished", "report": report, "finished_at": now}
+        )
+
+    async def last_exam_on(self, learner_id: int) -> date | None:
+        days = [e.plan_date for e in self.exams.values() if e.learner_id == learner_id]
+        return max(days) if days else None
+
+
+class FakeKnowledge:
+    """`KnowledgeStore` with topics set as known by the test."""
+
+    def __init__(self) -> None:
+        self.known: dict[int, set[str]] = {}
+        self.stats: dict[str, QuestionStat] = {}
+        self.abilities: dict[int, LearnerAbility] = {}
+        self.marks: dict[int, dict[str, str]] = {}
+
+    async def known_topics(self, learner_id: int, now: datetime) -> set[str]:
+        return set(self.known.get(learner_id, set()))
+
+    async def questions(self, keys: list[str]) -> dict[str, QuestionStat]:
+        return {key: self.stats[key] for key in keys if key in self.stats}
+
+    async def ability(self, learner_id: int) -> LearnerAbility | None:
+        return self.abilities.get(learner_id)
+
+    async def mark_topics(
+        self, learner_id: int, topic_ids: list[str], mark: str, *, source_ref: str, at: datetime
+    ) -> None:
+        self.marks.setdefault(learner_id, {}).update(dict.fromkeys(topic_ids, mark))
+
+
+class FakePlans:
+    """`PlanStore` in memory, with the same commit-once rule."""
+
+    def __init__(self) -> None:
+        self.records: dict[tuple[int, date], DayPlanRecord] = {}
+
+    async def get(self, learner_id: int, day: date) -> DayPlanRecord | None:
+        return self.records.get((learner_id, day))
+
+    async def start(self, learner_id: int, day: date) -> bool:
+        if (learner_id, day) in self.records:
+            return False
+        self.records[(learner_id, day)] = DayPlanRecord(
+            id=len(self.records) + 1,
+            learner_id=learner_id,
+            plan_date=day,
+            state="running",
+            plan=None,
+            trajectory=None,
+            created_at=datetime.now(UTC),
+            committed_at=None,
+        )
+        return True
+
+    async def commit(
+        self, plan: DayPlan, *, trajectory: list[dict[str, Any]] | None = None, now: datetime
+    ) -> DayPlanRecord:
+        key = (plan.learner_id, plan.plan_date)
+        current = self.records.get(key)
+        if current is not None and current.state in ("committed", "fallback"):
+            return current
+        self.records[key] = DayPlanRecord(
+            id=len(self.records) + 1,
+            learner_id=plan.learner_id,
+            plan_date=plan.plan_date,
+            state="committed" if plan.source == "agent" else "fallback",
+            plan=plan,
+            trajectory=trajectory,
+            created_at=now,
+            committed_at=now,
+        )
+        return self.records[key]
 
 
 def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
@@ -851,6 +1128,12 @@ def fake_stores() -> tuple[Stores, FakeLearners, FakeLessons]:
         cards=FakeCards(items),
         profiles=FakeProfiles(learners),
         contents=FakeContents(),
+        plans=FakePlans(),
+        knowledge=FakeKnowledge(),
+        evidence=FakeEvidence(),
+        orders=FakeOrders(),
+        exercises=FakeExercises(),
+        exams=FakeExams(learners),
     )
     return stores, learners, lessons
 

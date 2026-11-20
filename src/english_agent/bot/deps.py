@@ -15,8 +15,12 @@ from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from english_agent.arbiter import arbitrate
 from english_agent.config import Settings
+from english_agent.examiner import continue_exam
 from english_agent.grading import Grader, grade_answer, refresh_profile_safely
+from english_agent.interlocutor import Tutor
+from english_agent.llm import ChatLLM
 from english_agent.reflector import Reflector
 from english_agent.storage.repositories import Stores
 from english_agent.telegram.sender import Sender
@@ -28,6 +32,12 @@ class JobDispatcher(Protocol):
     async def grade_translation(self, answer_id: int) -> None: ...
 
     async def refresh_profile(self, learner_id: int) -> None: ...
+
+    async def arbitrate(self, answer_id: int) -> None: ...
+
+    async def answer_question(self, learner_id: int, text: str) -> None: ...
+
+    async def continue_exam(self, exam_id: int) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -49,9 +59,13 @@ class InProcessJobs:
         grade: Grader,
         *,
         reflect: Reflector | None = None,
+        arbiter: Grader | None = None,
+        tutor: Tutor | None = None,
+        exam_writer: ChatLLM | None = None,
         concurrency: int = 4,
     ) -> None:
         self._stores, self._sender, self._grade, self._reflect = stores, sender, grade, reflect
+        self._arbiter, self._tutor, self._exam_writer = arbiter, tutor, exam_writer
         self._gate = asyncio.Semaphore(concurrency)
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -80,6 +94,20 @@ class InProcessJobs:
 
     async def refresh_profile(self, learner_id: int) -> None:
         self._spawn(f"profile:{learner_id}", refresh_profile_safely(self._stores, learner_id, self._reflect))
+
+    async def arbitrate(self, answer_id: int) -> None:
+        if self._arbiter is None:
+            log.info("dispute on answer %s: the Arbiter is off", answer_id)
+            return
+        self._spawn(f"arbiter:{answer_id}", arbitrate(self._stores, self._sender, self._arbiter, answer_id))
+
+    async def answer_question(self, learner_id: int, text: str) -> None:
+        if self._tutor is None:
+            return
+        self._spawn(f"tutor:{learner_id}", self._tutor(learner_id, text))
+
+    async def continue_exam(self, exam_id: int) -> None:
+        self._spawn(f"exam:{exam_id}", continue_exam(self._stores, self._sender, exam_id, self._exam_writer))
 
     @property
     def pending(self) -> int:

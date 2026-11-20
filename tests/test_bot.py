@@ -12,9 +12,11 @@ from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from conftest import lesson_payload
 from english_agent.bot.app import build_dispatcher
 from english_agent.bot.deps import BotDeps, InProcessJobs
+from english_agent.bot.handlers import DISPUTED, parse_interests
 from english_agent.config import Settings
 from english_agent.grading import Grader, grade_answer, refresh_profile_safely
 from english_agent.models.curriculum import load_curriculum
+from english_agent.models.exam import PoolQuestion
 from english_agent.models.lesson import Lesson
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.storage import LearnerRecord
@@ -59,6 +61,9 @@ class InlineJobs:
     def __init__(self, stores: Stores, sender: Sender, grade: Grader) -> None:
         self.stores, self.sender, self.grade = stores, sender, grade
         self.graded: list[int] = []
+        self.arbitrated: list[int] = []
+        self.asked: list[tuple[int, str]] = []
+        self.exams: list[int] = []
 
     async def grade_translation(self, answer_id: int) -> None:
         self.graded.append(answer_id)
@@ -66,6 +71,15 @@ class InlineJobs:
 
     async def refresh_profile(self, learner_id: int) -> None:
         await refresh_profile_safely(self.stores, learner_id)
+
+    async def arbitrate(self, answer_id: int) -> None:
+        self.arbitrated.append(answer_id)
+
+    async def answer_question(self, learner_id: int, text: str) -> None:
+        self.asked.append((learner_id, text))
+
+    async def continue_exam(self, exam_id: int) -> None:
+        self.exams.append(exam_id)
 
 
 class Harness:
@@ -252,6 +266,48 @@ async def test_status_shows_the_settings() -> None:
     assert "<b>B1</b>" in status and "Europe/Moscow" in status and "18:00" in status
 
 
+async def test_goal_button_saves_the_goal_and_status_shows_it() -> None:
+    bot = Harness()
+    await bot.text("/goal")
+    [sent] = bot.telegram.of(SendMessage)
+    assert [row[0].callback_data for row in sent.reply_markup.inline_keyboard] == [
+        "goal:work",
+        "goal:travel",
+        "goal:exam",
+        "goal:general",
+    ]
+
+    await bot.tap("goal:travel")
+    await bot.tap("goal:nonsense")  # an unknown button changes nothing
+    assert bot.learners.by_chat["42"].goal == "travel"
+    assert any(isinstance(call, EditMessageText) and "Для путешествий" in call.text for call in bot.telegram.calls)
+
+    await bot.text("/status")
+    assert "Цель: Для путешествий" in bot.telegram.texts[-1]
+
+
+async def test_interests_are_parsed_saved_and_cleared() -> None:
+    bot = Harness()
+    await bot.text("/interests футбол,  IT , футбол")
+    assert bot.learners.by_chat["42"].interests == ["футбол", "IT"]
+    assert "Интересы: футбол, IT" in bot.telegram.texts[-1]
+
+    await bot.text("/interests")
+    assert "через запятую" in bot.telegram.texts[-1]
+    assert bot.learners.by_chat["42"].interests == ["футбол", "IT"]  # a bad command keeps them
+
+    await bot.text("/interests -")
+    assert bot.learners.by_chat["42"].interests == []
+
+
+def test_parse_interests_enforces_the_limits() -> None:
+    assert parse_interests("a, b") == ["a", "b"]
+    assert parse_interests(" - ") == []
+    assert parse_interests(", ,") is None
+    assert parse_interests(",".join(f"t{n}" for n in range(6))) is None  # more than five
+    assert parse_interests("x" * 31) is None
+
+
 # --- practice: quiz answers and the translation task ------------------------------
 
 
@@ -356,8 +412,9 @@ async def test_dispute_flags_the_grade() -> None:
     await bot.tap("dispute:1", message_id=None)
 
     assert practice.translation_answers[1].disputed is True
+    assert bot.jobs.arbitrated == [1]  # the Arbiter is asked to rule
     answer = bot.telegram.calls[-1]
-    assert isinstance(answer, AnswerCallbackQuery) and answer.text == "Спасибо, оценка отмечена как спорная."
+    assert isinstance(answer, AnswerCallbackQuery) and answer.text == DISPUTED
 
 
 # --- background jobs of the bot process -------------------------------------------
@@ -401,3 +458,34 @@ async def test_draining_cancels_jobs_that_overrun() -> None:
 
     assert started and jobs.pending == 0
     assert practice.translation_answers[answer.id].status == "pending"  # left for a later retry
+
+
+async def test_ask_needs_a_question_and_hands_it_to_the_interlocutor() -> None:
+    bot = Harness()
+    await bot.text("/ask")
+    assert "Напиши вопрос" in bot.telegram.texts[-1] and bot.jobs.asked == []
+    await bot.text("/ask почему there are?")
+    assert bot.jobs.asked == [(bot.learners.by_chat["42"].id, "почему there are?")]
+
+
+async def test_an_exam_poll_answer_moves_the_exam_on() -> None:
+    bot = Harness()
+    learner = await bot.learners.get_or_create("42", "A2")
+    question = QuizQuestion.model_validate(QUIZ[0])
+    pool = [
+        PoolQuestion(
+            question_key="k",
+            topic_id="there_is_are",
+            item_id=None,
+            item_key="there_is_are:core",
+            difficulty=0.0,
+            question=question,
+        )
+    ]
+    exam = await bot.stores.exams.create(learner.id, date(2026, 11, 6), ["there_is_are"], 0.0, pool)
+    assert exam is not None
+    await bot.stores.exams.add_poll(exam.id, "exam-1", "k")
+
+    await bot.vote("exam-1", question.correct_option)
+
+    assert bot.jobs.exams == [exam.id]

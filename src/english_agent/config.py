@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     # the grader, the Planner and the cheat sheet use it. Empty REFLECTOR_MODEL turns it off.
     reflector_model: str = "claude-sonnet-5-5"
     reflector_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    # The Mentor plans each learner's next day in the evening. off: the deterministic policy plans;
+    # shadow: the Mentor plans too, its plan is stored beside the executed fallback; live: its plan runs.
+    mentor_mode: Literal["off", "shadow", "live"] = "off"
+    mentor_model: str = "claude-opus-5-5"
+    mentor_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    mentor_evening_time: time = time(21, 0)  # local time; a session starts within the next 10 minutes
+    mentor_max_steps: int = Field(default=12, ge=3, le=30)
+    mentor_max_subagents: int = Field(default=3, ge=0, le=10)
+    mentor_max_calls: int = Field(default=30, ge=5)  # every model call of the session, subagents included
+    mentor_max_cost_usd: float = Field(default=0.5, gt=0)
+    mentor_timeout_seconds: float = Field(default=300, gt=0)
     # One content run (research + plan + steps + reviews + cheat sheet) stops past these limits.
     content_run_max_calls: int = Field(default=60, ge=10)
     content_run_max_cost_usd: float = Field(default=2.0, gt=0)
@@ -98,6 +109,14 @@ class Settings(BaseSettings):
     # Grades the learner's translation; effort is the Claude API `output_config.effort`.
     grader_model: str = "claude-haiku-5-5"
     grader_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    # The Interlocutor answers learners' questions about the material (/ask). Empty TUTOR_MODEL: off.
+    tutor_model: str = "claude-sonnet-5-5"
+    tutor_daily_limit: int = Field(default=10, ge=0)
+    # The Examiner writes the exam report's summary and recommendations (verdicts are code's). Empty: templates.
+    examiner_model: str = "claude-sonnet-5-5"
+    # A disputed grade is checked again, independently, by a stronger model. Empty ARBITER_MODEL: off.
+    arbiter_model: str = "claude-opus-5-5"
+    arbiter_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
 
     # Claude API client: per-request timeout, SDK retries (429/5xx/overloaded, with backoff), and
     # how many requests one process keeps in flight (the account's rate limit is shared by all).

@@ -7,19 +7,50 @@ loaded completely inside the transaction (no lazy loading), which async SQLAlche
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
+from typing import cast as narrow
 
-from sqlalchemy import cast, func, select, tuple_, update
+from sqlalchemy import CursorResult, cast, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from english_agent.config import Settings
+from english_agent.knowledge import (
+    KNOWN,
+    ElementStatus,
+    EloDelta,
+    TopicMark,
+    critic_difficulty,
+    element_status,
+    elo_step,
+    probability,
+    question_key,
+    start_ability,
+    start_difficulty,
+    topic_meta,
+    topic_status,
+)
+from english_agent.mentor_memory import STALE_AFTER, Observation, can_move, evaluate_expectation
 from english_agent.models.cefr import Cefr
+from english_agent.models.content_order import ContentBrief, ContentOrder, OrderStatus
+from english_agent.models.exam import ExamKind, ExamRecord, ExamReport, PoolQuestion
+from english_agent.models.exercise import BankExercise
+from english_agent.models.knowledge import LearnerAbility, QuestionStat
 from english_agent.models.lesson import Lesson
+from english_agent.models.mentor import (
+    CLOSED_HYPOTHESES,
+    Dossier,
+    Expectation,
+    Hypothesis,
+    HypothesisStatus,
+    JournalEntry,
+)
+from english_agent.models.plan import DayPlan, DayPlanRecord
 from english_agent.models.practice import QuizQuestion, TranslationGrade
 from english_agent.models.profile import LearnerProfile
 from english_agent.models.run import RunReport
@@ -31,12 +62,15 @@ from english_agent.models.storage import (
     CardRecord,
     ClaimOutcome,
     ErrorRecord,
+    EvidenceKind,
+    EvidenceRecord,
     GradingInput,
     GradingSentence,
     GradingTask,
     ItemAccuracy,
     ItemDraft,
     ItemRecord,
+    LearnerGoal,
     LearnerProfileRecord,
     LearnerRecord,
     LessonClaim,
@@ -60,19 +94,33 @@ from english_agent.srs import GOOD, ReviewScheduler, due_at, make_scheduler, qui
 from english_agent.storage.db import SessionFactory, make_engine, make_session_factory, session_scope
 from english_agent.storage.orm import (
     CardRow,
+    ContentOrderRow,
+    DayPlanRow,
+    DossierRow,
     ErrorRow,
+    EvidenceRow,
+    ExamPollRow,
+    ExamRow,
+    ExerciseRow,
+    HypothesisRow,
     ItemRow,
+    JournalEntryRow,
+    LearnerAbilityRow,
     LearnerProfileRow,
     LearnerRow,
     LessonContentRow,
     LessonRow,
     PracticeDeliveryRow,
+    QuestionStatRow,
     QuizAnswerRow,
     QuizPollRow,
     ReviewLogRow,
+    TopicMarkRow,
     TranslationAnswerRow,
 )
 from english_agent.versions import SCHEMA_VERSIONS
+
+log = logging.getLogger(__name__)
 
 
 class LessonAlreadySentError(Exception):
@@ -99,6 +147,10 @@ class LearnerStore(Protocol):
     async def set_paused(self, telegram_chat_id: str, paused: bool) -> LearnerRecord | None: ...
 
     async def deactivate(self, telegram_chat_id: str, reason: str) -> None: ...
+
+    async def set_goal(self, telegram_chat_id: str, goal: LearnerGoal) -> LearnerRecord | None: ...
+
+    async def set_interests(self, telegram_chat_id: str, interests: list[str]) -> LearnerRecord | None: ...
 
 
 class LessonStore(Protocol):
@@ -185,6 +237,10 @@ class LessonContentStore(Protocol):
         self, cefr: Cefr, curriculum_version: int, content_key: str, *, max_attempts: int
     ) -> set[str]: ...
 
+    async def ready_topics(self, cefr: Cefr, curriculum_version: int, content_key: str) -> set[str]: ...
+
+    async def ready_contents(self, content_key: str) -> list[LessonContentRecord]: ...
+
 
 class ItemStore(Protocol):
     async def get_by_key(self, key: str) -> ItemRecord | None: ...
@@ -248,6 +304,12 @@ class PracticeStore(Protocol):
 
     async def dispute(self, answer_id: int) -> bool: ...
 
+    async def for_arbitration(self, answer_id: int) -> GradingTask | None: ...
+
+    async def overturn(
+        self, answer_id: int, arbiter: TranslationGrade, sentences: list[int], now: datetime
+    ) -> list[int]: ...
+
 
 class CardStore(Protocol):
     async def get(self, learner_id: int, item_id: int) -> CardRecord | None: ...
@@ -281,6 +343,91 @@ class ProfileStore(Protocol):
     async def inputs(self, learner_id: int, now: datetime, *, window_days: int) -> ProfileInputs: ...
 
 
+class PlanStore(Protocol):
+    async def get(self, learner_id: int, day: date) -> DayPlanRecord | None: ...
+
+    async def start(self, learner_id: int, day: date) -> bool: ...
+
+    async def commit(
+        self, plan: DayPlan, *, trajectory: list[dict[str, Any]] | None = None, now: datetime
+    ) -> DayPlanRecord: ...
+
+
+class EvidenceStore(Protocol):
+    async def for_items(self, learner_id: int, item_ids: list[int], *, limit: int) -> list[EvidenceRecord]: ...
+
+    async def topic_answers(self, learner_id: int, topic_ids: list[str]) -> dict[str, tuple[int, int]]: ...
+
+    async def count_since(self, learner_id: int, kind: EvidenceKind, since: datetime) -> int: ...
+
+    async def question_keys(self, learner_id: int) -> set[str]: ...
+
+    async def record(
+        self,
+        learner_id: int,
+        kind: EvidenceKind,
+        *,
+        source_ref: str,
+        topic_id: str | None,
+        payload: dict[str, Any],
+        at: datetime,
+    ) -> None: ...
+
+
+class OrderStore(Protocol):
+    async def order(self, brief: ContentBrief, cefr: Cefr) -> ContentOrder: ...
+
+    async def by_topic(self, topic_id: str, cefr: Cefr) -> ContentOrder | None: ...
+
+    async def open_orders(self, limit: int) -> list[ContentOrder]: ...
+
+    async def finish(self, order_id: int, status: OrderStatus, content_id: int | None, now: datetime) -> None: ...
+
+
+class ExerciseStore(Protocol):
+    async def save(self, exercises: list[BankExercise], priors: dict[str, float]) -> None: ...
+
+    async def get(self, keys: list[str]) -> list[BankExercise]: ...
+
+
+class KnowledgeStore(Protocol):
+    async def known_topics(self, learner_id: int, now: datetime) -> set[str]: ...
+
+    async def questions(self, keys: list[str]) -> dict[str, QuestionStat]: ...
+
+    async def ability(self, learner_id: int) -> LearnerAbility | None: ...
+
+    async def mark_topics(
+        self, learner_id: int, topic_ids: list[str], mark: TopicMark, *, source_ref: str, at: datetime
+    ) -> None: ...
+
+
+class ExamStore(Protocol):
+    async def create(
+        self,
+        learner_id: int,
+        day: date,
+        topic_ids: list[str],
+        ability: float,
+        pool: list[PoolQuestion],
+        kind: ExamKind = "exam",
+    ) -> ExamRecord | None: ...
+
+    async def get(self, exam_id: int) -> ExamRecord | None: ...
+
+    async def add_poll(self, exam_id: int, telegram_poll_id: str, question_key: str) -> None: ...
+
+    async def has_open_poll(self, exam_id: int) -> bool: ...
+
+    async def record_answer(
+        self, telegram_poll_id: str, telegram_chat_id: str, option_ids: list[int]
+    ) -> int | None: ...
+
+    async def finish(self, exam_id: int, report: ExamReport, now: datetime) -> None: ...
+
+    async def last_exam_on(self, learner_id: int) -> date | None: ...
+
+
 @dataclass(frozen=True)
 class Stores:
     learners: LearnerStore
@@ -290,6 +437,12 @@ class Stores:
     cards: CardStore
     profiles: ProfileStore
     contents: LessonContentStore
+    plans: PlanStore
+    knowledge: KnowledgeStore
+    evidence: EvidenceStore
+    orders: OrderStore
+    exercises: ExerciseStore
+    exams: ExamStore
 
 
 def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = None) -> Stores:
@@ -302,6 +455,12 @@ def sql_stores(sessions: SessionFactory, scheduler: ReviewScheduler | None = Non
         cards=CardRepo(sessions, scheduler),
         profiles=ProfileRepo(sessions),
         contents=LessonContentRepo(sessions),
+        plans=PlanRepo(sessions),
+        knowledge=KnowledgeRepo(sessions, scheduler),
+        evidence=EvidenceRepo(sessions),
+        orders=ContentOrderRepo(sessions),
+        exercises=ExerciseRepo(sessions),
+        exams=ExamRepo(sessions),
     )
 
 
@@ -349,6 +508,13 @@ async def _review_card(
     # Checked under the card lock, so two threads with the same event cannot both apply it.
     if await session.scalar(select(ReviewLogRow.id).where(ReviewLogRow.source_ref == source_ref)) is not None:
         return card, False
+    # The card as it was before this rating: a later rollback (the Arbiter) restores it from here.
+    before = {
+        "fsrs_state": card.fsrs_state,
+        "due_at": card.due_at.isoformat(),
+        "last_reviewed_at": card.last_reviewed_at.isoformat() if card.last_reviewed_at else None,
+        "reviews": card.reviews,
+    }
     state, log = scheduler.review(card.fsrs_state, rating, at)
     card.fsrs_state, card.due_at = state, due_at(state)
     card.last_reviewed_at, card.reviews = at, card.reviews + 1
@@ -359,11 +525,201 @@ async def _review_card(
             reviewed_at=at,
             source=source,
             source_ref=source_ref,
-            payload={"fsrs": log, **(payload or {})},
+            payload={"fsrs": log, **(payload or {}), "before": before},
         )
     )
     await session.flush()
     return card, True
+
+
+async def _delivery_topic(session: AsyncSession, delivery_id: int) -> str | None:
+    """The topic of the lesson a practice block was sent for."""
+    return await session.scalar(
+        select(LessonRow.topic_id)
+        .join(PracticeDeliveryRow, PracticeDeliveryRow.lesson_id == LessonRow.id)
+        .where(PracticeDeliveryRow.id == delivery_id)
+    )
+
+
+async def _add_evidence(
+    session: AsyncSession,
+    *,
+    learner_id: int,
+    kind: EvidenceKind,
+    source_ref: str,
+    occurred_at: datetime,
+    lesson_topic_id: str | None,
+    item_id: int | None = None,
+    error_id: int | None = None,
+    payload: dict[str, Any] | None = None,
+    question_text: str | None = None,
+    question_kind: str | None = None,
+    correct: bool | None = None,
+) -> None:
+    """Record one event inside the caller's transaction; a replayed `source_ref` is a no-op.
+
+    The topic is the item's own (practice is cumulative: a sentence may come from an earlier topic),
+    else the lesson's. A graded answer to a bank question (`question_text`, `correct`) also moves the
+    learner's ability and the question's difficulty; the move is kept in the payload as `elo`.
+    """
+    item = await session.get(ItemRow, item_id) if item_id else None
+    topic_id = (item.topic_id if item is not None else None) or lesson_topic_id
+    values = dict(payload or {})
+    key = question_key(item.key, question_text) if item is not None and question_text else None
+    if key is not None:
+        values["question_key"] = key
+    evidence_id = await session.scalar(
+        insert(EvidenceRow)
+        .values(
+            learner_id=learner_id,
+            kind=kind,
+            source_ref=source_ref,
+            topic_id=topic_id,
+            item_id=item_id,
+            error_id=error_id,
+            payload=values,
+            occurred_at=occurred_at,
+        )
+        .on_conflict_do_nothing(index_elements=["source_ref"])
+        .returning(EvidenceRow.id)
+    )
+    if evidence_id is None or key is None or correct is None:
+        return
+    delta = await _apply_elo(session, learner_id, key, item_id, topic_id, question_kind or "quiz", correct)
+    await session.execute(
+        update(EvidenceRow).where(EvidenceRow.id == evidence_id).values(payload={**values, "elo": delta.model_dump()})
+    )
+
+
+async def _seed_critic_priors(session: AsyncSession, content: TopicContent) -> None:
+    """Start every quiz question of a new topic at the Critic's estimate; calibrated questions are kept."""
+    rows: list[dict[str, Any]] = []
+    for step in [*content.steps, *content.alternatives]:
+        review = step.review
+        if step.practice is None or review is None or len(review.quiz_difficulty) != len(step.practice.quiz):
+            continue
+        for question, rating in zip(step.practice.quiz, review.quiz_difficulty, strict=True):
+            prior = critic_difficulty(content.cefr, rating)
+            rows.append(
+                {
+                    "question_key": question_key(f"{step.topic_id}:{question.item_slug}", question.question),
+                    "topic_id": step.topic_id,
+                    "kind": "quiz",
+                    "difficulty": prior,
+                    "prior": prior,
+                    "prior_source": "critic",
+                    "updated_at": func.now(),
+                }
+            )
+    if rows:
+        statement = insert(QuestionStatRow).values(rows).on_conflict_do_nothing(index_elements=["question_key"])
+        await session.execute(statement)
+
+
+async def _revert_elo(session: AsyncSession, learner_id: int, payload: dict[str, Any]) -> None:
+    """Take one answer's Elo move back from the learner's ratings and the question's difficulty."""
+    delta = EloDelta.model_validate(payload["elo"])
+    moves = {"overall": delta.learner, **delta.tags}
+    for row in await session.scalars(
+        select(LearnerAbilityRow)
+        .where(LearnerAbilityRow.learner_id == learner_id, LearnerAbilityRow.scope.in_(list(moves)))
+        .with_for_update()
+    ):
+        row.rating -= moves[row.scope]
+        row.answers = max(0, row.answers - 1)
+    key = payload.get("question_key")
+    question = await session.get(QuestionStatRow, key, with_for_update=True) if key else None
+    if question is not None:
+        question.difficulty -= delta.question
+        question.answers = max(0, question.answers - 1)
+
+
+async def _rebuild_card(session: AsyncSession, scheduler: ReviewScheduler, source_ref: str, now: datetime) -> None:
+    """Rebuild a card as if the rating `source_ref` had not happened (the log stays, marked overturned)."""
+    log_row = await session.scalar(select(ReviewLogRow).where(ReviewLogRow.source_ref == source_ref))
+    if log_row is None:
+        return
+    before = (log_row.payload or {}).get("before")
+    log_row.payload = {**(log_row.payload or {}), "overturned_at": now.isoformat()}
+    if before is None:
+        log.warning("card %s rated before pre-rating states were logged: not rebuilt", log_row.card_id)
+        return
+    card = await session.get_one(CardRow, log_row.card_id, with_for_update=True)
+    state = before["fsrs_state"]
+    last = datetime.fromisoformat(before["last_reviewed_at"]) if before["last_reviewed_at"] else None
+    reviews, due = before["reviews"], datetime.fromisoformat(before["due_at"])
+    later = await session.scalars(
+        select(ReviewLogRow)
+        .where(
+            ReviewLogRow.card_id == card.id,
+            # Strictly after it: ratings of one answer share a time, and `before` already holds the earlier ones.
+            tuple_(ReviewLogRow.reviewed_at, ReviewLogRow.id) > tuple_(log_row.reviewed_at, log_row.id),
+        )
+        .order_by(ReviewLogRow.reviewed_at, ReviewLogRow.id)
+    )
+    for later_log in later:
+        if (later_log.payload or {}).get("overturned_at"):
+            continue
+        state, _ = scheduler.review(state, later_log.rating, later_log.reviewed_at)
+        last, reviews, due = later_log.reviewed_at, reviews + 1, due_at(state)
+    card.fsrs_state, card.due_at, card.last_reviewed_at, card.reviews = state, due, last, reviews
+
+
+async def _apply_elo(
+    session: AsyncSession,
+    learner_id: int,
+    key: str,
+    item_id: int | None,
+    topic_id: str | None,
+    kind: str,
+    correct: bool,
+) -> EloDelta:
+    """Move the learner's ability (overall and per tag) and the question's difficulty for one answer."""
+    meta = topic_meta(topic_id)
+    cefr = narrow(Cefr, await session.scalar(select(LearnerRow.cefr).where(LearnerRow.id == learner_id)))
+    scopes = ["overall", *(meta.tags if meta is not None else ())]
+    starts = [{"learner_id": learner_id, "scope": scope, "rating": 0.0} for scope in scopes]
+    starts[0]["rating"] = start_ability(cefr)
+    await session.execute(
+        insert(LearnerAbilityRow)
+        .values([{**start, "updated_at": func.now()} for start in starts])
+        .on_conflict_do_nothing(index_elements=["learner_id", "scope"])
+    )
+    prior = start_difficulty(meta, kind)
+    await session.execute(
+        insert(QuestionStatRow)
+        .values(
+            question_key=key,
+            item_id=item_id,
+            topic_id=topic_id,
+            kind=kind,
+            difficulty=prior,
+            prior=prior,
+            prior_source="level",
+            updated_at=func.now(),
+        )
+        .on_conflict_do_nothing(index_elements=["question_key"])
+    )
+    abilities = {
+        row.scope: row
+        for row in await session.scalars(
+            select(LearnerAbilityRow)
+            .where(LearnerAbilityRow.learner_id == learner_id, LearnerAbilityRow.scope.in_(scopes))
+            .with_for_update()
+        )
+    }
+    question = await session.get_one(QuestionStatRow, key, with_for_update=True)
+    overall = abilities["overall"]
+    tags = {scope: abilities[scope].rating for scope in scopes[1:]}
+    delta = elo_step(overall.rating, tags, question.difficulty, question.answers, correct)
+    overall.rating += delta.learner
+    for scope, move in delta.tags.items():
+        abilities[scope].rating += move
+    for row in abilities.values():
+        row.answers += 1
+    question.difficulty += delta.question
+    question.answers += 1
+    return delta
 
 
 async def _core_item(session: AsyncSession, topic_id: str) -> ItemRow | None:
@@ -538,6 +894,13 @@ class LearnerRepo:
         """Stop all sending to the chat (the bot was blocked, the course is over) until /start."""
         await self._change(telegram_chat_id, is_active=False, deactivated_reason=reason)
 
+    async def set_goal(self, telegram_chat_id: str, goal: LearnerGoal) -> LearnerRecord | None:
+        return await self._change(telegram_chat_id, goal=goal)
+
+    async def set_interests(self, telegram_chat_id: str, interests: list[str]) -> LearnerRecord | None:
+        """Replace the learner's interests (already parsed: see `bot.handlers.parse_interests`)."""
+        return await self._change(telegram_chat_id, interests=interests)
+
 
 class LessonRepo:
     def __init__(self, sessions: SessionFactory) -> None:
@@ -617,7 +980,7 @@ class LessonRepo:
                     tuple_(LessonRow.learner_id, LessonRow.lesson_date).in_(keys)
                 )
             )
-            return {(learner_id, day): status for learner_id, day, status in rows}
+            return {(learner_id, day): narrow(LessonStatus, status) for learner_id, day, status in rows}
 
     async def sent_topic_ids(self, learner_id: int, cefr: Cefr) -> set[str]:
         """Topics of this level the learner already got: the next lesson is the first topic not in here."""
@@ -696,7 +1059,11 @@ class LessonRepo:
             )
             return {
                 (learner_id, day): LessonState(
-                    lesson_id=lesson_id, status=status, attempts=attempts, claimed_at=claimed_at, sent_at=sent_at
+                    lesson_id=lesson_id,
+                    status=narrow(LessonStatus, status),
+                    attempts=attempts,
+                    claimed_at=claimed_at,
+                    sent_at=sent_at,
                 )
                 for learner_id, day, lesson_id, status, attempts, claimed_at, sent_at in rows
             }
@@ -819,7 +1186,7 @@ class LessonRepo:
                 .where(LessonRow.lesson_date < before, LessonRow.status.in_(("pending", "sending", "failed")))
                 .values(status="skipped", claimed_at=None, error=func.coalesce(LessonRow.error, "not sent that day"))
             )
-            return int(result.rowcount or 0)
+            return int(narrow(CursorResult[Any], result).rowcount or 0)
 
     async def _save(self, learner_id: int, day: date, **values: Any) -> LessonRecord:
         """Insert the day's row, or overwrite an earlier failed attempt; a sent lesson is final."""
@@ -924,6 +1291,8 @@ class LessonContentRepo:
         async with session_scope(self._sessions) as session:
             row = await session.get_one(LessonContentRow, content_id, with_for_update=True)
             row.status, row.payload, row.error = "ready", content.model_dump(mode="json"), None
+            if isinstance(content, TopicContent):
+                await _seed_critic_priors(session, content)
             row.run = run.model_dump(mode="json") if run is not None else None
             row.payload_kind = "topic" if is_topic else "lesson"
             row.schema_version = SCHEMA_VERSIONS["topic_content" if is_topic else "lesson"]
@@ -958,6 +1327,29 @@ class LessonContentRepo:
                     LessonContentRow.content_key == content_key,
                     LessonContentRow.status == "failed",
                     LessonContentRow.attempts >= max_attempts,
+                )
+            )
+            return set(rows)
+
+    async def ready_contents(self, content_key: str) -> list[LessonContentRecord]:
+        """Every written and checked topic of this recipe, all levels (the placement test's bank)."""
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(LessonContentRow)
+                .where(LessonContentRow.content_key == content_key, LessonContentRow.status == "ready")
+                .order_by(LessonContentRow.id)
+            )
+            return [LessonContentRecord.model_validate(row) for row in rows]
+
+    async def ready_topics(self, cefr: Cefr, curriculum_version: int, content_key: str) -> set[str]:
+        """Topics of this level and recipe whose content is written and checked."""
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(LessonContentRow.topic_id).where(
+                    LessonContentRow.cefr == cefr,
+                    LessonContentRow.curriculum_version == curriculum_version,
+                    LessonContentRow.content_key == content_key,
+                    LessonContentRow.status == "ready",
                 )
             )
             return set(rows)
@@ -1153,7 +1545,9 @@ class ProfileRepo:
             )
             errors = (
                 await session.scalars(
-                    select(ErrorRow).where(ErrorRow.learner_id == learner_id, ErrorRow.created_at >= since)
+                    select(ErrorRow).where(
+                        ErrorRow.learner_id == learner_id, ErrorRow.created_at >= since, ErrorRow.cancelled_at.is_(None)
+                    )
                 )
             ).all()
             item_ids = {error.item_id for error in errors if error.item_id is not None}
@@ -1182,7 +1576,7 @@ class ProfileRepo:
                 )
             ).one()
             return ProfileInputs(
-                cefr=learner.cefr,
+                cefr=narrow(Cefr, learner.cefr),
                 window_days=window_days,
                 lessons_sent=lessons_sent or 0,
                 errors=[ErrorRecord.model_validate(error) for error in errors],
@@ -1193,6 +1587,717 @@ class ProfileRepo:
                 cards=cards,
                 due_cards=due_cards,
             )
+
+
+GRADED_KINDS = ("quiz_answer", "translation_sentence", "exam_answer", "probe")
+
+
+class EvidenceRepo:
+    """The learner's events, and the check that an agent's citations point at real ones."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def since(self, learner_id: int, after: datetime, *, topic_id: str | None = None) -> list[EvidenceRecord]:
+        """The learner's evidence after `after` (cancelled included, flagged), oldest first; optionally one topic."""
+        statement = select(EvidenceRow).where(EvidenceRow.learner_id == learner_id, EvidenceRow.occurred_at > after)
+        if topic_id is not None:
+            statement = statement.where(EvidenceRow.topic_id == topic_id)
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(statement.order_by(EvidenceRow.occurred_at, EvidenceRow.id))
+            return [EvidenceRecord.model_validate(row) for row in rows]
+
+    async def for_items(self, learner_id: int, item_ids: list[int], *, limit: int) -> list[EvidenceRecord]:
+        """The learner's latest graded answers on these items (not cancelled), oldest first."""
+        if not item_ids:
+            return []
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(EvidenceRow)
+                .where(
+                    EvidenceRow.learner_id == learner_id,
+                    EvidenceRow.item_id.in_(item_ids),
+                    EvidenceRow.kind.in_(GRADED_KINDS),
+                    EvidenceRow.cancelled_at.is_(None),
+                )
+                .order_by(EvidenceRow.occurred_at.desc(), EvidenceRow.id.desc())
+                .limit(limit)
+            )
+            return sorted((EvidenceRecord.model_validate(row) for row in rows), key=lambda e: (e.occurred_at, e.id))
+
+    async def topic_answers(self, learner_id: int, topic_ids: list[str]) -> dict[str, tuple[int, int]]:
+        """Per topic: (graded answers, right ones), a left-out translation sentence not counted."""
+        if not topic_ids:
+            return {}
+        right = or_(
+            EvidenceRow.payload["is_correct"].as_boolean().is_(True),
+            EvidenceRow.payload["verdict"].as_string() == "correct",
+        )
+        statement = (
+            select(EvidenceRow.topic_id, func.count(), func.count().filter(right))
+            .where(
+                EvidenceRow.learner_id == learner_id,
+                EvidenceRow.topic_id.in_(topic_ids),
+                EvidenceRow.kind.in_(GRADED_KINDS),
+                EvidenceRow.cancelled_at.is_(None),
+                func.coalesce(EvidenceRow.payload["verdict"].as_string(), "") != "missing",
+            )
+            .group_by(EvidenceRow.topic_id)
+        )
+        async with session_scope(self._sessions) as session:
+            return {topic: (total, correct) for topic, total, correct in await session.execute(statement) if topic}
+
+    async def question_keys(self, learner_id: int) -> set[str]:
+        """Every bank question the learner has answered (an exam asks only unseen ones)."""
+        key = EvidenceRow.payload["question_key"].as_string()
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(select(key).where(EvidenceRow.learner_id == learner_id, key.is_not(None)))
+            return {row for row in rows if row}
+
+    async def count_since(self, learner_id: int, kind: EvidenceKind, since: datetime) -> int:
+        async with session_scope(self._sessions) as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(EvidenceRow)
+                .where(EvidenceRow.learner_id == learner_id, EvidenceRow.kind == kind, EvidenceRow.occurred_at >= since)
+            )
+            return int(count or 0)
+
+    async def record(
+        self,
+        learner_id: int,
+        kind: EvidenceKind,
+        *,
+        source_ref: str,
+        topic_id: str | None,
+        payload: dict[str, Any],
+        at: datetime,
+    ) -> None:
+        """An event that is not an answer (a tutor question, a missed day); a replayed source_ref is a no-op."""
+        async with session_scope(self._sessions) as session:
+            await _add_evidence(
+                session,
+                learner_id=learner_id,
+                kind=kind,
+                source_ref=source_ref,
+                occurred_at=at,
+                lesson_topic_id=topic_id,
+                payload=payload,
+            )
+
+    async def invalid_citations(
+        self, learner_id: int, evidence_ids: list[int], *, topic_id: str | None = None
+    ) -> list[int]:
+        """The cited ids that cannot back a decision, in citation order; empty when all of them can.
+
+        An id is invalid when no such row exists, it is another learner's, it was cancelled, or
+        (with `topic_id`) it is about another topic.
+        """
+        async with session_scope(self._sessions) as session:
+            return await _invalid_citations(session, learner_id, evidence_ids, topic_id=topic_id)
+
+
+class InvalidCitationsError(ValueError):
+    """A write cited evidence that cannot back it; `ids` are the offending ones."""
+
+    def __init__(self, ids: list[int]) -> None:
+        super().__init__(f"evidence ids that do not exist, are another learner's or were cancelled: {ids}")
+        self.ids = ids
+
+
+async def _invalid_citations(
+    session: AsyncSession, learner_id: int, evidence_ids: list[int], *, topic_id: str | None = None
+) -> list[int]:
+    if not evidence_ids:
+        return []
+    statement = select(EvidenceRow.id).where(
+        EvidenceRow.id.in_(evidence_ids),
+        EvidenceRow.learner_id == learner_id,
+        EvidenceRow.cancelled_at.is_(None),
+    )
+    if topic_id is not None:
+        statement = statement.where(EvidenceRow.topic_id == topic_id)
+    valid = set(await session.scalars(statement))
+    return [evidence_id for evidence_id in evidence_ids if evidence_id not in valid]
+
+
+async def _require_citations(session: AsyncSession, learner_id: int, evidence_ids: list[int]) -> None:
+    if not evidence_ids:
+        raise InvalidCitationsError([])
+    if invalid := await _invalid_citations(session, learner_id, evidence_ids):
+        raise InvalidCitationsError(invalid)
+
+
+class ContentOrderRepo:
+    """Remedial and contrast lessons on order: one per brief and level, whoever ordered it first."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def order(self, brief: ContentBrief, cefr: Cefr) -> ContentOrder:
+        """Order the brief's lesson; an order already there (any status) is returned as it is."""
+        statement = (
+            insert(ContentOrderRow)
+            .values(topic_id=brief.topic_id, cefr=cefr, brief=brief.model_dump(mode="json"), status="ordered")
+            .on_conflict_do_nothing(index_elements=["topic_id", "cefr"])
+        )
+        async with session_scope(self._sessions) as session:
+            await session.execute(statement)
+            row = await session.scalar(
+                select(ContentOrderRow).where(ContentOrderRow.topic_id == brief.topic_id, ContentOrderRow.cefr == cefr)
+            )
+            assert row is not None
+            return ContentOrder.model_validate(row)
+
+    async def by_topic(self, topic_id: str, cefr: Cefr) -> ContentOrder | None:
+        async with session_scope(self._sessions) as session:
+            row = await session.scalar(
+                select(ContentOrderRow).where(ContentOrderRow.topic_id == topic_id, ContentOrderRow.cefr == cefr)
+            )
+            return None if row is None else ContentOrder.model_validate(row)
+
+    async def open_orders(self, limit: int) -> list[ContentOrder]:
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(ContentOrderRow)
+                .where(ContentOrderRow.status == "ordered")
+                .order_by(ContentOrderRow.created_at)
+                .limit(limit)
+            )
+            return [ContentOrder.model_validate(row) for row in rows]
+
+    async def finish(self, order_id: int, status: OrderStatus, content_id: int | None, now: datetime) -> None:
+        async with session_scope(self._sessions) as session:
+            row = await session.get_one(ContentOrderRow, order_id)
+            row.status, row.content_id, row.finished_at = status, content_id, now
+
+
+class ExerciseRepo:
+    """Composed exercises; each starts at the Critic's difficulty estimate in `question_stats`."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def save(self, exercises: list[BankExercise], priors: dict[str, float]) -> None:
+        if not exercises:
+            return
+        rows = [{**e.model_dump(mode="json", exclude={"created_at"}), "created_at": e.created_at} for e in exercises]
+        stats = [
+            {
+                "question_key": e.question_key,
+                "item_id": e.item_id,
+                "topic_id": e.topic_id,
+                "kind": "quiz",
+                "difficulty": priors[e.question_key],
+                "prior": priors[e.question_key],
+                "prior_source": "critic",
+                "updated_at": func.now(),
+            }
+            for e in exercises
+            if e.question_key in priors
+        ]
+        async with session_scope(self._sessions) as session:
+            await session.execute(
+                insert(ExerciseRow).values(rows).on_conflict_do_nothing(index_elements=["question_key"])
+            )
+            if stats:
+                await session.execute(
+                    insert(QuestionStatRow).values(stats).on_conflict_do_nothing(index_elements=["question_key"])
+                )
+
+    async def get(self, keys: list[str]) -> list[BankExercise]:
+        """The exercises with these keys, in the order asked (unknown keys are left out)."""
+        if not keys:
+            return []
+        async with session_scope(self._sessions) as session:
+            rows = {
+                row.question_key: row
+                for row in await session.scalars(select(ExerciseRow).where(ExerciseRow.question_key.in_(keys)))
+            }
+            return [BankExercise.model_validate(rows[key]) for key in keys if key in rows]
+
+
+class ExamRepo:
+    """Exams as they run: one per learner and day; each answer is evidence and moves the ability."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def create(
+        self,
+        learner_id: int,
+        day: date,
+        topic_ids: list[str],
+        ability: float,
+        pool: list[PoolQuestion],
+        kind: ExamKind = "exam",
+    ) -> ExamRecord | None:
+        """Start the day's exam (or placement test); None when it was started already."""
+        statement = (
+            insert(ExamRow)
+            .values(
+                learner_id=learner_id,
+                plan_date=day,
+                kind=kind,
+                state="running",
+                topic_ids=topic_ids,
+                ability_start=ability,
+                ability=ability,
+                pool=[question.model_dump(mode="json") for question in pool],
+            )
+            .on_conflict_do_nothing(index_elements=["learner_id", "plan_date", "kind"])
+            .returning(ExamRow.id)
+        )
+        async with session_scope(self._sessions) as session:
+            exam_id = await session.scalar(statement)
+        return None if exam_id is None else await self.get(exam_id)
+
+    async def get(self, exam_id: int) -> ExamRecord | None:
+        async with session_scope(self._sessions) as session:
+            row = await session.get(ExamRow, exam_id)
+            return None if row is None else ExamRecord.model_validate(row)
+
+    async def add_poll(self, exam_id: int, telegram_poll_id: str, question_key: str) -> None:
+        async with session_scope(self._sessions) as session:
+            session.add(ExamPollRow(telegram_poll_id=telegram_poll_id, exam_id=exam_id, question_key=question_key))
+
+    async def has_open_poll(self, exam_id: int) -> bool:
+        async with session_scope(self._sessions) as session:
+            open_poll = await session.scalar(
+                select(ExamPollRow.telegram_poll_id).where(
+                    ExamPollRow.exam_id == exam_id, ExamPollRow.answered.is_(False)
+                )
+            )
+            return open_poll is not None
+
+    async def record_answer(self, telegram_poll_id: str, telegram_chat_id: str, option_ids: list[int]) -> int | None:
+        """Store one exam answer (evidence, Elo, the exam's estimate); the exam id, or None if not an open exam poll."""
+        now = datetime.now(UTC)
+        async with session_scope(self._sessions) as session:
+            poll = await session.get(ExamPollRow, telegram_poll_id, with_for_update=True)
+            if poll is None or poll.answered:
+                return None
+            exam = await session.get_one(ExamRow, poll.exam_id, with_for_update=True)
+            learner = await session.get(LearnerRow, exam.learner_id)
+            if exam.state != "running" or learner is None or learner.telegram_chat_id != telegram_chat_id:
+                return None
+            asked = next(PoolQuestion.model_validate(q) for q in exam.pool if q["question_key"] == poll.question_key)
+            correct = option_ids == [asked.question.correct_option]
+            poll.answered = True
+            exam.answers = [
+                *exam.answers,
+                {"question_key": asked.question_key, "topic_id": asked.topic_id, "correct": correct},
+            ]
+            await _add_evidence(
+                session,
+                learner_id=exam.learner_id,
+                kind="exam_answer",
+                source_ref=f"exam:{exam.id}:{asked.question_key}"[:64],
+                occurred_at=now,
+                lesson_topic_id=asked.topic_id,
+                item_id=asked.item_id,
+                payload={"exam_id": exam.id, "is_correct": correct},
+                question_text=asked.question.question,
+                question_kind="quiz",
+                correct=correct,
+            )
+            return exam.id
+
+    async def finish(self, exam_id: int, report: ExamReport, now: datetime) -> None:
+        async with session_scope(self._sessions) as session:
+            row = await session.get_one(ExamRow, exam_id, with_for_update=True)
+            row.state, row.report, row.finished_at = "finished", report.model_dump(mode="json"), now
+
+    async def last_exam_on(self, learner_id: int) -> date | None:
+        async with session_scope(self._sessions) as session:
+            return await session.scalar(
+                select(func.max(ExamRow.plan_date)).where(ExamRow.learner_id == learner_id, ExamRow.kind == "exam")
+            )
+
+
+class PlanRepo:
+    """Day plans: committed once per learner and day; committing again returns the plan already there."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def get(self, learner_id: int, day: date) -> DayPlanRecord | None:
+        async with session_scope(self._sessions) as session:
+            row = await session.scalar(
+                select(DayPlanRow).where(DayPlanRow.learner_id == learner_id, DayPlanRow.plan_date == day)
+            )
+            return None if row is None else DayPlanRecord.model_validate(row)
+
+    async def start(self, learner_id: int, day: date) -> bool:
+        """Claim the day for a Mentor session: False when a session ran or a plan exists already."""
+        statement = (
+            insert(DayPlanRow)
+            .values(learner_id=learner_id, plan_date=day, state="running")
+            .on_conflict_do_nothing(index_elements=["learner_id", "plan_date"])
+            .returning(DayPlanRow.id)
+        )
+        async with session_scope(self._sessions) as session:
+            return await session.scalar(statement) is not None
+
+    async def commit(
+        self, plan: DayPlan, *, trajectory: list[dict[str, Any]] | None = None, now: datetime
+    ) -> DayPlanRecord:
+        """Fix the plan for its day; a day already committed keeps its plan (a replayed commit is a no-op)."""
+        state = "committed" if plan.source == "agent" else "fallback"
+        values = {"state": state, "plan": plan.model_dump(mode="json"), "trajectory": trajectory, "committed_at": now}
+        statement = insert(DayPlanRow).values(learner_id=plan.learner_id, plan_date=plan.plan_date, **values)
+        statement = statement.on_conflict_do_update(
+            index_elements=["learner_id", "plan_date"],
+            set_=values,
+            where=DayPlanRow.state.in_(("pending", "running")),
+        )
+        async with session_scope(self._sessions) as session:
+            await session.execute(statement)
+            row = await session.scalar(
+                select(DayPlanRow).where(
+                    DayPlanRow.learner_id == plan.learner_id, DayPlanRow.plan_date == plan.plan_date
+                )
+            )
+            assert row is not None
+            return DayPlanRecord.model_validate(row)
+
+
+class KnowledgeRepo:
+    """Mastery estimates (written with each graded answer, `_add_evidence`), topic marks and statuses."""
+
+    def __init__(self, sessions: SessionFactory, scheduler: ReviewScheduler | None = None) -> None:
+        self._sessions = sessions
+        self._scheduler = scheduler or ReviewScheduler()
+
+    async def mark_topics(
+        self, learner_id: int, topic_ids: list[str], mark: TopicMark, *, source_ref: str, at: datetime
+    ) -> None:
+        """Credit topics (placement test) or confirm them (exam); marking again keeps the first time."""
+        if not topic_ids:
+            return
+        async with session_scope(self._sessions) as session:
+            await session.execute(
+                insert(TopicMarkRow)
+                .values(
+                    [
+                        {
+                            "learner_id": learner_id,
+                            "topic_id": topic,
+                            "mark": mark,
+                            "source_ref": source_ref,
+                            "marked_at": at,
+                        }
+                        for topic in topic_ids
+                    ]
+                )
+                .on_conflict_do_nothing(index_elements=["learner_id", "topic_id", "mark"])
+            )
+
+    async def topic_statuses(self, learner_id: int, now: datetime) -> dict[str, ElementStatus]:
+        """Every topic the learner has a signal on (a sent step, a card, a mark); the rest are not open.
+
+        An item's status comes from its card's recall, its mastery (mean P over its calibrated
+        questions) and the topic's marks; a topic is as known as its weakest item and, until all
+        its steps were sent, at most "learning".
+        """
+        async with session_scope(self._sessions) as session:
+            marks: dict[str, set[str]] = {}
+            for topic, mark in await session.execute(
+                select(TopicMarkRow.topic_id, TopicMarkRow.mark).where(TopicMarkRow.learner_id == learner_id)
+            ):
+                marks.setdefault(topic, set()).add(mark)
+            taught = {
+                topic: (sent, total)
+                for topic, sent, total in await session.execute(
+                    select(
+                        LessonRow.topic_id,
+                        func.count(func.distinct(LessonRow.step_index)),
+                        func.max(LessonRow.step_count),
+                    )
+                    .where(LessonRow.learner_id == learner_id, LessonRow.status == "sent", LessonRow.variant == "main")
+                    .group_by(LessonRow.topic_id)
+                )
+            }
+            cards = (
+                await session.execute(
+                    select(CardRow.item_id, ItemRow.topic_id, CardRow.fsrs_state, CardRow.reviews)
+                    .join(ItemRow, ItemRow.id == CardRow.item_id)
+                    .where(CardRow.learner_id == learner_id)
+                )
+            ).all()
+            item_ids = [item_id for item_id, *_ in cards]
+            difficulties: dict[int, list[float]] = {}
+            if item_ids:
+                for question_item, difficulty in await session.execute(
+                    select(QuestionStatRow.item_id, QuestionStatRow.difficulty).where(
+                        QuestionStatRow.item_id.in_(item_ids)
+                    )
+                ):
+                    if question_item is not None:
+                        difficulties.setdefault(question_item, []).append(difficulty)
+            abilities = {
+                row.scope: row.rating
+                for row in await session.scalars(
+                    select(LearnerAbilityRow).where(LearnerAbilityRow.learner_id == learner_id)
+                )
+            }
+
+        items: dict[str, list[ElementStatus]] = {}
+        for item_id, topic, state, reviews in cards:
+            mastery = None
+            if "overall" in abilities and difficulties.get(item_id):
+                meta = topic_meta(topic)
+                offsets = [abilities[tag] for tag in (meta.tags if meta is not None else ()) if tag in abilities]
+                chances = [probability(abilities["overall"], offsets, d) for d in difficulties[item_id]]
+                mastery = sum(chances) / len(chances)
+            items.setdefault(topic, []).append(
+                element_status(
+                    reviews=reviews,
+                    recall=self._scheduler.retrievability(state, now) if reviews else None,
+                    mastery=mastery,
+                    credited="credited" in marks.get(topic, set()),
+                    confirmed="confirmed" in marks.get(topic, set()),
+                )
+            )
+
+        statuses: dict[str, ElementStatus] = {}
+        for topic in set(marks) | set(taught) | set(items):
+            topic_marks = marks.get(topic, set())
+            if topic in items:
+                status = topic_status(items[topic])
+            elif topic_marks:
+                status = "confirmed" if "confirmed" in topic_marks else "credited"
+            else:
+                status = "learning"  # sent, not answered yet
+            sent, total = taught.get(topic, (0, 0))
+            if topic in taught and sent < total and not topic_marks and status in KNOWN:
+                status = "learning"
+            statuses[topic] = status
+        return statuses
+
+    async def known_topics(self, learner_id: int, now: datetime) -> set[str]:
+        """Topics that open what depends on them (credited, mastered, confirmed): the frontier's input."""
+        return {topic for topic, status in (await self.topic_statuses(learner_id, now)).items() if status in KNOWN}
+
+    async def ability(self, learner_id: int) -> LearnerAbility | None:
+        """None until the learner's first graded answer."""
+        async with session_scope(self._sessions) as session:
+            rows = (
+                await session.scalars(select(LearnerAbilityRow).where(LearnerAbilityRow.learner_id == learner_id))
+            ).all()
+        overall = next((row for row in rows if row.scope == "overall"), None)
+        if overall is None:
+            return None
+        tags = {row.scope: row.rating for row in rows if row.scope != "overall"}
+        return LearnerAbility(overall=overall.rating, tags=tags, answers=overall.answers)
+
+    async def questions(self, keys: list[str]) -> dict[str, QuestionStat]:
+        if not keys:
+            return {}
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(select(QuestionStatRow).where(QuestionStatRow.question_key.in_(keys)))
+            return {row.question_key: QuestionStat.model_validate(row) for row in rows}
+
+    async def item_questions(self, item_ids: list[int]) -> list[QuestionStat]:
+        """Every calibrated question of these items (for the item's mastery)."""
+        if not item_ids:
+            return []
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(QuestionStatRow)
+                .where(QuestionStatRow.item_id.in_(item_ids))
+                .order_by(QuestionStatRow.question_key)
+            )
+            return [QuestionStat.model_validate(row) for row in rows]
+
+
+class MentorMemoryRepo:
+    """The Mentor's journal, hypotheses and dossier; outcomes and statuses are written by code only."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    # -- journal -------------------------------------------------------------------
+
+    async def add_entry(
+        self,
+        learner_id: int,
+        *,
+        decision: str,
+        reason: str,
+        evidence_ids: list[int],
+        expectation: Expectation | None = None,
+    ) -> JournalEntry:
+        """Append a decision; raises `InvalidCitationsError` unless every cited id can back it."""
+        async with session_scope(self._sessions) as session:
+            await _require_citations(session, learner_id, evidence_ids)
+            row = JournalEntryRow(
+                learner_id=learner_id,
+                decision=decision,
+                reason=reason,
+                evidence_ids=evidence_ids,
+                expectation=expectation.model_dump(mode="json") if expectation is not None else None,
+                due_on=expectation.due_on if expectation is not None else None,
+            )
+            session.add(row)
+            await session.flush()
+            return JournalEntry.model_validate(row)
+
+    async def entries(self, learner_id: int, *, after_id: int = 0, limit: int = 100) -> list[JournalEntry]:
+        """The learner's entries newer than `after_id`, oldest first (at most `limit`, the newest ones)."""
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(JournalEntryRow)
+                .where(JournalEntryRow.learner_id == learner_id, JournalEntryRow.id > after_id)
+                .order_by(JournalEntryRow.id.desc())
+                .limit(limit)
+            )
+            return sorted((JournalEntry.model_validate(row) for row in rows), key=lambda entry: entry.id)
+
+    async def check_due_expectations(self, today: date, now: datetime) -> int:
+        """Compute the outcome of every expectation due by `today` that has none yet; returns how many.
+
+        The window is from the entry to the end of `due_on` (UTC). A translation sentence the learner
+        left out is not an answer and does not count.
+        """
+        checked = 0
+        async with session_scope(self._sessions) as session:
+            due = await session.scalars(
+                select(JournalEntryRow)
+                .where(JournalEntryRow.outcome.is_(None), JournalEntryRow.due_on <= today)
+                .with_for_update(skip_locked=True)
+            )
+            for row in due:
+                assert row.expectation is not None
+                expectation = Expectation.model_validate(row.expectation)
+                until = datetime.combine(expectation.due_on + timedelta(days=1), datetime.min.time(), UTC)
+                observations = await _observations(session, row.learner_id, expectation, row.created_at, until)
+                row.outcome, row.checked_at = evaluate_expectation(expectation, observations), now
+                checked += 1
+        return checked
+
+    # -- hypotheses ------------------------------------------------------------------
+
+    async def open_hypothesis(
+        self,
+        learner_id: int,
+        *,
+        statement_ru: str,
+        evidence_ids: list[int],
+        topic_id: str | None = None,
+        item_ids: list[int] | None = None,
+        now: datetime,
+    ) -> Hypothesis:
+        async with session_scope(self._sessions) as session:
+            await _require_citations(session, learner_id, evidence_ids)
+            row = HypothesisRow(
+                learner_id=learner_id,
+                statement_ru=statement_ru,
+                topic_id=topic_id,
+                item_ids=item_ids or [],
+                evidence_ids=evidence_ids,
+                status="open",
+                opened_at=now,
+                last_evidence_at=now,
+            )
+            session.add(row)
+            await session.flush()
+            return Hypothesis.model_validate(row)
+
+    async def move_hypothesis(
+        self, learner_id: int, hypothesis_id: int, status: HypothesisStatus, *, evidence_ids: list[int], now: datetime
+    ) -> Hypothesis:
+        """Move a hypothesis on the evidence that moved it; raises `ValueError` for a move the rules forbid."""
+        async with session_scope(self._sessions) as session:
+            row = await session.get(HypothesisRow, hypothesis_id, with_for_update=True)
+            if row is None or row.learner_id != learner_id:
+                raise ValueError(f"no hypothesis {hypothesis_id} for this learner")
+            current = narrow(HypothesisStatus, row.status)
+            if not can_move(current, status):
+                raise ValueError(f"a hypothesis cannot move from {current} to {status}")
+            await _require_citations(session, learner_id, evidence_ids)
+            row.status = status
+            row.evidence_ids = list(dict.fromkeys([*row.evidence_ids, *evidence_ids]))
+            row.last_evidence_at = now
+            if status in CLOSED_HYPOTHESES:
+                row.closed_at = now
+            await session.flush()
+            return Hypothesis.model_validate(row)
+
+    async def open_hypotheses(self, learner_id: int) -> list[Hypothesis]:
+        async with session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(HypothesisRow)
+                .where(HypothesisRow.learner_id == learner_id, HypothesisRow.status.in_(("open", "probing")))
+                .order_by(HypothesisRow.id)
+            )
+            return [Hypothesis.model_validate(row) for row in rows]
+
+    async def close_stale(self, now: datetime) -> int:
+        """Mark every hypothesis without new evidence for two weeks as stale; returns how many."""
+        async with session_scope(self._sessions) as session:
+            result = await session.execute(
+                update(HypothesisRow)
+                .where(
+                    HypothesisRow.status.in_(("open", "probing")),
+                    HypothesisRow.last_evidence_at <= now - STALE_AFTER,
+                )
+                .values(status="stale", closed_at=now)
+            )
+            return int(narrow(CursorResult[Any], result).rowcount or 0)
+
+    # -- dossier -------------------------------------------------------------------
+
+    async def latest_dossier(self, learner_id: int) -> Dossier | None:
+        async with session_scope(self._sessions) as session:
+            payload = await session.scalar(
+                select(DossierRow.payload)
+                .where(DossierRow.learner_id == learner_id)
+                .order_by(DossierRow.id.desc())
+                .limit(1)
+            )
+            return None if payload is None else Dossier.model_validate(payload)
+
+    async def save_dossier(self, dossier: Dossier) -> None:
+        async with session_scope(self._sessions) as session:
+            session.add(
+                DossierRow(
+                    learner_id=dossier.learner_id,
+                    until_entry_id=dossier.until_entry_id,
+                    payload=dossier.model_dump(mode="json"),
+                )
+            )
+
+
+async def _observations(
+    session: AsyncSession, learner_id: int, expectation: Expectation, since: datetime, until: datetime
+) -> list[Observation]:
+    """The learner's graded answers on the expectation's topic or item in [since, until)."""
+    statement = (
+        select(EvidenceRow.kind, EvidenceRow.payload, ErrorRow.error_type)
+        .outerjoin(ErrorRow, ErrorRow.id == EvidenceRow.error_id)
+        .where(
+            EvidenceRow.learner_id == learner_id,
+            EvidenceRow.kind.in_(("quiz_answer", "translation_sentence", "exam_answer", "probe")),
+            EvidenceRow.cancelled_at.is_(None),
+            EvidenceRow.occurred_at >= since,
+            EvidenceRow.occurred_at < until,
+        )
+    )
+    if expectation.item_id is not None:
+        statement = statement.where(EvidenceRow.item_id == expectation.item_id)
+    else:
+        statement = statement.where(EvidenceRow.topic_id == expectation.topic_id)
+    observations: list[Observation] = []
+    for kind, payload, error_type in await session.execute(statement):
+        if kind == "translation_sentence":
+            if payload.get("verdict") == "missing":
+                continue
+            correct = payload.get("verdict") == "correct"
+        else:
+            correct = bool(payload.get("is_correct"))
+        observations.append(Observation(correct=correct, error_type=error_type or payload.get("error_type")))
+    return observations
 
 
 class MaintenanceRepo:
@@ -1215,7 +2320,7 @@ class MaintenanceRepo:
             .values(item_id=ItemRow.id)
         )
         async with session_scope(self._sessions) as session:
-            return (await session.execute(statement)).rowcount
+            return int(narrow(CursorResult[Any], await session.execute(statement)).rowcount or 0)
 
     async def replay_reviews(self) -> int:
         """Rate every stored quiz answer and graded translation that has no review log yet, oldest first."""
@@ -1228,11 +2333,14 @@ class MaintenanceRepo:
                     .where(QuizPollRow.item_id.is_not(None))
                 )
             ).all()
-            for answer, item_id in answers:
-                rating = quiz_rating(answer.is_correct)
-                ref = f"quiz_answer:{answer.id}"
-                payload = {"poll_id": answer.poll_id}
-                events.append((answer.answered_at, answer.learner_id, item_id, rating, "quiz", ref, payload))
+            for quiz_answer, poll_item_id in answers:
+                assert poll_item_id is not None  # filtered by the query
+                rating = quiz_rating(quiz_answer.is_correct)
+                ref = f"quiz_answer:{quiz_answer.id}"
+                quiz_payload: dict[str, Any] = {"poll_id": quiz_answer.poll_id}
+                events.append(
+                    (quiz_answer.answered_at, quiz_answer.learner_id, poll_item_id, rating, "quiz", ref, quiz_payload)
+                )
             graded = (
                 await session.execute(
                     select(TranslationAnswerRow, LessonRow.topic_id)
@@ -1246,12 +2354,14 @@ class MaintenanceRepo:
                 if item is None or answer.graded_at is None:
                     continue
                 for sentence in TranslationGrade.model_validate(answer.grade).sentences:
-                    rating = translation_rating(sentence.verdict)
-                    if rating is None:
+                    sentence_rating = translation_rating(sentence.verdict)
+                    if sentence_rating is None:
                         continue
                     ref = f"translation_answer:{answer.id}:{sentence.n}"
-                    payload = {"verdict": sentence.verdict}
-                    events.append((answer.graded_at, answer.learner_id, item.id, rating, "translation", ref, payload))
+                    verdict: dict[str, Any] = {"verdict": sentence.verdict}
+                    events.append(
+                        (answer.graded_at, answer.learner_id, item.id, sentence_rating, "translation", ref, verdict)
+                    )
 
             applied = 0
             for at, learner_id, item_id, rating, source, source_ref, payload in sorted(events, key=lambda e: e[0]):
@@ -1361,18 +2471,33 @@ class PracticeRepo:
             ).scalar_one_or_none()
             if answer_id is None:
                 return None
+            error = None
             if not is_correct:
-                session.add(
-                    ErrorRow(
-                        learner_id=learner.id,
-                        item_id=poll.item_id,
-                        kind="quiz",
-                        original=", ".join(question.options[i] for i in option_ids if 0 <= i < len(question.options)),
-                        corrected=question.options[question.correct_option],
-                        error_type=question.kind,
-                        explanation_ru=question.explanation_ru,
-                    )
+                error = ErrorRow(
+                    learner_id=learner.id,
+                    item_id=poll.item_id,
+                    kind="quiz",
+                    original=", ".join(question.options[i] for i in option_ids if 0 <= i < len(question.options)),
+                    corrected=question.options[question.correct_option],
+                    error_type=question.kind,
+                    explanation_ru=question.explanation_ru,
                 )
+                session.add(error)
+                await session.flush()
+            await _add_evidence(
+                session,
+                learner_id=learner.id,
+                kind="quiz_answer",
+                source_ref=f"quiz_answer:{answer_id}",
+                occurred_at=now,
+                lesson_topic_id=await _delivery_topic(session, poll.delivery_id),
+                item_id=poll.item_id,
+                error_id=error.id if error is not None else None,
+                payload={"poll_id": poll.id, "is_correct": is_correct},
+                question_text=question.question,
+                question_kind="quiz",
+                correct=is_correct,
+            )
             if poll.item_id is not None:
                 await _review_card(
                     session,
@@ -1517,7 +2642,7 @@ class PracticeRepo:
             )
             kinds: dict[int, set[PracticeKind]] = {}
             for lesson_id, kind in rows:
-                kinds.setdefault(lesson_id, set()).add(kind)
+                kinds.setdefault(lesson_id, set()).add(narrow(PracticeKind, kind))
             return kinds
 
     async def asked(self, learner_id: int, since: datetime) -> AskedHistory:
@@ -1564,7 +2689,9 @@ class PracticeRepo:
         async with session_scope(self._sessions) as session:
             rows = await session.scalars(
                 select(ErrorRow)
-                .where(ErrorRow.learner_id == learner_id, ErrorRow.item_id.in_(item_ids))
+                .where(
+                    ErrorRow.learner_id == learner_id, ErrorRow.item_id.in_(item_ids), ErrorRow.cancelled_at.is_(None)
+                )
                 .order_by(ErrorRow.created_at)
             )
             return [ErrorRecord.model_validate(row) for row in rows]
@@ -1590,19 +2717,40 @@ class PracticeRepo:
                     return block.sentences[n - 1].item_id if 1 <= n <= len(block.sentences) else None
                 return core.id if core is not None else None
 
-            session.add_all(
-                ErrorRow(
+            def task_text(n: int) -> str | None:
+                """The sentence the learner translated (step days only: legacy blocks kept no tasks)."""
+                if block is not None and 1 <= n <= len(block.sentences):
+                    return block.sentences[n - 1].task.ru
+                return None
+
+            for sentence in grade.sentences:
+                error = None
+                if sentence.verdict == "fixed":
+                    error = ErrorRow(
+                        learner_id=row.learner_id,
+                        item_id=item_for(sentence.n),
+                        kind="text",
+                        original=sentence.learner_text,
+                        corrected=sentence.corrected,
+                        error_type=sentence.error_type,
+                        explanation_ru=sentence.explanation_ru,
+                    )
+                    session.add(error)
+                    await session.flush()
+                await _add_evidence(
+                    session,
                     learner_id=row.learner_id,
+                    kind="translation_sentence",
+                    source_ref=f"translation_answer:{row.id}:{sentence.n}",
+                    occurred_at=now,
+                    lesson_topic_id=lesson_row.topic_id,
                     item_id=item_for(sentence.n),
-                    kind="text",
-                    original=sentence.learner_text,
-                    corrected=sentence.corrected,
-                    error_type=sentence.error_type,
-                    explanation_ru=sentence.explanation_ru,
+                    error_id=error.id if error is not None else None,
+                    payload={"verdict": sentence.verdict, "error_type": sentence.error_type},
+                    question_text=task_text(sentence.n),
+                    question_kind="translation",
+                    correct=None if sentence.verdict == "missing" else sentence.verdict == "correct",
                 )
-                for sentence in grade.sentences
-                if sentence.verdict == "fixed"
-            )
             for sentence in grade.sentences:
                 rating = translation_rating(sentence.verdict)
                 item_id = item_for(sentence.n)
@@ -1634,4 +2782,52 @@ class PracticeRepo:
             if row is None or row.status != "graded":
                 return False
             row.disputed = True
+            await _add_evidence(
+                session,
+                learner_id=row.learner_id,
+                kind="dispute",
+                source_ref=f"dispute:translation_answer:{row.id}",
+                occurred_at=datetime.now(UTC),
+                lesson_topic_id=await _delivery_topic(session, row.delivery_id),
+                payload={"translation_answer_id": row.id},
+            )
             return True
+
+    async def for_arbitration(self, answer_id: int) -> GradingTask | None:
+        """The disputed answer's grading input, once: None if it is not disputed or the Arbiter has ruled."""
+        async with session_scope(self._sessions) as session:
+            row = await session.get(TranslationAnswerRow, answer_id)
+            if row is None or row.status != "graded" or not row.disputed or row.arbiter is not None:
+                return None
+        return await self.translation_for_grading(answer_id)
+
+    async def overturn(
+        self, answer_id: int, arbiter: TranslationGrade, sentences: list[int], now: datetime
+    ) -> list[int]:
+        """Record the Arbiter's grade and undo the overturned sentences; returns the ones undone.
+
+        In one transaction, per sentence: the error and the evidence are cancelled, the ability and the
+        question's difficulty lose that answer's Elo move, and the card is rebuilt from its state before
+        the rating with every later rating applied again. A card rated before the pre-rating state was
+        logged is left as it is (logged).
+        """
+        undone: list[int] = []
+        async with session_scope(self._sessions) as session:
+            row = await session.get_one(TranslationAnswerRow, answer_id, with_for_update=True)
+            if row.arbiter is not None:
+                return []  # one dispute per answer
+            row.arbiter = arbiter.model_dump(mode="json")
+            for n in sentences:
+                ref = f"translation_answer:{answer_id}:{n}"
+                evidence = await session.scalar(select(EvidenceRow).where(EvidenceRow.source_ref == ref))
+                if evidence is not None and evidence.cancelled_at is None:
+                    evidence.cancelled_at = now
+                    if evidence.error_id is not None:
+                        error = await session.get(ErrorRow, evidence.error_id)
+                        if error is not None:
+                            error.cancelled_at = now
+                    if "elo" in evidence.payload:
+                        await _revert_elo(session, evidence.learner_id, evidence.payload)
+                await _rebuild_card(session, self._scheduler, ref, now)
+                undone.append(n)
+        return undone

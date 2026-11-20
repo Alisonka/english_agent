@@ -33,21 +33,26 @@ from sqlalchemy.exc import SQLAlchemyError
 from english_agent.alerts import Alerter
 from english_agent.config import Settings, get_settings
 from english_agent.content import content_key, worker_id
+from english_agent.day_plan import fallback_plan
+from english_agent.examiner import start_exam
 from english_agent.items import step_item_from
 from english_agent.logs import bind, configure_logging
 from english_agent.metrics import LESSONS_FAILED, LESSONS_SENT
 from english_agent.models.cefr import CEFR_LEVELS, Cefr
-from english_agent.models.curriculum import Curriculum, CurriculumTopic, load_curriculum
+from english_agent.models.content_order import ContentBrief, brief_topic
+from english_agent.models.curriculum import Curriculum, CurriculumTopic, all_topics, load_curriculum
+from english_agent.models.plan import DayPlan, StepChoice
 from english_agent.models.schedule import local_now
 from english_agent.models.storage import ErrorRecord, ItemAccuracy, LearnerRecord, LessonContentRecord
 from english_agent.planning import lesson_due
 from english_agent.profile import current_reflection, weak_points_for_topic
-from english_agent.progression import NextStep, TopicProgress, is_done, next_step, reteach_candidate, topic_progress
+from english_agent.progression import NextStep, TopicProgress, is_done, reteach_candidate, topic_progress
 from english_agent.research.sitemaps import SitemapCache
 from english_agent.session_runner import run_topic_session
 from english_agent.storage.repositories import Stores, open_stores
 from english_agent.telegram.render import render_cheat_sheet, render_step
 from english_agent.telegram.sender import Sender, TelegramError, TelegramForbiddenError, make_bot
+from english_agent.topic_graph import default_graph
 from english_agent.tracing import configure_tracing, get_tracer
 
 COURSE_FINISHED = "Курс завершён: все темы пройдены."
@@ -146,6 +151,7 @@ async def ensure_content(
     curriculum_version: int,
     *,
     now: datetime | None = None,
+    steps: int | None = None,
 ) -> LessonContentRecord | None:
     """The shared lesson for the topic and level: reused if written, else written now by this caller.
 
@@ -178,12 +184,38 @@ async def ensure_content(
         curriculum_version=curriculum_version,
         client=runtime.client,
         sitemaps=runtime.sitemaps,
+        steps=steps,
     )
     log.info("topic %s (%s) run: %s", topic.id, cefr, session.report.summary())
     if session.content is None:
         reason = session.report.error or "the topic could not be written"
         return await stores.contents.fail(record.id, reason, run=session.report)
     return await stores.contents.finish(record.id, session.content, run=session.report)
+
+
+ORDERS_PER_RUN = 3  # ordered lessons written per run of the job (each one is a full content run)
+
+
+async def write_ordered_content(runtime: Runtime, now: datetime) -> int:
+    """Write the oldest ordered remedial and contrast lessons; returns how many became ready.
+
+    Shared like any topic: the content goes to `lesson_contents` under the brief's topic id. An order
+    fails only when every attempt failed; one being written elsewhere waits for the next run.
+    """
+    stores, settings = runtime.stores, runtime.settings
+    ready = 0
+    for order in await stores.orders.open_orders(ORDERS_PER_RUN):
+        topic = brief_topic(order.brief, all_topics())
+        version = load_curriculum(order.cefr).version
+        content = await ensure_content(runtime, topic, order.cefr, version, now=now, steps=order.brief.steps)
+        if content is None:
+            continue
+        if content.status == "ready":
+            await stores.orders.finish(order.id, "ready", content.id, now)
+            ready += 1
+        elif content.attempts >= settings.job_max_attempts:
+            await stores.orders.finish(order.id, "failed", content.id, now)
+    return ready
 
 
 async def run_lesson_for_learner(
@@ -213,6 +245,7 @@ async def run_lesson_for_learner(
         sent = await stores.lessons.sent_steps(learner.id, level)
         progress = topic_progress(sent)
         accuracy = await _step_accuracy(stores, learner.id, [step.item_key for step in sent])
+        brief: ContentBrief | None = None  # set when the day's step is an ordered remedial or contrast
         if topic_id:
             topic = next((item for item in curriculum.topics if item.id == topic_id), None)
             if topic is None:
@@ -220,17 +253,28 @@ async def run_lesson_for_learner(
                 return USAGE
             nxt = _next_in_topic(topic, progress.get(topic.id), accuracy)
         else:
-            skipped = await stores.contents.unavailable_topics(
-                level, curriculum.version, content_key(settings), max_attempts=settings.job_max_attempts
-            )
-            found = next_step(curriculum, progress, skipped, accuracy)
-            if found is None:
+            plan = await _day_plan(runtime, learner, level, curriculum, progress, accuracy, today, now)
+            if plan is None:
                 log.info("course finished at level %s", level)
                 if send:
                     await _finish_course(runtime, learner, level, progress)
                     await stores.learners.deactivate(chat_id, "course_finished")
                     await notify(sender, chat_id, COURSE_FINISHED)
                 return OK
+            span.set_attribute("plan.source", plan.source)
+            span.set_attribute("plan.day_type", plan.day_type)
+            if plan.day_type == "exam":
+                if send:
+                    await start_exam(stores, sender, learner, plan.exam_topic_ids, today)
+                return OK
+            choice, brief = await _executable_step(runtime, level, curriculum, plan)
+            if choice is None:
+                log.info("the plan for %s sends no step (%s)", today.isoformat(), plan.day_type)
+                return OK
+            found = _step_of(curriculum, choice, brief)
+            if found is None:
+                log.error("the plan names unknown topic %r", choice.topic_id)
+                return FAILED
             nxt, topic = found, found.topic
         span.set_attribute("topic.id", topic.id)
         span.set_attribute("step.index", nxt.index)
@@ -256,7 +300,8 @@ async def run_lesson_for_learner(
         if nxt.content_id is not None:
             content = await stores.contents.get(nxt.content_id)
         else:
-            content = await ensure_content(runtime, topic, level, curriculum.version, now=now)
+            steps = brief.steps if brief is not None else None
+            content = await ensure_content(runtime, topic, level, curriculum.version, now=now, steps=steps)
         if content is None:
             log.info("the topic %s is being written elsewhere; next tick", topic.id)
             await stores.lessons.release(row.id)
@@ -311,6 +356,91 @@ async def run_lesson_for_learner(
         except SQLAlchemyError as error:
             log.warning("could not record the item for %s: %s", step.item_key, error)
         return OK
+
+
+async def _day_plan(
+    runtime: Runtime,
+    learner: LearnerRecord,
+    level: Cefr,
+    curriculum: Curriculum,
+    progress: dict[str, TopicProgress],
+    accuracy: dict[str, ItemAccuracy],
+    today: date,
+    now: datetime,
+) -> DayPlan | None:
+    """The committed plan for the day; when there is none, the fallback policy's, committed now.
+
+    None means the level's course is finished. The morning never calls a model: a plan the Mentor
+    did not make is made by code.
+    """
+    record = await runtime.stores.plans.get(learner.id, today)
+    if record is not None and record.plan is not None:
+        return record.plan
+    plan = await build_fallback_plan(runtime, learner, level, curriculum, progress, accuracy, today, now)
+    if plan is None:
+        return None
+    return (await runtime.stores.plans.commit(plan, now=now)).plan
+
+
+async def fallback_for_day(runtime: Runtime, learner: LearnerRecord, day: date, now: datetime) -> DayPlan | None:
+    """The deterministic plan for `day` from the learner's current progress (not committed)."""
+    level = learner.cefr
+    curriculum = load_curriculum(level)
+    sent = await runtime.stores.lessons.sent_steps(learner.id, level)
+    progress = topic_progress(sent)
+    accuracy = await _step_accuracy(runtime.stores, learner.id, [step.item_key for step in sent])
+    return await build_fallback_plan(runtime, learner, level, curriculum, progress, accuracy, day, now)
+
+
+async def build_fallback_plan(
+    runtime: Runtime,
+    learner: LearnerRecord,
+    level: Cefr,
+    curriculum: Curriculum,
+    progress: dict[str, TopicProgress],
+    accuracy: dict[str, ItemAccuracy],
+    today: date,
+    now: datetime,
+) -> DayPlan | None:
+    stores, settings = runtime.stores, runtime.settings
+    skipped = await stores.contents.unavailable_topics(
+        level, curriculum.version, content_key(settings), max_attempts=settings.job_max_attempts
+    )
+    return fallback_plan(
+        learner_id=learner.id,
+        day=today,
+        cefr=level,
+        curriculum=curriculum,
+        graph=default_graph(),
+        progress=progress,
+        skipped=skipped,
+        accuracy=accuracy,
+        known=await stores.knowledge.known_topics(learner.id, now),
+        now=now,
+    )
+
+
+async def _executable_step(
+    runtime: Runtime, level: Cefr, curriculum: Curriculum, plan: DayPlan
+) -> tuple[StepChoice | None, ContentBrief | None]:
+    """The step the morning sends: the plan's, or its fallback branch's when ordered content is not ready."""
+    choice = plan.step
+    if choice is None or any(topic.id == choice.topic_id for topic in curriculum.topics):
+        return choice, None
+    order = await runtime.stores.orders.by_topic(choice.topic_id, level)
+    if order is not None and order.status == "ready":
+        return choice, order.brief
+    log.info("ordered content %s is not ready: the plan's fallback branch runs", choice.topic_id)
+    return (plan.fallback.step if plan.fallback is not None else None), None
+
+
+def _step_of(curriculum: Curriculum, choice: StepChoice, brief: ContentBrief | None = None) -> NextStep | None:
+    topic = next((item for item in curriculum.topics if item.id == choice.topic_id), None)
+    if topic is None and brief is not None:
+        topic = brief_topic(brief, all_topics())
+    if topic is None:
+        return None
+    return NextStep(topic, choice.step_index, choice.variant, choice.content_id, choice.leaving_topic_id)
 
 
 async def _step_accuracy(stores: Stores, learner_id: int, item_keys: list[str]) -> dict[str, ItemAccuracy]:

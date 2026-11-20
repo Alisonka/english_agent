@@ -1,10 +1,14 @@
+from functools import cache
 from pathlib import Path
+from typing import Annotated
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from english_agent.models.cefr import Cefr
 from english_agent.paths import curriculum_path
+
+TopicId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$")]
 
 
 class CurriculumTopic(BaseModel):
@@ -39,6 +43,17 @@ class Curriculum(BaseModel):
         return [topic.id for topic in sorted(self.topics, key=lambda item: item.order)]
 
 
+@cache
+def all_topics() -> dict[str, CurriculumTopic]:
+    """Every level's topics by id (ids are unique across levels: checked by the topic graph)."""
+    return {
+        topic.id: topic
+        for cefr in ("A2", "B1", "B2", "C1")
+        if curriculum_path(cefr).exists()
+        for topic in load_curriculum(cefr).topics
+    }
+
+
 def load_curriculum(cefr: Cefr = "A2", *, path: Path | None = None) -> Curriculum:
     target = path or curriculum_path(cefr)
     payload = yaml.safe_load(target.read_text(encoding="utf-8"))
@@ -46,3 +61,10 @@ def load_curriculum(cefr: Cefr = "A2", *, path: Path | None = None) -> Curriculu
     if path is None and curriculum.cefr != cefr:
         raise ValueError(f"{target.name} declares cefr {curriculum.cefr!r}, expected {cefr!r}")
     return curriculum
+
+
+class PrerequisiteFile(BaseModel):
+    """`curriculum/prerequisites.yaml`: topic -> the topics it requires, across all levels."""
+
+    version: int = Field(ge=1)
+    prerequisites: dict[TopicId, list[TopicId]]

@@ -40,24 +40,49 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "summary_review": 1,
     "content_run": 1,
     # Storage records (models/storage.py); the table shapes themselves are versioned by Alembic.
-    "learner_record": 2,  # v2: schedule (timezone, send times, quiz delay), started_on, is_active, paused_at
+    "learner_record": 3,  # v2: schedule (timezone, send times, quiz delay), started_on, is_active, paused_at;
+    # v3: goal, interests
     "learner_schedule": 1,
     "lesson_record": 4,  # v2: content_id; v3: status/claim/attempts; v4: step columns + payload_kind
     "lesson_content_record": 3,  # v2: payload_kind (lesson | topic); v3: run (the generation report)
     "item_record": 1,
-    "error_record": 1,
+    "error_record": 2,  # v2: cancelled_at (overturned by the Arbiter)
+    "evidence_record": 2,  # one learner event that agent decisions cite; v2: payload question_key and elo
+    # Mastery estimates (models/knowledge.py, english_agent/knowledge.py).
+    "learner_ability": 1,
+    "question_stat": 1,
+    # The day plan (models/plan.py) and its stored record.
+    "day_plan": 1,
+    # A remedial or contrast lesson the Mentor ordered (models/content_order.py).
+    "content_brief": 1,
+    "content_order": 1,
+    # Exercises composed to order (models/exercise.py).
+    "exercise_order": 1,
+    "bank_exercise": 1,
+    # Exams (models/exam.py): the record as it runs and the report.
+    "exam_record": 2,  # v2: kind (an exam, or the placement test)
+    "exam_report": 1,
+    "day_plan_record": 1,
+    "topic_mark": 1,  # storage/orm.py TopicMarkRow: a topic credited by placement or confirmed by an exam
+    # The Mentor's memory (models/mentor.py): journal with checkable expectations, hypotheses, dossier.
+    "journal_entry": 1,
+    "hypothesis": 1,
+    "dossier": 1,
     "card_record": 2,  # v2: last_reviewed_at, reviews
-    "review_log_record": 2,  # v2: source_ref
+    "review_log_record": 3,  # v2: source_ref; v3: payload.before (the card before the rating)
     "practice_delivery_record": 2,  # v2: payload (the day's assembled practice set)
     # The day's assembled quiz/translation set in that payload; v2: reason per item, provenance;
     # v3: profile_version and the "focus" reason.
-    "practice_block": 3,
+    # v4: the "probe" reason (a composed exercise the Mentor's plan asked for).
+    "practice_block": 4,
     "quiz_poll_record": 2,  # v2: item_id
-    "translation_answer_record": 2,  # v2: grading_attempts, grading_started_at
+    "translation_answer_record": 3,  # v2: grading_attempts, grading_started_at; v3: arbiter
     "translation_grade": 1,
-    "grading_input": 2,  # what the grader sees: the day's sentences, their context; v2: learner (Reflection)
-    "learner_profile": 2,  # v2: reflection (the Reflector's focus points and notes) replaces notes_ru
-    "reflection": 1,
+    # What the grader sees: the day's sentences, their context; v2: learner (Reflection); v3: reflection v2.
+    "grading_input": 3,
+    # v2: reflection (the focus points and notes) replaces notes_ru; v3: reflection v2.
+    "learner_profile": 3,
+    "reflection": 2,  # v2: focus points carry the Diagnostician's cause, probe_ru and intervention
 }
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
@@ -71,7 +96,13 @@ PROMPT_FILES: dict[str, Path] = {
     "write_summary_system": _PROMPTS_DIR / "write_summary_system.md",
     "review_step_system": _PROMPTS_DIR / "review_step_system.md",
     "review_summary_system": _PROMPTS_DIR / "review_summary_system.md",
-    "reflect_system": _PROMPTS_DIR / "reflect_system.md",
+    "diagnose_system": _PROMPTS_DIR / "diagnose_system.md",
+    "mentor_system": _PROMPTS_DIR / "mentor_system.md",
+    "compose_exercises_system": _PROMPTS_DIR / "compose_exercises_system.md",
+    "check_exercises_system": _PROMPTS_DIR / "check_exercises_system.md",
+    "tutor_system": _PROMPTS_DIR / "tutor_system.md",
+    "exam_report_system": _PROMPTS_DIR / "exam_report_system.md",
+    "dossier_system": _PROMPTS_DIR / "dossier_system.md",
 }
 
 

@@ -7,7 +7,7 @@ answers every quiz question on its own (`quiz_keys`, without seeing the writer's
 answer differs from the stored key, code adds a blocking `wrong_key` issue.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -49,6 +49,9 @@ class StepReview(BaseModel):
     issues: list[ReviewIssue] = Field(default_factory=list, max_length=MAX_REVIEW_ISSUES)
     # The Critic's own answer (0-based option index) to every quiz question, in order; [] for an alt step.
     quiz_keys: list[int] = Field(default_factory=list, max_length=MAX_REVIEW_ISSUES)
+    # How hard each quiz question is for a learner of the level, 1 (very easy) to 5 (very hard), in order;
+    # the starting difficulty of the question until learners' answers calibrate it. [] in older reviews.
+    quiz_difficulty: list[Annotated[int, Field(ge=1, le=5)]] = Field(default_factory=list, max_length=MAX_REVIEW_ISSUES)
     provenance: Provenance | None = None
 
     @model_validator(mode="after")

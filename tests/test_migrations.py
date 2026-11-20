@@ -19,6 +19,18 @@ TABLES = {
     "quiz_polls",
     "quiz_answers",
     "translation_answers",
+    "evidence",
+    "journal_entries",
+    "hypotheses",
+    "dossiers",
+    "learner_abilities",
+    "question_stats",
+    "topic_marks",
+    "day_plans",
+    "content_orders",
+    "exercise_bank",
+    "exams",
+    "exam_polls",
 }
 
 
@@ -58,7 +70,7 @@ def test_existing_learners_count_as_started_after_0004(database_url: str) -> Non
 
         run_alembic(engine, "upgrade", "0004")
         with engine.connect() as connection:
-            rows = dict(connection.execute(text("SELECT id, curriculum_started_on FROM learners")).tuples())
+            rows = dict(connection.execute(text("SELECT id, curriculum_started_on FROM learners")).tuples().all())
         assert rows == {with_lesson: date(2026, 10, 27), without: date(2026, 11, 3)}
 
 
@@ -85,7 +97,7 @@ def test_sent_lessons_become_legacy_content_in_0005(database_url: str) -> None:
             contents = connection.execute(
                 text("SELECT id, topic_id, content_key, status, payload FROM lesson_contents")
             ).all()
-            links = dict(connection.execute(text("SELECT status, content_id FROM lessons")).tuples())
+            links = dict(connection.execute(text("SELECT status, content_id FROM lessons")).tuples().all())
         [(content_id, topic_id, key, status, body)] = contents
         assert (topic_id, key, status, body) == ("there_is_are", "legacy", "ready", {"topic_id": "there_is_are"})
         assert links == {"sent": content_id, "failed": None}
@@ -155,3 +167,91 @@ def test_0007_backfills_legacy_rows_as_one_step_and_round_trips(database_url: st
             kinds = [row[0] for row in connection.execute(text("SELECT kind FROM practice_deliveries"))]
         assert kinds == []  # the summary delivery was removed
         assert "step_index" not in {column["name"] for column in inspect(engine).get_columns("lessons")}
+
+
+def test_0009_backfills_evidence_from_answers_grades_and_disputes(database_url: str) -> None:
+    grade = (
+        '{"sentences": [{"n": 1, "verdict": "correct", "error_type": null},'
+        ' {"n": 2, "verdict": "fixed", "error_type": "article"}]}'
+    )
+    with schema_engine(database_url) as engine:
+        run_alembic(engine, "upgrade", "0008")
+        with engine.begin() as connection:
+
+            def one(sql: str, **params: object) -> int:
+                return int(connection.execute(text(sql + " RETURNING id"), params).scalar_one())
+
+            learner = one("INSERT INTO learners (telegram_chat_id, cefr) VALUES ('1', 'A2')")
+            lesson = one(
+                "INSERT INTO lessons (learner_id, lesson_date, topic_id, cefr, schema_version, status)"
+                " VALUES (:learner, '2026-11-01', 'there_is_are', 'A2', 3, 'sent')",
+                learner=learner,
+            )
+            core = one(
+                "INSERT INTO items (key, topic_id, cefr, form, function_ru, explanation_ru)"
+                " VALUES ('there_is_are:core', 'there_is_are', 'A2', 'f', 'f', 'e')"
+            )
+            quiz = one(
+                "INSERT INTO practice_deliveries (lesson_id, kind, item_count, claimed_at)"
+                " VALUES (:lesson, 'quiz', 1, now())",
+                lesson=lesson,
+            )
+            poll = one(
+                "INSERT INTO quiz_polls"
+                " (delivery_id, position, telegram_poll_id, telegram_message_id, item_id, question)"
+                " VALUES (:quiz, 0, 'p0', 10, :core, '{}')",
+                quiz=quiz,
+                core=core,
+            )
+            answer = one(
+                "INSERT INTO quiz_answers (poll_id, learner_id, option_ids, is_correct)"
+                " VALUES (:poll, :learner, '[1]', false)",
+                poll=poll,
+                learner=learner,
+            )
+            # A legacy translation (no delivery payload): its sentences rate the topic's core item.
+            task = one(
+                "INSERT INTO practice_deliveries (lesson_id, kind, item_count, claimed_at)"
+                " VALUES (:lesson, 'translation', 2, now())",
+                lesson=lesson,
+            )
+            graded = one(
+                "INSERT INTO translation_answers (delivery_id, learner_id, answer_text, status, grade, disputed,"
+                " graded_at) VALUES (:task, :learner, 'x', 'graded', CAST(:grade AS jsonb), true, now())",
+                task=task,
+                learner=learner,
+                grade=grade,
+            )
+
+        run_alembic(engine, "upgrade", "0009")
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text("SELECT kind, source_ref, topic_id, item_id, payload FROM evidence ORDER BY source_ref")
+            ).all()
+        assert [tuple(row) for row in rows] == [
+            (
+                "dispute",
+                f"dispute:translation_answer:{graded}",
+                "there_is_are",
+                None,
+                {"translation_answer_id": graded},
+            ),
+            ("quiz_answer", f"quiz_answer:{answer}", "there_is_are", core, {"poll_id": poll, "is_correct": False}),
+            (
+                "translation_sentence",
+                f"translation_answer:{graded}:1",
+                "there_is_are",
+                core,
+                {"verdict": "correct", "error_type": None},
+            ),
+            (
+                "translation_sentence",
+                f"translation_answer:{graded}:2",
+                "there_is_are",
+                core,
+                {"verdict": "fixed", "error_type": "article"},
+            ),
+        ]
+
+        run_alembic(engine, "downgrade", "0008")
+        assert "evidence" not in inspect(engine).get_table_names()

@@ -7,7 +7,7 @@ each focus point tied to the errors it rests on. Consumers use it only while it 
 """
 
 from datetime import datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -49,6 +49,10 @@ class FocusPoint(BaseModel):
     contrast_ru: str = Field(min_length=10, max_length=160)  # one line that helps: the rule or the contrast
     error_type: str = Field(min_length=1, max_length=32)  # e.g. "article", "tense", "target_form"
     evidence_error_ids: Annotated[list[int], Field(min_length=1, max_length=5)]  # rows of `errors`
+    # The Diagnostician's hypothesis (None in reflections written before it).
+    cause: Literal["rule", "form", "l1_transfer", "other"] | None = None
+    probe_ru: str | None = Field(default=None, min_length=10, max_length=200)  # a question that tells it apart
+    intervention: Literal["remedial", "contrast", "reteach", "drill", "none"] | None = None
 
 
 class Reflection(BaseModel):

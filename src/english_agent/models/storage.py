@@ -29,6 +29,12 @@ PayloadKind = Literal["lesson", "step"]
 StepVariant = Literal["main", "alt"]
 
 
+# What the learner studies for (/goal); it steers which frontier topic comes first.
+LearnerGoal = Literal["work", "travel", "exam", "general"]
+MAX_INTERESTS = 5  # /interests: themes for personal exercises
+MAX_INTEREST_LENGTH = 30
+
+
 class LearnerRecord(BaseModel):
     """A learner and their schedule. Defaults mirror the column defaults of the `learners` table."""
 
@@ -47,6 +53,8 @@ class LearnerRecord(BaseModel):
     is_active: bool = True  # False once the learner blocked the bot or finished the course
     paused_at: datetime | None = None  # /pause: no lessons and no practice until /resume
     deactivated_reason: str | None = None  # "blocked" | "course_finished"
+    goal: LearnerGoal | None = None  # None until the learner picks one
+    interests: list[str] = Field(default_factory=list, max_length=MAX_INTERESTS)
 
     @property
     def schedule(self) -> LearnerSchedule:
@@ -215,6 +223,29 @@ class ErrorRecord(BaseModel):
     error_type: str | None
     explanation_ru: str | None
     created_at: datetime
+    cancelled_at: datetime | None = None  # overturned by the Arbiter
+
+
+EvidenceKind = Literal[
+    "quiz_answer", "translation_sentence", "exam_answer", "probe", "tutor_question", "missed_day", "dispute"
+]
+
+
+class EvidenceRecord(BaseModel):
+    """One learner event (a row of `evidence`); agent decisions cite these ids, and code checks them."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    learner_id: int
+    kind: EvidenceKind
+    source_ref: str
+    topic_id: str | None
+    item_id: int | None
+    error_id: int | None
+    payload: dict[str, Any]
+    occurred_at: datetime
+    cancelled_at: datetime | None
 
 
 class CardRecord(BaseModel):
@@ -263,8 +294,8 @@ class PracticeDeliveryRecord(BaseModel):
 PracticeSource = Literal["today", "previous", "review"]
 # Why the Planner chose an item: today's step, the topic's least-recalled earlier step, an item due
 # for review, one the learner keeps getting wrong, one missed in today's quiz, the least recalled,
-# or one of the Reflector's focus points (due or weak).
-PlanReason = Literal["today", "previous", "due", "weak", "wrong_today", "least_recalled", "focus"]
+# one of the Reflector's focus points (due or weak), or a probe the Mentor's plan asked for.
+PlanReason = Literal["today", "previous", "due", "weak", "wrong_today", "least_recalled", "focus", "probe"]
 
 
 class AssembledQuestion(BaseModel):
@@ -391,6 +422,7 @@ class TranslationAnswerRecord(BaseModel):
     graded_at: datetime | None
     grading_attempts: int = 0
     grading_started_at: datetime | None = None
+    arbiter: TranslationGrade | None = None  # the Arbiter's grade after a dispute
 
 
 class OpenTranslationTask(BaseModel):

@@ -13,6 +13,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -51,7 +52,10 @@ class Base(DeclarativeBase):
 
 class LearnerRow(Base):
     __tablename__ = "learners"
-    __table_args__ = (CheckConstraint("quiz_delay_minutes >= 0", name="quiz_delay_minutes"),)
+    __table_args__ = (
+        CheckConstraint("quiz_delay_minutes >= 0", name="quiz_delay_minutes"),
+        CheckConstraint("goal IN ('work', 'travel', 'exam', 'general')", name="goal"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_chat_id: Mapped[str] = mapped_column(String(64), unique=True)
@@ -69,6 +73,9 @@ class LearnerRow(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deactivated_reason: Mapped[str | None] = mapped_column(String(64))
+    # /goal and /interests: what the course leans towards and the themes of personal exercises.
+    goal: Mapped[str | None] = mapped_column(String(16))
+    interests: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
 
 
 class LessonRow(Base):
@@ -176,6 +183,7 @@ class ErrorRow(Base):
     error_type: Mapped[str | None] = mapped_column(String(64))
     explanation_ru: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _created_at()
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # overturned by the Arbiter
 
 
 class CardRow(Base):
@@ -293,3 +301,237 @@ class TranslationAnswerRow(Base):
     graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     grading_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     grading_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The Arbiter's independent grade after a dispute (`TranslationGrade`); NULL: not disputed or not yet.
+    arbiter: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+
+EVIDENCE_KINDS = (
+    "quiz_answer",
+    "translation_sentence",
+    "exam_answer",
+    "probe",
+    "tutor_question",
+    "missed_day",
+    "dispute",
+)
+
+
+class EvidenceRow(Base):
+    """One event that tells something about the learner; every agent decision cites these ids."""
+
+    __tablename__ = "evidence"
+    __table_args__ = (
+        CheckConstraint(f"kind IN ({', '.join(repr(kind) for kind in EVIDENCE_KINDS)})", name="kind"),
+        # Agents read "this learner's evidence since the last session", optionally for one topic.
+        Index("ix_evidence_learner_id_occurred_at", "learner_id", "occurred_at"),
+        Index("ix_evidence_learner_id_topic_id", "learner_id", "topic_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(32))
+    # The event it records ("quiz_answer:<id>", "translation_answer:<id>:<n>"): unique, so a replay is a no-op.
+    source_ref: Mapped[str] = mapped_column(String(64), unique=True)
+    topic_id: Mapped[str | None] = mapped_column(String(100))
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="SET NULL"))
+    error_id: Mapped[int | None] = mapped_column(ForeignKey("errors.id", ondelete="SET NULL"))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Set when the event no longer counts (an overturned grade); cancelled evidence cannot be cited.
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created_at()
+
+
+class JournalEntryRow(Base):
+    """The Mentor's journal (`models.mentor.JournalEntry`): append-only, outcomes filled in by code."""
+
+    __tablename__ = "journal_entries"
+    __table_args__ = (
+        CheckConstraint("outcome IN ('met', 'not_met', 'insufficient')", name="outcome"),
+        Index("ix_journal_entries_learner_id_created_at", "learner_id", "created_at"),
+        # The checker reads "expectations due and not checked yet".
+        Index(
+            "ix_journal_entries_unchecked", "due_on", postgresql_where=text("outcome IS NULL AND due_on IS NOT NULL")
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    decision: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    evidence_ids: Mapped[list[int]] = mapped_column(JSONB)
+    # `Expectation.model_dump(mode="json")`; NULL for a decision that expects nothing checkable.
+    expectation: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    due_on: Mapped[date | None] = mapped_column(Date)  # copied from the expectation, for the index
+    outcome: Mapped[str | None] = mapped_column(String(16))
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created_at()
+
+
+class HypothesisRow(Base):
+    __tablename__ = "hypotheses"
+    __table_args__ = (
+        CheckConstraint("status IN ('open', 'probing', 'confirmed', 'refuted', 'stale')", name="status"),
+        Index("ix_hypotheses_learner_id_status", "learner_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    statement_ru: Mapped[str] = mapped_column(Text)
+    topic_id: Mapped[str | None] = mapped_column(String(100))
+    item_ids: Mapped[list[int]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    evidence_ids: Mapped[list[int]] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(16))
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_evidence_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DossierRow(Base):
+    """Append-only versions of `models.mentor.Dossier`; the newest is the learner's dossier."""
+
+    __tablename__ = "dossiers"
+    __table_args__ = (Index("ix_dossiers_learner_id_created_at", "learner_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    until_entry_id: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class LearnerAbilityRow(Base):
+    """The learner's ability (`knowledge.py`): one overall rating and one offset per tag group."""
+
+    __tablename__ = "learner_abilities"
+
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(64), primary_key=True)  # "overall" or a topic tag
+    rating: Mapped[float] = mapped_column(Float)
+    answers: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class QuestionStatRow(Base):
+    """A shared bank question's difficulty, calibrated on every learner's answers."""
+
+    __tablename__ = "question_stats"
+    __table_args__ = (Index("ix_question_stats_item_id", "item_id"),)
+
+    question_key: Mapped[str] = mapped_column(String(240), primary_key=True)
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="SET NULL"))
+    topic_id: Mapped[str | None] = mapped_column(String(100))
+    kind: Mapped[str] = mapped_column(String(16))
+    difficulty: Mapped[float] = mapped_column(Float)
+    prior: Mapped[float] = mapped_column(Float)  # the starting estimate, before any answer
+    prior_source: Mapped[str] = mapped_column(String(16))  # "level" (topic level + kind) or "critic"
+    answers: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class TopicMarkRow(Base):
+    """A topic credited by the placement test or confirmed by an exam, for one learner."""
+
+    __tablename__ = "topic_marks"
+    __table_args__ = (CheckConstraint("mark IN ('credited', 'confirmed')", name="mark"),)
+
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"), primary_key=True)
+    topic_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    mark: Mapped[str] = mapped_column(String(16), primary_key=True)
+    source_ref: Mapped[str] = mapped_column(String(64))  # the test or exam that set it
+    marked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DayPlanRow(Base):
+    """One learner's plan for one day (`models.plan.DayPlan`); committed once, then only executed."""
+
+    __tablename__ = "day_plans"
+    __table_args__ = (
+        UniqueConstraint("learner_id", "plan_date"),
+        CheckConstraint("state IN ('pending', 'running', 'committed', 'fallback')", name="state"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    plan_date: Mapped[date] = mapped_column(Date)
+    state: Mapped[str] = mapped_column(String(16))
+    # `DayPlan.model_dump(mode="json")`; NULL while a Mentor session is still running.
+    plan: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # The Mentor's session trace: tool calls, results, policy refusals. NULL for a fallback plan.
+    trajectory: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = _created_at()
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ContentOrderRow(Base):
+    """A remedial or contrast lesson the Mentor ordered (`models.content_order`); shared per brief."""
+
+    __tablename__ = "content_orders"
+    __table_args__ = (
+        UniqueConstraint("topic_id", "cefr"),
+        CheckConstraint("status IN ('ordered', 'ready', 'failed')", name="status"),
+        Index("ix_content_orders_open", "created_at", postgresql_where=text("status = 'ordered'")),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    topic_id: Mapped[str] = mapped_column(String(100))  # the brief's synthetic topic id
+    cefr: Mapped[str] = mapped_column(String(2))
+    brief: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(16))
+    content_id: Mapped[int | None] = mapped_column(ForeignKey("lesson_contents.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = _created_at()
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ExerciseRow(Base):
+    """Composed exercises (`models.exercise`): shared ones form an item's growing bank."""
+
+    __tablename__ = "exercise_bank"
+    __table_args__ = (
+        CheckConstraint("kind IN ('probe', 'contrast_pair', 'drill')", name="kind"),
+        Index("ix_exercise_bank_item_id", "item_id"),
+    )
+
+    question_key: Mapped[str] = mapped_column(String(240), primary_key=True)
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="SET NULL"))
+    item_key: Mapped[str] = mapped_column(String(200))
+    topic_id: Mapped[str] = mapped_column(String(100))
+    kind: Mapped[str] = mapped_column(String(16))
+    question: Mapped[dict[str, Any]] = mapped_column(JSONB)  # `QuizQuestion.model_dump(mode="json")`
+    learner_id: Mapped[int | None] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = _created_at()
+
+
+class ExamRow(Base):
+    """One exam (`models.exam.ExamRecord`): its pool, answers and ability estimate as it runs."""
+
+    __tablename__ = "exams"
+    __table_args__ = (
+        UniqueConstraint("learner_id", "plan_date", "kind"),
+        CheckConstraint("state IN ('running', 'finished')", name="state"),
+        CheckConstraint("kind IN ('exam', 'placement')", name="kind"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"))
+    plan_date: Mapped[date] = mapped_column(Date)
+    kind: Mapped[str] = mapped_column(String(16), default="exam", server_default=text("'exam'"))
+    state: Mapped[str] = mapped_column(String(16))
+    topic_ids: Mapped[list[str]] = mapped_column(JSONB)
+    ability_start: Mapped[float] = mapped_column(Float)
+    ability: Mapped[float] = mapped_column(Float)
+    pool: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    answers: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    report: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    started_at: Mapped[datetime] = _created_at()
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ExamPollRow(Base):
+    __tablename__ = "exam_polls"
+
+    telegram_poll_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    exam_id: Mapped[int] = mapped_column(ForeignKey("exams.id", ondelete="CASCADE"), index=True)
+    question_key: Mapped[str] = mapped_column(String(240))
+    answered: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    created_at: Mapped[datetime] = _created_at()

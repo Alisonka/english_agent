@@ -15,29 +15,38 @@ from datetime import UTC, date, datetime, timedelta
 
 from taskiq import TaskiqDepends
 
+from english_agent.arbiter import arbitrate
 from english_agent.content import content_key
+from english_agent.examiner import continue_exam
 from english_agent.grading import give_up_grading, grade_answer, refresh_profile_safely
+from english_agent.interlocutor import make_tutor
 from english_agent.jobs.broker import broker
 from english_agent.jobs.dedup import (
+    arbiter_key,
     content_key_for,
     enqueue,
+    exam_key,
     grading_key,
     lesson_key,
+    mentor_key,
     practice_key,
     profile_key,
 )
 from english_agent.jobs.deps import WorkerDeps, worker_deps
 from english_agent.jobs.planner import plan_tick
+from english_agent.llm import AnthropicLLM
 from english_agent.logs import bind
+from english_agent.mentor import run_mentor_session
 from english_agent.models.cefr import Cefr
 from english_agent.models.curriculum import load_curriculum
-from english_agent.pipeline import ensure_content, next_topic, run_lesson_for_learner
+from english_agent.pipeline import ensure_content, next_topic, run_lesson_for_learner, write_ordered_content
 from english_agent.practice import deliver_practice_to
 
 log = logging.getLogger(__name__)
 
 # How long a de-duplication key outlives a worker that died holding it.
 LESSON_KEY_TTL = 30 * 60
+MENTOR_KEY_TTL = 15 * 60  # one session; its window is 10 minutes
 PRACTICE_KEY_TTL = 10 * 60
 GRADING_KEY_TTL = 10 * 60
 PROFILE_KEY_TTL = 5 * 60  # a refresh may include a Reflector call
@@ -70,6 +79,10 @@ async def schedule_tick(deps: WorkerDeps = TaskiqDepends(worker_deps)) -> None:
         sent += await enqueue(
             deps.dedup, practice_key(learner_id, day), PRACTICE_KEY_TTL, deliver_practice, learner_id, day.isoformat()
         )
+    for learner_id, day in plan.mentor:
+        sent += await enqueue(
+            deps.dedup, mentor_key(learner_id, day), MENTOR_KEY_TTL, plan_day, learner_id, day.isoformat()
+        )
     for answer_id in plan.gradings:
         sent += await enqueue(deps.dedup, grading_key(answer_id), GRADING_KEY_TTL, grade_translation, answer_id)
     for answer_id in plan.abandoned_gradings:
@@ -92,6 +105,45 @@ async def deliver_lesson(learner_id: int, day: str, deps: WorkerDeps = TaskiqDep
                 return await run_lesson_for_learner(deps.runtime, learner, lesson_day)
 
 
+@broker.task(task_name="plan_day")
+async def plan_day(learner_id: int, day: str, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> str:
+    """The Mentor's session for one learner's `day` (or the fallback plan when it cannot plan)."""
+    plan_for = date.fromisoformat(day)
+    async with _job(deps, mentor_key(learner_id, plan_for), learner_id=learner_id):
+        runtime = deps.runtime
+        learner = await runtime.stores.learners.get_by_id(learner_id)
+        if learner is None or not learner.receives_lessons or deps.mentor is None:
+            return "skipped"
+        settings = runtime.settings
+        llm = AnthropicLLM(settings, model=settings.mentor_model, effort=settings.mentor_effort, client=runtime.client)
+        diagnostician = (
+            AnthropicLLM(
+                settings, model=settings.reflector_model, effort=settings.reflector_effort, client=runtime.client
+            )
+            if settings.reflector_model
+            else None
+        )
+        composer = None
+        if settings.writer_model and settings.critic_model:
+            composer = (
+                AnthropicLLM(settings, model=settings.writer_model, client=runtime.client),
+                AnthropicLLM(
+                    settings, model=settings.critic_model, effort=settings.critic_effort, client=runtime.client
+                ),
+            )
+        with bind(chat_id=learner.telegram_chat_id):
+            return await run_mentor_session(
+                runtime,
+                deps.mentor,
+                learner,
+                plan_for,
+                datetime.now(UTC),
+                llm=llm,
+                diagnostician_llm=diagnostician,
+                composer_llms=composer,
+            )
+
+
 @broker.task(task_name="deliver_practice")
 async def deliver_practice(learner_id: int, day: str, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> str | None:
     lesson_day = date.fromisoformat(day)
@@ -111,6 +163,36 @@ async def grade_translation(answer_id: int, deps: WorkerDeps = TaskiqDepends(wor
         return await grade_answer(
             deps.runtime.stores, deps.runtime.sender, deps.grade, answer_id, retry_transient=True, reflect=deps.reflect
         )
+
+
+@broker.task(task_name="arbitrate_dispute", retry_on_error=True)
+async def arbitrate_dispute(answer_id: int, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> str:
+    async with _job(deps, arbiter_key(answer_id), answer_id=answer_id):
+        if deps.arbiter is None:
+            return "off"
+        return await arbitrate(deps.runtime.stores, deps.runtime.sender, deps.arbiter, answer_id)
+
+
+@broker.task(task_name="answer_tutor_question")
+async def answer_tutor_question(learner_id: int, text: str, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> None:
+    runtime = deps.runtime
+    tutor = make_tutor(runtime.settings, runtime.stores, runtime.sender, runtime.client)
+    if tutor is not None:
+        with bind(learner_id=learner_id):
+            await tutor(learner_id, text)
+
+
+@broker.task(task_name="continue_exam")
+async def continue_exam_job(exam_id: int, deps: WorkerDeps = TaskiqDepends(worker_deps)) -> str:
+    async with _job(deps, exam_key(exam_id), exam_id=exam_id):
+        runtime = deps.runtime
+        settings = runtime.settings
+        writer = (
+            AnthropicLLM(settings, model=settings.examiner_model, client=runtime.client)
+            if settings.examiner_model
+            else None
+        )
+        return await continue_exam(runtime.stores, runtime.sender, exam_id, writer)
 
 
 @broker.task(task_name="refresh_profile", retry_on_error=True)
@@ -142,6 +224,15 @@ async def prewarm_content(deps: WorkerDeps = TaskiqDepends(worker_deps)) -> int:
         )
     log.info("prewarm: %d topic(s) wanted, %d job(s) enqueued", len(wanted), queued)
     return queued
+
+
+@broker.task(task_name="write_ordered_content", schedule=[{"cron": "*/20 * * * *"}])
+async def write_ordered_content_job(deps: WorkerDeps = TaskiqDepends(worker_deps)) -> int:
+    """The remedial and contrast lessons the Mentor ordered: written in the background, ready by morning."""
+    if not await deps.dedup.claim("orders", CONTENT_KEY_TTL):
+        return 0
+    async with _job(deps, "orders"):
+        return await write_ordered_content(deps.runtime, datetime.now(UTC))
 
 
 @broker.task(task_name="generate_content", retry_on_error=True)

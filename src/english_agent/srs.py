@@ -9,12 +9,15 @@ review intervals. py-fsrs works in UTC only, hence the aware-datetime checks.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fsrs import Card, Rating, Scheduler
 
 from english_agent.config import Settings
 from english_agent.models.practice import TranslationVerdict
+
+if TYPE_CHECKING:
+    from fsrs.card import CardDict
 
 AGAIN, GOOD = int(Rating.Again), int(Rating.Good)
 
@@ -23,6 +26,11 @@ def utc(at: datetime) -> datetime:
     if at.tzinfo is None:
         raise ValueError("review time must be timezone-aware")
     return at.astimezone(UTC)
+
+
+def _card(state: dict[str, Any]) -> Card:
+    """A card from its stored JSON state (`Card.to_dict` output kept in JSONB)."""
+    return Card.from_dict(cast("CardDict", state))
 
 
 def quiz_rating(is_correct: bool) -> int:
@@ -52,16 +60,16 @@ class ReviewScheduler:
 
     def new_card(self, at: datetime) -> dict[str, Any]:
         """A card that is due right away."""
-        return Card(due=utc(at)).to_dict()
+        return cast(dict[str, Any], Card(due=utc(at)).to_dict())
 
     def review(self, state: dict[str, Any], rating: int, at: datetime) -> tuple[dict[str, Any], dict[str, Any]]:
         """Apply one rating; returns the new state and FSRS's own review log, both JSON-ready."""
-        card, log = self._scheduler.review_card(Card.from_dict(state), Rating(rating), review_datetime=utc(at))
-        return card.to_dict(), log.to_dict()
+        card, log = self._scheduler.review_card(_card(state), Rating(rating), review_datetime=utc(at))
+        return cast(dict[str, Any], card.to_dict()), cast(dict[str, Any], log.to_dict())
 
     def retrievability(self, state: dict[str, Any], at: datetime) -> float:
         """Probability (0..1) that the learner still recalls the item at `at`."""
-        return float(self._scheduler.get_card_retrievability(Card.from_dict(state), utc(at)))
+        return float(self._scheduler.get_card_retrievability(_card(state), utc(at)))
 
 
 def make_scheduler(settings: Settings) -> ReviewScheduler:

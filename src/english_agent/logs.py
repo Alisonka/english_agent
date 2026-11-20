@@ -105,7 +105,7 @@ class _StderrHandler(logging.StreamHandler[TextIO]):
     def __init__(self) -> None:
         super().__init__()
 
-    @property  # type: ignore[override]
+    @property
     def stream(self) -> TextIO:
         return sys.stderr
 

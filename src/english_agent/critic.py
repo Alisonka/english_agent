@@ -101,6 +101,8 @@ async def review_step(
     def problem(review: StepReview) -> str:
         if len(review.quiz_keys) != len(questions):
             return f"quiz_keys must hold exactly one answer per quiz question ({len(questions)}), in order"
+        if len(review.quiz_difficulty) != len(questions):
+            return f"quiz_difficulty must rate every quiz question ({len(questions)}), in order"
         return ""
 
     return await submit_model(

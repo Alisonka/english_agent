@@ -8,7 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from english_agent.items import core_item_from_lesson
+from english_agent.knowledge import question_key
+from english_agent.models.exam import PoolQuestion
 from english_agent.models.lesson import Lesson
+from english_agent.models.plan import DayPlan, StepChoice
 from english_agent.models.practice import TranslationGrade
 from english_agent.models.run import RunReport, StageReport
 from english_agent.models.schedule import LearnerSchedule
@@ -24,18 +27,21 @@ from english_agent.profile import build_profile
 from english_agent.srs import AGAIN, GOOD, ReviewScheduler
 from english_agent.storage import (
     CardRepo,
+    EvidenceRepo,
+    ExamRepo,
     ItemRepo,
     LearnerRepo,
     LessonAlreadySentError,
     LessonContentRepo,
     LessonRepo,
     MaintenanceRepo,
+    PlanRepo,
     PracticeRepo,
     ProfileRepo,
     SessionFactory,
     session_scope,
 )
-from english_agent.storage.orm import ErrorRow, LessonRow, QuizPollRow, ReviewLogRow
+from english_agent.storage.orm import ErrorRow, EvidenceRow, LessonRow, QuizPollRow, ReviewLogRow
 from english_agent.versions import SCHEMA_VERSIONS
 
 DAY = date(2026, 11, 3)
@@ -135,15 +141,19 @@ def _draft(lesson: Lesson, slug: str = "core") -> ItemDraft:
 async def test_item_get_or_create_keeps_the_first_version(sessions: SessionFactory, lesson: Lesson) -> None:
     items = ItemRepo(sessions)
     assert await items.get_by_key("there_is_are:core") is None
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    lessons = LessonRepo(sessions)
+    first = await lessons.record_sent(learner.id, DAY, lesson, [1], curriculum_version=1)
+    second = await lessons.record_sent(learner.id, DAY + timedelta(days=1), lesson, [2], curriculum_version=1)
 
-    created, was_created = await items.get_or_create(_draft(lesson), source_lesson_id=7)
+    created, was_created = await items.get_or_create(_draft(lesson), source_lesson_id=first.id)
     again, was_created_again = await items.get_or_create(
-        _draft(lesson).model_copy(update={"form": "changed"}), source_lesson_id=8
+        _draft(lesson).model_copy(update={"form": "changed"}), source_lesson_id=second.id
     )
 
     assert (was_created, was_created_again) == (True, False)
     assert again == created
-    assert (created.source_lesson_id, created.form, created.version) == (7, "There is + noun", 1)
+    assert (created.source_lesson_id, created.form, created.version) == (first.id, "There is + noun", 1)
     assert created.sources == lesson.sources
     assert await items.get_by_key("there_is_are:core") == created
 
@@ -190,6 +200,36 @@ async def test_review_is_applied_once_per_source_ref(sessions: SessionFactory, l
         logs = (await session.scalars(select(ReviewLogRow))).all()
         assert [(log.rating, log.source, log.source_ref) for log in logs] == [(GOOD, "quiz", "quiz_answer:1")]
         assert logs[0].payload is not None and logs[0].payload["fsrs"]["rating"] == GOOD
+
+
+async def test_review_log_keeps_the_card_before_the_rating(sessions: SessionFactory, lesson: Lesson) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    item_id = (await ItemRepo(sessions).get_or_create(_draft(lesson)))[0].id
+    cards = CardRepo(sessions, SCHEDULER)
+    now = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+
+    first = await cards.review(learner.id, item_id, GOOD, now, source="quiz", source_ref="quiz_answer:1")
+    await cards.review(learner.id, item_id, AGAIN, now + timedelta(days=2), source="quiz", source_ref="quiz_answer:2")
+
+    async with session_scope(sessions) as session:
+        logs = (await session.scalars(select(ReviewLogRow).order_by(ReviewLogRow.id))).all()
+    befores = [log.payload["before"] for log in logs if log.payload is not None]
+    # A new card: the fresh FSRS state (its card_id is random), due at the first rating, never reviewed.
+    fresh = SCHEDULER.new_card(now)
+    fresh["card_id"] = befores[0]["fsrs_state"]["card_id"]
+    assert befores[0] == {
+        "fsrs_state": fresh,
+        "due_at": now.isoformat(),
+        "last_reviewed_at": None,
+        "reviews": 0,
+    }
+    # The second rating saw the card exactly as the first one left it.
+    assert befores[1] == {
+        "fsrs_state": first.fsrs_state,
+        "due_at": first.due_at.isoformat(),
+        "last_reviewed_at": now.isoformat(),
+        "reviews": 1,
+    }
 
 
 # --- practice -------------------------------------------------------------------
@@ -352,6 +392,99 @@ async def test_translation_answer_lifecycle(sessions: SessionFactory, lesson: Le
         ]
     card = await CardRepo(sessions, SCHEDULER).get(learner.id, item_id)
     assert card is not None and card.reviews == 2
+
+    # Every sentence is evidence (missing ones too); the fixed one points at its error. The dispute is one more.
+    evidence = await EvidenceRepo(sessions).since(learner.id, datetime.min.replace(tzinfo=UTC))
+    assert [(e.kind, e.source_ref, e.topic_id, e.item_id, e.error_id, e.payload.get("verdict")) for e in evidence] == [
+        ("translation_sentence", f"translation_answer:{answer.id}:1", "there_is_are", item_id, None, "correct"),
+        ("translation_sentence", f"translation_answer:{answer.id}:2", "there_is_are", item_id, error.id, "fixed"),
+        ("translation_sentence", f"translation_answer:{answer.id}:3", "there_is_are", item_id, None, "missing"),
+        ("dispute", f"dispute:translation_answer:{answer.id}", "there_is_are", None, None, None),
+    ]
+    assert await practice.dispute(answer.id) is True  # a second press records nothing new
+    assert len(await EvidenceRepo(sessions).since(learner.id, datetime.min.replace(tzinfo=UTC))) == 4
+
+
+async def test_quiz_answers_are_evidence_once(sessions: SessionFactory, lesson: Lesson) -> None:
+    practice, _, item_id = await _quiz_setup(sessions, lesson)
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    await practice.record_poll_answer("p0", "42", [lesson.quiz[0].correct_option])
+    await practice.record_poll_answer("p1", "42", wrong_option(lesson, 1))
+    await practice.record_poll_answer("p1", "42", [lesson.quiz[1].correct_option])  # repeated: ignored
+
+    evidence = await EvidenceRepo(sessions).since(learner.id, datetime.min.replace(tzinfo=UTC))
+    async with session_scope(sessions) as session:
+        [error] = (await session.scalars(select(ErrorRow))).all()
+    assert [(e.kind, e.topic_id, e.item_id, e.error_id, e.payload["is_correct"]) for e in evidence] == [
+        ("quiz_answer", "there_is_are", item_id, None, True),
+        ("quiz_answer", "there_is_are", item_id, error.id, False),
+    ]
+    assert all(e.source_ref.startswith("quiz_answer:") for e in evidence)
+
+
+async def test_invalid_citations_name_every_id_that_cannot_back_a_decision(sessions: SessionFactory) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    other = await LearnerRepo(sessions).get_or_create("43", "A2")
+    at = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+    async with session_scope(sessions) as session:
+        rows = [
+            EvidenceRow(learner_id=learner.id, kind="probe", source_ref="r:ok", topic_id="articles", occurred_at=at),
+            EvidenceRow(learner_id=learner.id, kind="probe", source_ref="r:t", topic_id="tenses", occurred_at=at),
+            EvidenceRow(learner_id=other.id, kind="probe", source_ref="r:other", topic_id="articles", occurred_at=at),
+            EvidenceRow(
+                learner_id=learner.id,
+                kind="probe",
+                source_ref="r:gone",
+                topic_id="articles",
+                occurred_at=at,
+                cancelled_at=at,
+            ),
+        ]
+        session.add_all(rows)
+        await session.flush()
+        ok, other_topic, foreign, cancelled = (row.id for row in rows)
+    repo = EvidenceRepo(sessions)
+
+    assert await repo.invalid_citations(learner.id, []) == []
+    assert await repo.invalid_citations(learner.id, [ok, other_topic]) == []
+    assert await repo.invalid_citations(learner.id, [foreign, ok, cancelled, 99999]) == [foreign, cancelled, 99999]
+    assert await repo.invalid_citations(learner.id, [ok, other_topic], topic_id="articles") == [other_topic]
+    assert [e.id for e in await repo.since(learner.id, at - timedelta(seconds=1), topic_id="tenses")] == [other_topic]
+
+
+async def test_learner_goal_and_interests_are_saved(sessions: SessionFactory) -> None:
+    learners = LearnerRepo(sessions)
+    created = await learners.get_or_create("42", "A2")
+    assert (created.goal, created.interests) == (None, [])
+
+    await learners.set_goal("42", "exam")
+    updated = await learners.set_interests("42", ["футбол", "IT"])
+
+    assert updated is not None and (updated.goal, updated.interests) == ("exam", ["футбол", "IT"])
+    assert await learners.get("42") == updated
+    assert await learners.set_goal("missing", "work") is None
+
+
+async def test_a_day_plan_is_committed_once(sessions: SessionFactory) -> None:
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    plans = PlanRepo(sessions)
+    at = datetime(2026, 11, 2, 20, 0, tzinfo=UTC)
+    first = DayPlan(
+        learner_id=learner.id,
+        plan_date=DAY,
+        day_type="new_topic",
+        step=StepChoice(topic_id="there_is_are", step_index=1),
+        source="agent",
+        created_at=at,
+    )
+    again = first.model_copy(update={"day_type": "review_day", "step": None, "source": "fallback"})
+
+    committed = await plans.commit(first, trajectory=[{"tool": "snapshot"}], now=at)
+    replayed = await plans.commit(again, now=at)
+
+    assert committed.state == "committed" and committed.plan == first and committed.trajectory == [{"tool": "snapshot"}]
+    assert replayed == committed and await plans.get(learner.id, DAY) == committed
+    assert await plans.get(learner.id, DAY + timedelta(days=1)) is None
 
 
 async def test_new_learner_gets_the_given_schedule(sessions: SessionFactory) -> None:
@@ -717,3 +850,37 @@ async def test_content_get_and_claim_delivery_payload(sessions: SessionFactory, 
     practice = PracticeRepo(sessions, SCHEDULER)
     delivery = await practice.claim_delivery(lesson_row.id, "quiz", 4, payload={"source": "test"})
     assert delivery is not None and delivery.payload == {"source": "test"}
+
+
+async def test_an_exam_answer_is_evidence_and_moves_the_ability(sessions: SessionFactory, lesson: Lesson) -> None:
+    _, _, item_id = await _quiz_setup(sessions, lesson)
+    learner = await LearnerRepo(sessions).get_or_create("42", "A2")
+    question = lesson.quiz[0]
+    key = question_key("there_is_are:core", question.question)
+    pool = [
+        PoolQuestion(
+            question_key=key,
+            topic_id="there_is_are",
+            item_id=item_id,
+            item_key="there_is_are:core",
+            difficulty=-1.0,
+            question=question,
+        )
+    ]
+    exams = ExamRepo(sessions)
+    exam = await exams.create(learner.id, DAY, ["there_is_are"], 0.0, pool)
+    assert exam is not None and await exams.create(learner.id, DAY, ["there_is_are"], 0.0, pool) is None
+    await exams.add_poll(exam.id, "exam-poll-1", key)
+    assert await exams.has_open_poll(exam.id)
+
+    assert await exams.record_answer("exam-poll-1", "43", [question.correct_option]) is None  # another chat
+    assert await exams.record_answer("exam-poll-1", "42", [question.correct_option]) == exam.id
+    assert await exams.record_answer("exam-poll-1", "42", [question.correct_option]) is None  # answered once
+
+    stored = await exams.get(exam.id)
+    assert stored is not None and [(a.question_key, a.correct) for a in stored.answers] == [(key, True)]
+    assert not await exams.has_open_poll(exam.id)
+    [evidence] = await EvidenceRepo(sessions).since(learner.id, datetime.min.replace(tzinfo=UTC))
+    assert evidence.kind == "exam_answer" and evidence.payload["question_key"] == key and "elo" in evidence.payload
+    assert await EvidenceRepo(sessions).question_keys(learner.id) == {key}
+    assert await exams.last_exam_on(learner.id) == DAY

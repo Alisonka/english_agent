@@ -15,15 +15,18 @@ from conftest import topic_content_payload
 from english_agent import pipeline
 from english_agent.config import Settings
 from english_agent.content import content_key
+from english_agent.examiner import continue_exam
+from english_agent.models.content_order import ContentBrief
 from english_agent.models.curriculum import load_curriculum
 from english_agent.models.lesson import Lesson
+from english_agent.models.plan import DayPlan, FallbackBranch, StepChoice
 from english_agent.models.run import RunReport
 from english_agent.models.storage import LearnerRecord
 from english_agent.models.topic import TopicContent
 from english_agent.session_runner import TopicSession
 from english_agent.storage import Stores, open_stores
 from english_agent.telegram import Sender, make_bot
-from fakes import FakeLearners, FakeLessons, fake_contents, fake_items, fake_stores
+from fakes import FakeExams, FakeKnowledge, FakeLearners, FakeLessons, fake_contents, fake_items, fake_stores
 from telegram_fake import FakeTelegram, blocked_by, fake_sender
 
 
@@ -426,6 +429,51 @@ async def test_tick_sends_and_records_once_per_day(
     assert item is not None and item.source_lesson_id == record.id
 
 
+async def test_the_morning_commits_a_fallback_plan_and_executes_it(
+    run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+
+    await run_tick(stores, msk(9, 0))
+
+    record = await stores.plans.get(learner.id, START)
+    assert record is not None and record.state == "fallback" and record.plan is not None
+    assert record.plan.step is not None and record.plan.step.topic_id == generated[0]
+    assert record.plan.day_type == "new_topic" and len(sent) == 1
+
+
+async def test_a_committed_plan_is_what_the_morning_sends(
+    run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+    chosen = StepChoice(topic_id="there_is_are", step_index=1)
+    agent_plan = DayPlan(
+        learner_id=learner.id, plan_date=START, day_type="new_topic", step=chosen, source="agent", created_at=msk(8)
+    )
+    await stores.plans.commit(agent_plan, now=msk(8))
+
+    await run_tick(stores, msk(9, 0))
+
+    assert generated == ["there_is_are"] and len(sent) == 1
+    record = await stores.plans.get(learner.id, START)
+    assert record is not None and record.state == "committed"  # the morning did not replace it
+
+
+async def test_a_plan_without_a_step_sends_no_lesson(
+    run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+    review = DayPlan(learner_id=learner.id, plan_date=START, day_type="review_day", source="agent", created_at=msk(8))
+    await stores.plans.commit(review, now=msk(8))
+
+    await run_tick(stores, msk(9, 0))
+
+    assert generated == [] and sent == []
+
+
 async def test_tick_serves_every_learner_on_their_own_schedule(
     run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
 ) -> None:
@@ -685,3 +733,106 @@ async def test_a_worker_that_died_mid_send_is_taken_over_and_resumed(
     done = lessons.rows[(learner.id, START)]
     assert done.status == "sent" and done.telegram_message_ids == [77]
     assert sent == []  # the message had already arrived; it is not sent again
+
+
+# --- ordered content ---------------------------------------------------------------
+
+
+REMEDIAL = ContentBrief(
+    kind="remedial", topic_ids=["there_is_are"], error_type="form", focus_ru="Is или are после there."
+)
+
+
+async def test_ordered_lessons_are_written_once_and_the_morning_sends_them(
+    run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+    order = await stores.orders.order(REMEDIAL, "A2")
+    assert (await stores.orders.order(REMEDIAL, "A2")).id == order.id  # shared: one order per brief
+    runtime = pipeline.Runtime(tick_settings(), stores, fake_sender(FakeTelegram()))
+
+    assert await pipeline.write_ordered_content(runtime, msk(3)) == 1
+    assert await pipeline.write_ordered_content(runtime, msk(4)) == 0  # nothing left to write
+    assert generated == [REMEDIAL.topic_id]
+    ready = await stores.orders.by_topic(REMEDIAL.topic_id, "A2")
+    assert ready is not None and ready.status == "ready" and ready.content_id is not None
+
+    day = DayPlan(
+        learner_id=learner.id,
+        plan_date=START,
+        day_type="remedial",
+        step=StepChoice(topic_id=REMEDIAL.topic_id, step_index=1),
+        fallback=FallbackBranch(day_type="review_day"),
+        source="agent",
+        created_at=msk(8),
+    )
+    await stores.plans.commit(day, now=msk(8))
+    await run_tick(stores, msk(9, 0))
+    assert len(sent) == 1 and generated == [REMEDIAL.topic_id]  # sent from the written content
+
+
+async def test_ordered_content_not_ready_by_morning_runs_the_fallback_branch(
+    run_tick: Tick, generated: list[str], fake_telegram: None, sent: Sent
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+    await stores.orders.order(REMEDIAL, "A2")
+    day = DayPlan(
+        learner_id=learner.id,
+        plan_date=START,
+        day_type="remedial",
+        step=StepChoice(topic_id=REMEDIAL.topic_id, step_index=1),
+        fallback=FallbackBranch(day_type="review_day"),
+        source="agent",
+        created_at=msk(8),
+    )
+    await stores.plans.commit(day, now=msk(8))
+
+    await run_tick(stores, msk(9, 0))
+
+    assert generated == [] and sent == []  # a review day: no lesson, no content written in the morning
+
+
+# --- exams -------------------------------------------------------------------------
+
+
+async def test_an_exam_day_runs_adaptively_scores_by_code_and_confirms_mastered_topics(
+    run_tick: Tick, generated: list[str], fake_telegram: None, telegram: FakeTelegram
+) -> None:
+    stores, learners, _ = fake_stores()
+    learner = started(learners)
+    await run_tick(stores, msk(9, 0))  # the first step of the first topic: its bank is the exam's pool
+    topic = generated[0]
+    tomorrow = START + timedelta(days=1)
+    exam_day = DayPlan(
+        learner_id=learner.id,
+        plan_date=tomorrow,
+        day_type="exam",
+        exam_topic_ids=[topic],
+        source="agent",
+        created_at=msk(8),
+    )
+    await stores.plans.commit(exam_day, now=msk(8))
+
+    await run_tick(stores, msk(9, 0, tomorrow))
+
+    exams = stores.exams
+    assert isinstance(exams, FakeExams)
+    [exam] = exams.exams.values()
+    sender = fake_sender(telegram)
+    for _ in range(10):  # answer every question right until the exam ends
+        if exams.exams[exam.id].state == "finished":
+            break
+        poll_id, (_, key, _) = next((pid, poll) for pid, poll in exams.polls.items() if not poll[2])
+        right = next(q.question.correct_option for q in exam.pool if q.question_key == key)
+        assert await exams.record_answer(poll_id, "42", [right]) == exam.id
+        await continue_exam(stores, sender, exam.id, None)
+    finished = exams.exams[exam.id]
+    assert finished.state == "finished" and finished.report is not None
+    assert [r.verdict for r in finished.report.topics] == ["mastered"]
+    assert "Итоги экзамена" in telegram.texts[-1]
+    knowledge = stores.knowledge
+    assert isinstance(knowledge, FakeKnowledge) and knowledge.marks[learner.id] == {topic: "confirmed"}
+    keys = [a.question_key for a in finished.answers]
+    assert len(keys) == len(set(keys)) >= 2  # adaptive, never the same question twice
